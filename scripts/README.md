@@ -19,6 +19,7 @@
 | `migrate_email_role_unique.py` | Drops unique on `users.email` only; adds `UNIQUE (email, role)` |
 | `migrate_agreement_signature_dropbox.py` | `agreement_signatures.dropbox_sign_request_id` |
 | `migrate_audit_logs.py` | Creates `audit_logs` table |
+| `migrate_occupancy_status.py` | `properties.occupancy_status`; `stays.occupancy_confirmation_response`, `occupancy_confirmation_responded_at` |
 | `migrate_all_tables.py` | `create_all()` then adds any columns present in models but missing in existing tables |
 
 All of the above are already reflected in the current models; the scripts exist only to update databases that were created before those changes were added to the code.

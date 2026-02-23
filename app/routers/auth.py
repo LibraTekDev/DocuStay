@@ -13,7 +13,7 @@ from app.models.invitation import Invitation
 from app.models.stay import Stay
 from app.models.agreement_signature import AgreementSignature
 from app.models.guest_pending_invite import GuestPendingInvite
-from app.models.owner import Property
+from app.models.owner import Property, OccupancyStatus
 from app.models.owner_poa_signature import OwnerPOASignature
 from app.models.pending_registration import PendingRegistration
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_GUEST_SIGNATURE, CATEGORY_FAILED_ATTEMPT
@@ -52,7 +52,9 @@ def _user_to_response(user: User, db: Session) -> UserResponse:
     identity_verified = bool(getattr(user, "identity_verified_at", None))
     poa_linked = False
     if user.role == UserRole.owner:
-        poa_linked = db.query(OwnerPOASignature).filter(OwnerPOASignature.used_by_user_id == user.id).first() is not None
+        has_poa = db.query(OwnerPOASignature).filter(OwnerPOASignature.used_by_user_id == user.id).first() is not None
+        poa_waived = bool(getattr(user, "poa_waived_at", None))
+        poa_linked = has_poa or poa_waived
     return UserResponse(
         id=user.id,
         email=user.email,
@@ -400,10 +402,14 @@ def _complete_pending_guest(
         inv.status = "accepted"
         sig.used_by_user_id = user.id
         sig.used_at = datetime.now(timezone.utc)
-        # New occupancy: clear Shield Mode if it was left on by a previous stay's Dead Man's Switch
+        # New occupancy: set OCCUPIED, clear Shield Mode if it was left on by a previous stay's Dead Man's Switch
         _prop = db.query(Property).filter(Property.id == inv.property_id).first()
-        if _prop and getattr(_prop, "shield_mode_enabled", 0) == 1:
-            _prop.shield_mode_enabled = 0
+        occ_prev = None
+        if _prop:
+            occ_prev = getattr(_prop, "occupancy_status", None) or "unknown"
+            _prop.occupancy_status = OccupancyStatus.occupied.value
+            if getattr(_prop, "shield_mode_enabled", 0) == 1:
+                _prop.shield_mode_enabled = 0
             db.add(_prop)
         db.flush()
         ip = request.client.host if request.client else None
@@ -412,7 +418,7 @@ def _complete_pending_guest(
             db,
             CATEGORY_STATUS_CHANGE,
             "Invitation accepted (stay created)",
-            f"Guest registered and accepted invitation {code}; stay {stay.id} created for property {inv.property_id}.",
+            f"Guest registered and accepted invitation {code}; stay {stay.id} created for property {inv.property_id}. Occupancy status: {occ_prev or 'unknown'} -> occupied.",
             property_id=inv.property_id,
             stay_id=stay.id,
             invitation_id=inv.id,
@@ -420,7 +426,7 @@ def _complete_pending_guest(
             actor_email=user.email,
             ip_address=ip,
             user_agent=ua,
-            meta={"invitation_code": code, "signature_id": sig.id},
+            meta={"invitation_code": code, "signature_id": sig.id, "occupancy_status_previous": occ_prev or "unknown", "occupancy_status_new": "occupied"},
         )
         prop = db.query(Property).filter(Property.id == inv.property_id).first()
         property_name = (prop.name if prop else None) or (f"{prop.city}, {prop.state}".strip(", ") if prop and (prop.city or prop.state) else None) or "the property"
@@ -976,10 +982,14 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
         inv.status = "accepted"
         sig.used_by_user_id = user.id
         sig.used_at = datetime.now(timezone.utc)
-        # New occupancy: clear Shield Mode if it was left on by a previous stay's Dead Man's Switch
+        # New occupancy: set OCCUPIED, clear Shield Mode if it was left on by a previous stay's Dead Man's Switch
         _prop = db.query(Property).filter(Property.id == inv.property_id).first()
-        if _prop and getattr(_prop, "shield_mode_enabled", 0) == 1:
-            _prop.shield_mode_enabled = 0
+        occ_prev = None
+        if _prop:
+            occ_prev = getattr(_prop, "occupancy_status", None) or "unknown"
+            _prop.occupancy_status = OccupancyStatus.occupied.value
+            if getattr(_prop, "shield_mode_enabled", 0) == 1:
+                _prop.shield_mode_enabled = 0
             db.add(_prop)
         db.commit()
         db.refresh(stay)
@@ -989,7 +999,7 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             db,
             CATEGORY_STATUS_CHANGE,
             "Invitation accepted (stay created)",
-            f"Guest registered and accepted invitation {code}; stay {stay.id} created for property {inv.property_id}.",
+            f"Guest registered and accepted invitation {code}; stay {stay.id} created for property {inv.property_id}. Occupancy status: {occ_prev or 'unknown'} -> occupied.",
             property_id=inv.property_id,
             stay_id=stay.id,
             invitation_id=inv.id,
@@ -997,7 +1007,7 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             actor_email=user.email,
             ip_address=ip,
             user_agent=ua,
-            meta={"invitation_code": code, "signature_id": sig.id},
+            meta={"invitation_code": code, "signature_id": sig.id, "occupancy_status_previous": occ_prev or "unknown", "occupancy_status_new": "occupied"},
         )
         db.commit()
         prop = db.query(Property).filter(Property.id == inv.property_id).first()
@@ -1163,10 +1173,14 @@ def accept_invite(
     )
     db.add(stay)
     inv.status = "accepted"
-    # New occupancy: clear Shield Mode if it was left on by a previous stay's Dead Man's Switch
+    # New occupancy: set OCCUPIED, clear Shield Mode if it was left on by a previous stay's Dead Man's Switch
     _prop = db.query(Property).filter(Property.id == inv.property_id).first()
-    if _prop and getattr(_prop, "shield_mode_enabled", 0) == 1:
-        _prop.shield_mode_enabled = 0
+    occ_prev = None
+    if _prop:
+        occ_prev = getattr(_prop, "occupancy_status", None) or "unknown"
+        _prop.occupancy_status = OccupancyStatus.occupied.value
+        if getattr(_prop, "shield_mode_enabled", 0) == 1:
+            _prop.shield_mode_enabled = 0
         db.add(_prop)
     if sig.used_by_user_id is None:
         sig.used_by_user_id = current_user.id
@@ -1183,7 +1197,7 @@ def accept_invite(
         db,
         CATEGORY_STATUS_CHANGE,
         "Invitation accepted",
-        f"Existing guest accepted invitation {code}; stay {stay.id} created for property {inv.property_id}.",
+        f"Existing guest accepted invitation {code}; stay {stay.id} created for property {inv.property_id}. Occupancy status: {occ_prev or 'unknown'} -> occupied.",
         property_id=inv.property_id,
         stay_id=stay.id,
         invitation_id=inv.id,
@@ -1191,7 +1205,7 @@ def accept_invite(
         actor_email=current_user.email,
         ip_address=ip,
         user_agent=ua,
-        meta={"invitation_code": code, "signature_id": sig.id},
+        meta={"invitation_code": code, "signature_id": sig.id, "occupancy_status_previous": occ_prev or "unknown", "occupancy_status_new": "occupied"},
     )
     db.commit()
     prop = db.query(Property).filter(Property.id == inv.property_id).first()

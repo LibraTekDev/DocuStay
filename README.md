@@ -193,6 +193,45 @@ DocuStay keeps an **immutable audit trail** (Rule 803(6)): every status change, 
 
 ---
 
+## Property occupancy status state machine
+
+Every property has an `occupancy_status` that reflects the unit's current state. The dashboard displays one of four states at all times.
+
+### States
+
+| State | Description |
+|-------|-------------|
+| **VACANT** | Owner confirmed the unit is empty (e.g. guest checked out or owner confirmed "Unit Vacated"). |
+| **OCCUPIED** | Unit has an active guest stay, or owner confirmed "Lease Renewed" or "Holdover". |
+| **UNKNOWN** | Never set; new property or no stays/confirmations yet. |
+| **UNCONFIRMED** | The system asked for confirmation (Dead Man's Switch) and received **no response** by the deadline. Recorded silence is forensic evidence. |
+
+### Transitions
+
+| From | To | Condition |
+|------|-----|-----------|
+| (any) | **OCCUPIED** | Guest accepts an invitation and a stay is created. |
+| (any) | **OCCUPIED** | Owner explicitly confirms **Lease Renewed** (with new lease end date) or **Holdover**. |
+| OCCUPIED | **VACANT** | Guest checks out (ends stay), or owner confirms **Unit Vacated**. |
+| (any) | **UNCONFIRMED** | Dead Man's Switch: 48 hours **after** lease end date with no owner action. The system flips to UNCONFIRMED instead of leaving the old label. |
+| UNCONFIRMED | VACANT / OCCUPIED | **Only** when an authenticated owner explicitly confirms (Unit Vacated, Lease Renewed, or Holdover). No automatic reversion. |
+
+### Dead Man's Switch confirmation flow
+
+1. **48 hours before** lease end: First confirmation prompt (email to owner).  
+2. **Lease end date**: No automatic status change.  
+3. **48 hours after** lease end: If owner has not responded, status flips to **UNCONFIRMED** (logged; Shield Mode activated).  
+
+The owner must choose one of:
+
+- **Unit Vacated** → status becomes VACANT  
+- **Lease Renewed** → new lease end date required; status stays OCCUPIED  
+- **Holdover** → guest still in unit without formal renewal; status stays OCCUPIED  
+
+If no selection is made before the deadline, the system transitions to UNCONFIRMED. That transition is logged; verified identity, timestamp, and previous/new status are recorded for all explicit confirmations.
+
+---
+
 ## Module flow
 
 1. **Owner**: Register → verify (demo code `123456`) → add **properties** → create **invitations** (guest gets link).  

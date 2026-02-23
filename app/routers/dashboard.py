@@ -1,6 +1,7 @@
 """Module F: Legal restrictions & law display (Owner and Guest views)."""
-from datetime import date, datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta, time as dt_time
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User
@@ -8,16 +9,19 @@ from app.models.stay import Stay
 from app.models.invitation import Invitation
 from app.models.guest import GuestProfile
 from app.models.region_rule import RegionRule
-from app.models.owner import Property, OwnerProfile, USAT_TOKEN_STAGED, USAT_TOKEN_RELEASED
+from app.models.owner import Property, OwnerProfile, USAT_TOKEN_STAGED, USAT_TOKEN_RELEASED, OccupancyStatus
 from app.models.guest_pending_invite import GuestPendingInvite
+from app.models.agreement_signature import AgreementSignature
 from app.models.region_rule import StayClassification, RiskLevel
 from app.schemas.dashboard import OwnerStayView, OwnerInvitationView, GuestStayView, GuestPendingInviteView, OwnerAuditLogEntry
 from app.services.jle import resolve_jurisdiction
-from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_FAILED_ATTEMPT
-from app.services.notifications import send_vacate_12h_notice, send_owner_guest_checkout_email, send_owner_guest_cancelled_stay_email
+from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_DEAD_MANS_SWITCH, CATEGORY_FAILED_ATTEMPT
+from app.services.notifications import send_vacate_12h_notice, send_owner_guest_checkout_email, send_guest_checkout_confirmation_email, send_owner_guest_cancelled_stay_email, send_removal_notice_to_guest, send_removal_confirmation_to_owner
 from app.schemas.jle import JLEInput
 from app.dependencies import get_current_user, require_owner, require_owner_onboarding_complete, require_guest
 from app.models.audit_log import AuditLog
+from app.services.agreements import fill_guest_signature_in_content, agreement_content_to_pdf
+from app.services.dropbox_sign import get_signed_pdf
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -253,6 +257,33 @@ def owner_stays(
         risk = (jle.risk_level if jle else None) or (rule.risk_level if rule else None) or RiskLevel.low
         statutes = (jle.applicable_statutes if jle else []) or ([rule.statute_reference] if rule and rule.statute_reference else [])
 
+        # Status confirmation: 48h after lease end = deadline; if no response by then, status flips to UNCONFIRMED
+        checked_out = getattr(s, "checked_out_at", None) is not None
+        cancelled = getattr(s, "cancelled_at", None) is not None
+        conf_resp = getattr(s, "occupancy_confirmation_response", None)
+        dms_on = bool(getattr(s, "dead_mans_switch_enabled", 0))
+        confirmation_deadline_at = datetime.combine(
+            s.stay_end_date + timedelta(days=2), dt_time.min, tzinfo=timezone.utc
+        ) if s.stay_end_date else None
+        now = datetime.now(timezone.utc)
+        needs_conf = (
+            not checked_out and not cancelled
+            and dms_on
+            and conf_resp is None
+            and confirmation_deadline_at is not None
+            and now < confirmation_deadline_at
+            and s.stay_end_date <= (date.today() + timedelta(days=2))  # in prompt window (48h before or after)
+        )
+        # Also show confirm UI when property is UNCONFIRMED (past deadline) and this stay triggered it
+        prop_status = (getattr(prop, "occupancy_status", None) or "unknown") if prop else "unknown"
+        show_confirm_ui = needs_conf or (
+            prop_status == OccupancyStatus.unconfirmed.value
+            and not checked_out and not cancelled
+            and dms_on
+            and conf_resp is None
+            and s.stay_end_date < date.today()  # stay ended
+        )
+
         out.append(
             OwnerStayView(
                 stay_id=s.id,
@@ -270,7 +301,11 @@ def owner_stays(
                 checked_out_at=getattr(s, "checked_out_at", None),
                 cancelled_at=getattr(s, "cancelled_at", None),
                 usat_token_released_at=getattr(s, "usat_token_released_at", None),
-                dead_mans_switch_enabled=bool(getattr(s, "dead_mans_switch_enabled", 0)),
+                dead_mans_switch_enabled=dms_on,
+                needs_occupancy_confirmation=needs_conf,
+                show_occupancy_confirmation_ui=show_confirm_ui,
+                confirmation_deadline_at=confirmation_deadline_at if show_confirm_ui else None,
+                occupancy_confirmation_response=conf_resp,
             )
         )
     return out
@@ -320,6 +355,210 @@ def revoke_stay(
     return {"status": "success", "message": "Stay revoked. Guest must vacate within 12 hours. Email sent."}
 
 
+@router.post("/owner/stays/{stay_id}/initiate-removal")
+def initiate_removal(
+    request: Request,
+    stay_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Initiate formal removal for an overstayed guest: revoke USAT token, send emails to guest and owner, log action."""
+    stay = db.query(Stay).filter(Stay.id == stay_id, Stay.owner_id == current_user.id).first()
+    if not stay:
+        raise HTTPException(status_code=404, detail="Stay not found")
+
+    # Only allow initiate-removal for overstayed guests
+    today = date.today()
+    if stay.stay_end_date >= today:
+        raise HTTPException(status_code=400, detail="Guest is not in overstay. Initiate removal is only for overstayed guests.")
+    if getattr(stay, "checked_out_at", None):
+        raise HTTPException(status_code=400, detail="Guest has already checked out.")
+
+    prop = db.query(Property).filter(Property.id == stay.property_id).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+
+    now = datetime.now(timezone.utc)
+    ip = request.client.host if request.client else None
+    ua = (request.headers.get("user-agent") or "").strip() or None
+
+    # Revoke USAT token for this stay
+    usat_revoked = False
+    if stay.usat_token_released_at is not None:
+        stay.usat_token_released_at = None
+        usat_revoked = True
+
+    # Also revoke the property-level USAT token if it was released
+    if prop.usat_token_state == USAT_TOKEN_RELEASED:
+        prop.usat_token_state = USAT_TOKEN_STAGED
+        prop.usat_token_released_at = None
+        usat_revoked = True
+
+    # Mark stay as revoked if not already
+    already_revoked = stay.revoked_at is not None
+    if not already_revoked:
+        stay.revoked_at = now
+
+    # Update occupancy status to reflect overstay/removal
+    occ_prev = getattr(prop, "occupancy_status", None) or "unknown"
+
+    db.add(stay)
+    db.add(prop)
+    db.commit()
+
+    # Get guest and owner info for emails
+    guest = db.query(User).filter(User.id == stay.guest_id).first()
+    guest_email = (guest.email if guest else "").strip()
+    guest_name = (guest.full_name if guest else None) or guest_email or "Guest"
+    property_name = (prop.name if prop else None) or (f"{prop.city}, {prop.state}" if prop else None) or "the property"
+    owner_email = current_user.email
+
+    # Send emails
+    if guest_email:
+        send_removal_notice_to_guest(guest_email, guest_name, property_name, stay.region_code or "")
+    if owner_email:
+        send_removal_confirmation_to_owner(owner_email, guest_name, property_name, stay.region_code or "")
+
+    # Create audit log
+    create_log(
+        db,
+        CATEGORY_STATUS_CHANGE,
+        "Removal initiated",
+        f"Owner initiated formal removal for stay {stay.id} (guest: {guest_name}, property: {property_name}). USAT token revoked. Guest and owner notified.",
+        property_id=stay.property_id,
+        stay_id=stay.id,
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        ip_address=ip,
+        user_agent=ua,
+        meta={
+            "guest_name": guest_name,
+            "guest_email": guest_email,
+            "property_name": property_name,
+            "usat_revoked": usat_revoked,
+            "was_already_revoked": already_revoked,
+            "occupancy_status_previous": occ_prev,
+        },
+    )
+    db.commit()
+
+    return {
+        "status": "success",
+        "message": "Removal initiated. USAT token revoked. Guest and owner notified via email.",
+        "usat_revoked": usat_revoked,
+    }
+
+
+@router.post("/owner/stays/{stay_id}/confirm-occupancy")
+def confirm_occupancy_status(
+    request: Request,
+    stay_id: int,
+    action: str = Body(..., embed=True),  # vacated | renewed | holdover
+    new_lease_end_date: str | None = Body(None, embed=True),  # required when action=renewed
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Owner explicitly confirms unit status: Unit Vacated, Lease Renewed (requires new_lease_end_date), or Holdover.
+    Required when property is UNCONFIRMED or when stay is in confirmation window (48h before → 48h after lease end)."""
+    stay = db.query(Stay).filter(Stay.id == stay_id, Stay.owner_id == current_user.id).first()
+    if not stay:
+        raise HTTPException(status_code=404, detail="Stay not found")
+    action = (action or "").strip().lower()
+    if action not in ("vacated", "renewed", "holdover"):
+        raise HTTPException(status_code=400, detail="action must be vacated, renewed, or holdover")
+    if action == "renewed" and not new_lease_end_date:
+        raise HTTPException(status_code=400, detail="new_lease_end_date is required when action is renewed")
+
+    prop = db.query(Property).filter(Property.id == stay.property_id).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+
+    prev_status = getattr(prop, "occupancy_status", None) or "unknown"
+    now = datetime.now(timezone.utc)
+    ip = request.client.host if request.client else None
+    ua = (request.headers.get("user-agent") or "").strip() or None
+
+    if action == "vacated":
+        stay.checked_out_at = now
+        stay.occupancy_confirmation_response = "vacated"
+        stay.occupancy_confirmation_responded_at = now
+        prop.occupancy_status = OccupancyStatus.vacant.value
+        if prop.usat_token_state == USAT_TOKEN_RELEASED:
+            prop.usat_token_state = USAT_TOKEN_STAGED
+            prop.usat_token_released_at = None
+        db.add(stay)
+        db.add(prop)
+        db.commit()
+        create_log(
+            db,
+            CATEGORY_STATUS_CHANGE,
+            "Owner confirmed: Unit Vacated",
+            f"Stay {stay.id}: Owner confirmed unit vacated. Previous status: {prev_status}.",
+            property_id=stay.property_id,
+            stay_id=stay.id,
+            actor_user_id=current_user.id,
+            actor_email=current_user.email,
+            ip_address=ip,
+            user_agent=ua,
+            meta={"occupancy_status_previous": prev_status, "occupancy_status_new": OccupancyStatus.vacant.value, "action": "vacated"},
+        )
+        db.commit()
+        return {"status": "success", "message": "Unit marked as vacated.", "occupancy_status": "vacant"}
+
+    if action == "renewed":
+        try:
+            new_end = date.fromisoformat(new_lease_end_date.strip())
+        except (ValueError, AttributeError):
+            raise HTTPException(status_code=400, detail="new_lease_end_date must be YYYY-MM-DD")
+        if new_end <= stay.stay_end_date:
+            raise HTTPException(status_code=400, detail="new_lease_end_date must be after current stay end date")
+        stay.stay_end_date = new_end
+        stay.occupancy_confirmation_response = "renewed"
+        stay.occupancy_confirmation_responded_at = now
+        prop.occupancy_status = OccupancyStatus.occupied.value
+        db.add(stay)
+        db.add(prop)
+        db.commit()
+        create_log(
+            db,
+            CATEGORY_STATUS_CHANGE,
+            "Owner confirmed: Lease Renewed",
+            f"Stay {stay.id}: Owner renewed lease to {new_end.isoformat()}. Previous status: {prev_status}.",
+            property_id=stay.property_id,
+            stay_id=stay.id,
+            actor_user_id=current_user.id,
+            actor_email=current_user.email,
+            ip_address=ip,
+            user_agent=ua,
+            meta={"occupancy_status_previous": prev_status, "occupancy_status_new": OccupancyStatus.occupied.value, "action": "renewed", "new_lease_end_date": new_end.isoformat()},
+        )
+        db.commit()
+        return {"status": "success", "message": "Lease renewed.", "occupancy_status": "occupied", "new_lease_end_date": new_end.isoformat()}
+
+    # holdover
+    stay.occupancy_confirmation_response = "holdover"
+    stay.occupancy_confirmation_responded_at = now
+    prop.occupancy_status = OccupancyStatus.occupied.value
+    db.add(stay)
+    db.add(prop)
+    db.commit()
+    create_log(
+        db,
+        CATEGORY_STATUS_CHANGE,
+        "Owner confirmed: Holdover",
+        f"Stay {stay.id}: Owner confirmed holdover (guest still in unit). Previous status: {prev_status}.",
+        property_id=stay.property_id,
+        stay_id=stay.id,
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        ip_address=ip,
+        user_agent=ua,
+            meta={"occupancy_status_previous": prev_status, "occupancy_status_new": OccupancyStatus.occupied.value, "action": "holdover"},
+    )
+    db.commit()
+    return {"status": "success", "message": "Holdover confirmed.", "occupancy_status": "occupied"}
+
+
 @router.get("/guest/stays", response_model=list[GuestStayView])
 def guest_stays(
     db: Session = Depends(get_db),
@@ -367,6 +606,67 @@ def guest_stays(
     return out
 
 
+@router.get("/guest/stays/{stay_id}/signed-agreement-pdf")
+def guest_stay_signed_agreement_pdf(
+    stay_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_guest),
+):
+    """Return the signed guest agreement PDF for this stay. Guest must own the stay. Returns 404 if no signed agreement (e.g. stay created before signing flow)."""
+    stay = db.query(Stay).filter(Stay.id == stay_id, Stay.guest_id == current_user.id).first()
+    if not stay:
+        raise HTTPException(status_code=404, detail="Stay not found")
+    inv = (
+        db.query(Invitation)
+        .filter(
+            Invitation.property_id == stay.property_id,
+            Invitation.stay_start_date == stay.stay_start_date,
+            Invitation.stay_end_date == stay.stay_end_date,
+            Invitation.status == "accepted",
+        )
+        .first()
+    )
+    if not inv:
+        raise HTTPException(status_code=404, detail="No signed agreement found for this stay.")
+    sig = (
+        db.query(AgreementSignature)
+        .filter(
+            AgreementSignature.invitation_code == inv.invitation_code,
+            AgreementSignature.used_by_user_id == current_user.id,
+        )
+        .order_by(AgreementSignature.signed_at.desc())
+        .first()
+    )
+    if not sig:
+        raise HTTPException(status_code=404, detail="No signed agreement found for this stay.")
+    if sig.signed_pdf_bytes:
+        return Response(
+            content=sig.signed_pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="DocuStay-Signed-{sig.invitation_code}.pdf"'},
+        )
+    if sig.dropbox_sign_request_id:
+        pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
+        if pdf_bytes:
+            sig.signed_pdf_bytes = pdf_bytes
+            db.commit()
+            return Response(
+                content=pdf_bytes,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'inline; filename="DocuStay-Signed-{sig.invitation_code}.pdf"'},
+            )
+    date_str = sig.signed_at.strftime("%Y-%m-%d") if sig.signed_at else ""
+    content = fill_guest_signature_in_content(sig.document_content, sig.typed_signature, date_str)
+    pdf_bytes = agreement_content_to_pdf(sig.document_title, content)
+    sig.signed_pdf_bytes = pdf_bytes
+    db.commit()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="DocuStay-Signed-{sig.invitation_code}.pdf"'},
+    )
+
+
 @router.post("/guest/stays/{stay_id}/end")
 def guest_end_stay(
     request: Request,
@@ -400,36 +700,53 @@ def guest_end_stay(
         )
         .first()
     )
+    occ_prev = None
     if not other_active:
         prop = db.query(Property).filter(Property.id == stay.property_id).first()
-        if prop and prop.usat_token_state == USAT_TOKEN_RELEASED:
-            prop.usat_token_state = USAT_TOKEN_STAGED
-            prop.usat_token_released_at = None
+        if prop:
+            occ_prev = getattr(prop, "occupancy_status", None) or "unknown"
+            if prop.usat_token_state == USAT_TOKEN_RELEASED:
+                prop.usat_token_state = USAT_TOKEN_STAGED
+                prop.usat_token_released_at = None
+            prop.occupancy_status = OccupancyStatus.vacant.value
             db.add(prop)
     db.commit()
     ip = request.client.host if request.client else None
     ua = (request.headers.get("user-agent") or "").strip() or None
+    log_meta = {}
+    if occ_prev is not None:
+        log_meta = {"occupancy_status_previous": occ_prev, "occupancy_status_new": "vacant"}
     create_log(
         db,
         CATEGORY_STATUS_CHANGE,
         "Guest checked out",
-        f"Guest checked out of stay {stay.id} (property {stay.property_id}). End date set to {today.isoformat()}.",
+        f"Guest checked out of stay {stay.id} (property {stay.property_id}). End date set to {today.isoformat()}." + (f" Occupancy status: {occ_prev} -> vacant." if occ_prev is not None else ""),
         property_id=stay.property_id,
         stay_id=stay.id,
         actor_user_id=current_user.id,
         actor_email=current_user.email,
         ip_address=ip,
         user_agent=ua,
+        meta=log_meta if log_meta else None,
     )
     db.commit()
-    # Notify owner that guest checked out
+    # Notify owner and guest about checkout
     owner = db.query(User).filter(User.id == stay.owner_id).first()
     property_obj = db.query(Property).filter(Property.id == stay.property_id).first()
+    guest_name = (current_user.full_name or "").strip() or "Guest"
+    property_name = (property_obj.name if property_obj else None) or "your property"
+    # Email to owner
     if owner and owner.email:
-        guest_name = (current_user.full_name or "").strip() or "Guest"
-        property_name = (property_obj.name if property_obj else None) or "your property"
         send_owner_guest_checkout_email(
             owner.email,
+            guest_name,
+            property_name,
+            today.isoformat(),
+        )
+    # Email to guest (checkout confirmation)
+    if current_user.email:
+        send_guest_checkout_confirmation_email(
+            current_user.email,
             guest_name,
             property_name,
             today.isoformat(),
@@ -459,7 +776,7 @@ def guest_cancel_stay(
     stay.cancelled_at = datetime.now(timezone.utc)
     db.add(stay)
     db.flush()
-    # If no other active stay at this property, revoke USAT so occupancy stays correct
+    # If no other active stay at this property, revoke USAT and set status to VACANT
     other_active = (
         db.query(Stay)
         .filter(
@@ -470,27 +787,35 @@ def guest_cancel_stay(
         )
         .first()
     )
+    occ_prev = None
     if not other_active:
         prop = db.query(Property).filter(Property.id == stay.property_id).first()
-        if prop and prop.usat_token_state == USAT_TOKEN_RELEASED:
-            prop.usat_token_state = USAT_TOKEN_STAGED
-            prop.usat_token_released_at = None
+        if prop:
+            occ_prev = getattr(prop, "occupancy_status", None) or "unknown"
+            if prop.usat_token_state == USAT_TOKEN_RELEASED:
+                prop.usat_token_state = USAT_TOKEN_STAGED
+                prop.usat_token_released_at = None
+            prop.occupancy_status = OccupancyStatus.vacant.value
             db.add(prop)
     db.commit()
     ip = request.client.host if request.client else None
     ua = (request.headers.get("user-agent") or "").strip() or None
+    log_meta = {"original_start_date": str(original_start)}
+    if occ_prev is not None:
+        log_meta["occupancy_status_previous"] = occ_prev
+        log_meta["occupancy_status_new"] = "vacant"
     create_log(
         db,
         CATEGORY_STATUS_CHANGE,
         "Stay cancelled by guest",
-        f"Guest cancelled stay {stay.id} (property {stay.property_id}). Original start was {original_start.isoformat()}.",
+        f"Guest cancelled stay {stay.id} (property {stay.property_id}). Original start was {original_start.isoformat()}." + (f" Occupancy status: {occ_prev} -> vacant." if occ_prev else ""),
         property_id=stay.property_id,
         stay_id=stay.id,
         actor_user_id=current_user.id,
         actor_email=current_user.email,
         ip_address=ip,
         user_agent=ua,
-        meta={"original_start_date": str(original_start)},
+        meta=log_meta,
     )
     db.commit()
     # Notify owner that guest cancelled

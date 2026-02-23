@@ -34,6 +34,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     throw e;
   }
   if (res.status === 401) {
+    const text = await res.text();
+    let detail = "";
+    try {
+      const j = JSON.parse(text);
+      detail = (Array.isArray(j.detail) ? j.detail.map((d: any) => d.msg || d).join(", ") : (j.detail ?? "")) || "";
+    } catch {
+      detail = text || "";
+    }
     const isLoginRequest = path === "/auth/login";
     const isOnboardingPage =
       typeof window !== "undefined" &&
@@ -47,21 +55,27 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       window.location.reload();
     }
     if (isLoginRequest) {
-      const text = await res.text();
-      let detail = "Invalid email or password.";
-      try {
-        const j = JSON.parse(text);
-        detail = Array.isArray(j.detail) ? j.detail.map((d: any) => d.msg || d).join(", ") : (j.detail || detail);
-      } catch {
-        // use default
-      }
-      throw new Error(detail);
+      throw new Error(detail || "Invalid email or password.");
     }
-    // 401 on pending-owner (e.g. pending was deleted after Stripe failed): show verification failed, not session expired
+    // 401 on pending-owner: "try logging in" only for complete-signup (account may exist); otherwise "start over"
     if (path.includes("/auth/pending-owner/")) {
-      throw new Error("Identity verification failed. Please start over from registration.");
+      const d = (detail || "").toLowerCase();
+      const isCompleteSignup = path.includes("complete-signup");
+      if ((d.includes("signup session not found") || d.includes("session not found")) && isCompleteSignup) {
+        throw new Error("Your account may already be created. Try logging in with your email and password.");
+      }
+      if (d.includes("signup session not found") || d.includes("session not found")) {
+        throw new Error("Your signup session was lost. Please start over from registration.");
+      }
+      if (d.includes("expired") || d.includes("invalid or expired")) {
+        throw new Error("Your signup session expired. Please start over from registration or try logging in if you already completed signup.");
+      }
+      if (d.includes("not authenticated")) {
+        throw new Error("Your session was lost after returning from identity verification. Ensure STRIPE_IDENTITY_RETURN_URL matches your app URL (e.g. http://localhost:5173 for Vite). Please start over from registration.");
+      }
+      throw new Error(detail || "Identity verification failed. Please start over from registration.");
     }
-    throw new Error("Session expired. Please log in again.");
+    throw new Error(detail || "Session expired. Please log in again.");
   }
   if (!res.ok) {
     const text = await res.text();
@@ -349,6 +363,10 @@ export interface OwnerStayView {
   cancelled_at?: string | null;
   usat_token_released_at?: string | null;
   dead_mans_switch_enabled?: boolean;
+  needs_occupancy_confirmation?: boolean;
+  show_occupancy_confirmation_ui?: boolean;
+  confirmation_deadline_at?: string | null;
+  occupancy_confirmation_response?: string | null;
 }
 
 export interface OwnerInvitationView {
@@ -431,6 +449,15 @@ export const dashboardApi = {
       method: "POST",
       body: JSON.stringify({ invitation_code: invitationCode.trim().toUpperCase() }),
     }),
+  /** Get signed guest agreement PDF for a stay. Guest only. Returns blob. */
+  guestStaySignedAgreementBlob: async (stayId: number): Promise<Blob> => {
+    const res = await fetch(`${API_URL}/dashboard/guest/stays/${stayId}/signed-agreement-pdf`, {
+      headers: { Authorization: `Bearer ${getToken()}` },
+    });
+    if (res.status === 404) throw new Error("No signed agreement found for this stay.");
+    if (!res.ok) throw new Error(await res.text().catch(() => "Failed to load signed agreement."));
+    return res.blob();
+  },
   /** End an ongoing stay (sets end date to today). Guest only. */
   guestEndStay: (stayId: number) =>
     request<{ status: string; message?: string }>(`/dashboard/guest/stays/${stayId}/end`, { method: "POST" }),
@@ -440,6 +467,20 @@ export const dashboardApi = {
   /** Revoke stay (Kill Switch). Owner only. Guest must vacate in 12 hours; email sent to guest. */
   revokeStay: (stayId: number) =>
     request<{ status: string; message?: string }>(`/dashboard/owner/stays/${stayId}/revoke`, { method: "POST" }),
+  /** Initiate formal removal for overstayed guest. Revokes USAT token, sends emails to guest and owner. */
+  initiateRemoval: (stayId: number) =>
+    request<{ status: string; message?: string; usat_revoked?: boolean }>(`/dashboard/owner/stays/${stayId}/initiate-removal`, { method: "POST" }),
+  /** Owner confirms occupancy: Unit Vacated, Lease Renewed, or Holdover. */
+  confirmOccupancyStatus: (stayId: number, action: "vacated" | "renewed" | "holdover", newLeaseEndDate?: string) =>
+    request<{ status: string; message?: string; occupancy_status?: string; new_lease_end_date?: string }>(
+      `/dashboard/owner/stays/${stayId}/confirm-occupancy`,
+      {
+        method: "POST",
+        body: JSON.stringify(
+          action === "renewed" ? { action, new_lease_end_date: newLeaseEndDate } : { action }
+        ),
+      }
+    ),
 };
 
 // --- Properties ---
@@ -461,6 +502,10 @@ export interface Property {
   deleted_at?: string | null;
   /** Shield Mode: software monitoring/enforcement. ON = PASSIVE GUARD (occupied) or ACTIVE ENFORCEMENT (vacant). Owner can turn OFF. */
   shield_mode_enabled?: boolean;
+  occupancy_status?: string;  // vacant | occupied | unknown | unconfirmed
+  ownership_proof_filename?: string | null;
+  ownership_proof_type?: string | null;
+  ownership_proof_uploaded_at?: string | null;
 }
 
 export interface BulkUploadResult {
@@ -515,6 +560,42 @@ export const propertiesApi = {
   /** Reactivate an inactive (soft-deleted) property. */
   reactivate: (id: number) =>
     request<Property>(`/owners/properties/${id}/reactivate`, { method: "POST" }),
+  /** Get ownership proof URL for viewing (opens in new tab). Returns blob URL; caller should revoke when done. */
+  getOwnershipProofBlob: async (propertyId: number): Promise<Blob> => {
+    const token = getToken();
+    const headers: HeadersInit = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${API_URL}/owners/properties/${propertyId}/ownership-proof`, { headers });
+    if (res.status === 404) throw new Error("No ownership proof uploaded for this property.");
+    if (!res.ok) throw new Error(await res.text().catch(() => "Failed to load proof."));
+    return res.blob();
+  },
+  /** Upload ownership proof (deed, tax bill, etc.) for a property. */
+  uploadOwnershipProof: async (propertyId: number, proofType: string, file: File): Promise<Property> => {
+    const token = getToken();
+    const headers: HeadersInit = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const form = new FormData();
+    form.append("proof_type", proofType);
+    form.append("proof_file", file);
+    const res = await fetch(`${API_URL}/owners/properties/${propertyId}/ownership-proof`, {
+      method: "POST",
+      headers,
+      body: form,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      let detail = text;
+      try {
+        const j = JSON.parse(text);
+        detail = Array.isArray(j.detail) ? j.detail.map((d: any) => d.msg || d).join(", ") : (j.detail || text);
+      } catch {
+        // use text
+      }
+      throw new Error(detail);
+    }
+    return res.json() as Promise<Property>;
+  },
   /** Bulk upload properties from CSV. Returns created/updated counts and first failure row if any. */
   bulkUpload: async (file: File): Promise<BulkUploadResult> => {
     const token = getToken();

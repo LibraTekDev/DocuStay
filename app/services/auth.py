@@ -37,7 +37,8 @@ def create_access_token(user_id: int, email: str, role: UserRole) -> str:
 
 def create_pending_owner_token(pending_id: int, email: str) -> str:
     """JWT for pending owner flow (email verified, identity + POA not done yet). sub='pending', pending_id in payload."""
-    expire = datetime.utcnow() + timedelta(minutes=settings.jwt_access_token_expire_minutes)
+    expire_minutes = getattr(settings, "jwt_pending_owner_expire_minutes", None) or settings.jwt_access_token_expire_minutes
+    expire = datetime.utcnow() + timedelta(minutes=expire_minutes)
     payload = {"sub": "pending", "pending_id": pending_id, "email": email, "role": "owner", "exp": expire}
     raw = jwt.encode(
         payload,

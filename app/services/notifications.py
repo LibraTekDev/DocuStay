@@ -275,6 +275,50 @@ def send_vacate_12h_notice(
     return send_email(to_email, subject, html, text_content=text)
 
 
+def send_removal_notice_to_guest(
+    to_email: str,
+    guest_name: str,
+    property_name: str,
+    region_code: str = "",
+) -> bool:
+    """Email to guest when owner initiates formal removal for overstay."""
+    subject = "[DocuStay] NOTICE: Removal Initiated – You must vacate immediately"
+    html = f"""
+    <p>Hello {guest_name},</p>
+    <p>The property owner has initiated formal removal proceedings for <strong>{property_name}</strong>.</p>
+    <p><strong>Your utility access (USAT token) has been revoked.</strong></p>
+    <p>You are in overstay status and must vacate the property immediately. Continued presence may result in law enforcement involvement.</p>
+    <p>Please remove all belongings and vacate as soon as possible to avoid further legal action.</p>
+    <p>— DocuStay</p>
+    """
+    text = f"Hello {guest_name}, the owner has initiated removal for {property_name}. Your USAT token has been revoked. You must vacate immediately. — DocuStay"
+    return send_email(to_email, subject, html, text_content=text)
+
+
+def send_removal_confirmation_to_owner(
+    owner_email: str,
+    guest_name: str,
+    property_name: str,
+    region_code: str = "",
+) -> bool:
+    """Email to owner confirming removal has been initiated."""
+    subject = f"[DocuStay] Removal Initiated – {guest_name} at {property_name}"
+    html = f"""
+    <p>Hello,</p>
+    <p>You have initiated formal removal for <strong>{guest_name}</strong> at <strong>{property_name}</strong>.</p>
+    <p><strong>Actions taken:</strong></p>
+    <ul>
+        <li>Guest's USAT token has been revoked (utility access disabled)</li>
+        <li>Guest has been notified via email to vacate immediately</li>
+        <li>All actions logged for legal documentation</li>
+    </ul>
+    <p>If the guest does not vacate, you may contact local law enforcement with the documentation from your DocuStay dashboard.</p>
+    <p>— DocuStay</p>
+    """
+    text = f"Hello, you have initiated removal for {guest_name} at {property_name}. USAT token revoked. Guest notified. — DocuStay"
+    return send_email(owner_email, subject, html, text_content=text)
+
+
 def send_owner_guest_checkout_email(
     owner_email: str,
     guest_name: str,
@@ -291,6 +335,24 @@ def send_owner_guest_checkout_email(
     <p>— DocuStay</p>
     """
     return send_email(owner_email, subject, html)
+
+
+def send_guest_checkout_confirmation_email(
+    guest_email: str,
+    guest_name: str,
+    property_name: str,
+    stay_end_date: str,
+) -> bool:
+    """Email to guest confirming their checkout."""
+    subject = f"[DocuStay] Checkout Confirmed – {property_name}"
+    html = f"""
+    <p>Hello {guest_name},</p>
+    <p>Your checkout from <strong>{property_name}</strong> has been confirmed.</p>
+    <p><strong>Checkout date:</strong> {stay_end_date}</p>
+    <p>Thank you for using DocuStay. Your stay record has been updated.</p>
+    <p>— DocuStay</p>
+    """
+    return send_email(guest_email, subject, html)
 
 
 def send_owner_guest_cancelled_stay_email(
@@ -380,7 +442,7 @@ def send_dead_mans_switch_auto_executed(
     <p><strong>Dead Man's Switch has been automatically executed</strong> for the stay of <strong>{guest_name}</strong> at <strong>{property_name}</strong> (lease end was {stay_end_date}). No response was received within 48 hours after the end date.</p>
     <p>The system has automatically:</p>
     <ul>
-        <li>Set occupancy status to VACANT</li>
+        <li>Set occupancy status to UNCONFIRMED (no response by deadline)</li>
         <li>Triggered Active Enforcement (Shield Mode activated)</li>
         <li>Activated utility lock (USAT token staged)</li>
         <li>Armed trespass detection</li>

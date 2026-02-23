@@ -84,13 +84,9 @@ const Settings: React.FC<{ user: UserSession | null; navigate: (v: string) => vo
                 <p className="text-sm text-gray-700">
                   <span className="font-medium">Signed:</span> {poaSignature.signed_by} on {new Date(poaSignature.signed_at).toLocaleDateString()}
                 </p>
-                {poaSignature.has_dropbox_signed_pdf ? (
-                  <Button variant="outline" type="button" onClick={openSignedPoaPdf}>
-                    View / Download signed PDF
-                  </Button>
-                ) : (
-                  <p className="text-xs text-gray-500">Signed PDF will appear here after you complete signing via the link sent to your email.</p>
-                )}
+                <Button variant="outline" type="button" onClick={openSignedPoaPdf}>
+                  Download signed PDF
+                </Button>
               </div>
             ) : (
               <p className="text-sm text-gray-500">No Master POA signature on file for this account.</p>

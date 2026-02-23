@@ -15,6 +15,7 @@ def run():
             ("stripe_verification_session_id", "VARCHAR(255)"),
             ("owner_type", "VARCHAR(32)"),
             ("authorized_agent_certified_at", "TIMESTAMP WITH TIME ZONE"),
+            ("poa_waived_at", "TIMESTAMP WITH TIME ZONE"),
         ]:
             try:
                 conn.execute(text(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {defn}"))

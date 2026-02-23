@@ -47,7 +47,12 @@ class OwnerStayView(BaseModel):
     checked_out_at: datetime | None = None
     cancelled_at: datetime | None = None
     usat_token_released_at: datetime | None = None  # when set, this guest can see the USAT token
-    dead_mans_switch_enabled: bool = False  # DMS on for this stay (alerts + auto-vacate if no owner action)
+    dead_mans_switch_enabled: bool = False  # DMS on for this stay (alerts + confirmation flow)
+    # Status confirmation: owner must select Unit Vacated | Lease Renewed | Holdover before deadline (stay_end + 48h)
+    needs_occupancy_confirmation: bool = False  # True when in confirmation window, no response yet
+    show_occupancy_confirmation_ui: bool = False  # True when needs_conf OR property UNCONFIRMED and this stay triggered it
+    confirmation_deadline_at: datetime | None = None  # stay_end_date + 48h
+    occupancy_confirmation_response: str | None = None  # vacated | renewed | holdover
 
 
 class GuestStayView(BaseModel):

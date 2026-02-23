@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Modal, Input, Button } from './UI';
 import { invitationsApi, propertiesApi } from '../services/api';
 import { copyToClipboard } from '../utils/clipboard';
@@ -33,13 +33,18 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
   const [propertyId, setPropertyId] = useState<number | null>(null);
   const [propertiesLoading, setPropertiesLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const linkGeneratedRef = useRef(false);
 
   useEffect(() => {
     if (!open) {
-      setShowLinkResult(false);
-      setInviteLink('');
+      // Only reset when modal is closed AND we're not showing a link
+      if (!linkGeneratedRef.current) {
+        setShowLinkResult(false);
+        setInviteLink('');
+      }
       setFormData({ guest_name: '', checkin_date: '', checkout_date: '' });
       setPropertiesLoading(false);
+      linkGeneratedRef.current = false;
       return;
     }
     // When opening from a property page, preselect that property immediately so the form is usable
@@ -115,11 +120,13 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
         checkout_date: formData.checkout_date,
       });
       if (result.status === 'success' && result.data?.invitation_code) {
-        notify('success', 'Invitation link generated.');
         const link = `${window.location.origin}${window.location.pathname}#invite/${result.data.invitation_code}`;
+        linkGeneratedRef.current = true;
         setInviteLink(link);
         setShowLinkResult(true);
-        onSuccess?.();
+        notify('success', 'Invitation link generated.');
+        // Call onSuccess after state is set
+        setTimeout(() => onSuccess?.(), 100);
       } else {
         notify('error', result.message || 'Invitation failed.');
       }
@@ -137,6 +144,7 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
   };
 
   const handleClose = () => {
+    linkGeneratedRef.current = false;
     setShowLinkResult(false);
     setInviteLink('');
     onClose();
@@ -205,8 +213,6 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
               <Input label="Start date" name="checkin_date" type="date" value={formData.checkin_date} onChange={(e) => setFormData({ ...formData, checkin_date: e.target.value })} required />
               <Input label="End date" name="checkout_date" type="date" value={formData.checkout_date} onChange={(e) => setFormData({ ...formData, checkout_date: e.target.value })} required />
             </div>
-
-            <p className="text-xs text-slate-500">Dead Man&apos;s Switch is always on: if the stay end date passes without you updating (checkout or renewal), you&apos;ll get alerts 48h before and on the end date, then the system will auto-set the property to vacant and activate utility lock after 48h. Alerts are sent by email and dashboard notification.</p>
 
             <div className="flex gap-3 pt-2">
               <Button variant="outline" type="button" onClick={handleClose} className="flex-1" disabled={submitting}>Cancel</Button>

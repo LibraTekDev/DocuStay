@@ -1,5 +1,5 @@
 """Module B1: Owner onboarding."""
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Enum as SQLEnum, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Enum as SQLEnum, DateTime, Text, LargeBinary
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -7,6 +7,14 @@ import enum
 
 USAT_TOKEN_STAGED = "staged"
 USAT_TOKEN_RELEASED = "released"
+
+
+class OccupancyStatus(str, enum.Enum):
+    """Unit status: VACANT, OCCUPIED, UNKNOWN (never set), UNCONFIRMED (asked, no response)."""
+    vacant = "vacant"
+    occupied = "occupied"
+    unknown = "unknown"
+    unconfirmed = "unconfirmed"
 
 
 class PropertyType(str, enum.Enum):
@@ -59,5 +67,15 @@ class Property(Base):
     # Shield Mode: software monitoring/enforcement state. When ON: PASSIVE GUARD (if occupied) or ACTIVE ENFORCEMENT (if vacant).
     # Owner can turn OFF; auto-activated when Dead Man's Switch runs (owner can deactivate after).
     shield_mode_enabled = Column(Integer, nullable=False, default=0)
+
+    # Ownership verification proof (deed, tax bill, etc.) – stored in DB for property and user
+    ownership_proof_type = Column(String(50), nullable=True)  # deed, tax_bill, utility_bill, mortgage_statement
+    ownership_proof_filename = Column(String(255), nullable=True)
+    ownership_proof_content_type = Column(String(100), nullable=True)
+    ownership_proof_bytes = Column(LargeBinary, nullable=True)
+    ownership_proof_uploaded_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Status state machine: VACANT | OCCUPIED | UNKNOWN | UNCONFIRMED. UNCONFIRMED = asked for confirmation (e.g. DMS), no response by deadline.
+    occupancy_status = Column(String(32), nullable=False, default=OccupancyStatus.unknown.value)
 
     owner_profile = relationship("OwnerProfile", back_populates="properties")

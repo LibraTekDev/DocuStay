@@ -6,7 +6,7 @@ from app.models.stay import Stay
 from app.models.user import User
 from app.models.region_rule import RegionRule
 from app.models.audit_log import AuditLog
-from app.models.owner import Property, USAT_TOKEN_STAGED, USAT_TOKEN_RELEASED
+from app.models.owner import Property, USAT_TOKEN_STAGED, USAT_TOKEN_RELEASED, OccupancyStatus
 from app.services.notifications import (
     send_stay_legal_warning,
     send_overstay_alert,
@@ -306,7 +306,7 @@ def run_dead_mans_switch_job(db: Session) -> None:
         )
         db.commit()
 
-    # 3) 48 hours after lease end – auto-execute
+    # 3) 48 hours after lease end – flip to UNCONFIRMED (no auto-checkout; silence is forensic evidence)
     for stay in (
         db.query(Stay)
         .filter(
@@ -317,6 +317,9 @@ def run_dead_mans_switch_job(db: Session) -> None:
         .all()
     ):
         if not dms_enabled(stay):
+            continue
+        # Skip if owner already confirmed (vacated, renewed, holdover)
+        if getattr(stay, "occupancy_confirmation_response", None) is not None:
             continue
         if getattr(stay, "dead_mans_switch_triggered_at", None) is not None:
             continue
@@ -329,17 +332,18 @@ def run_dead_mans_switch_job(db: Session) -> None:
         property_name = _get_property_name(db, prop)
         now = datetime.now(timezone.utc)
 
-        # Mark stay as checked out (system vacated)
-        stay.checked_out_at = now
+        # Mark DMS as triggered (no owner response) – do NOT set checked_out_at
         stay.dead_mans_switch_triggered_at = now
         db.add(stay)
 
-        # Revoke USAT: set property back to staged so utility lock is effective
+        # Flip property to UNCONFIRMED (recorded silence = forensic evidence)
+        prev_status = "unknown"
         if prop:
+            prev_status = getattr(prop, "occupancy_status", None) or "unknown"
+            prop.occupancy_status = OccupancyStatus.unconfirmed.value
             if prop.usat_token_state == USAT_TOKEN_RELEASED:
                 prop.usat_token_state = USAT_TOKEN_STAGED
                 prop.usat_token_released_at = None
-            # Activate Shield Mode (owner can deactivate later)
             prop.shield_mode_enabled = 1
             db.add(prop)
 
@@ -347,15 +351,16 @@ def run_dead_mans_switch_job(db: Session) -> None:
             db,
             CATEGORY_DEAD_MANS_SWITCH,
             DMS_TITLE_AUTO_EXECUTED,
-            f"Stay {stay.id}: Dead Man's Switch auto-executed. Occupancy set to vacant; utility lock activated; trespass detection armed; authority letters logged.",
+            f"Stay {stay.id}: No owner response by deadline. Occupancy status flipped {prev_status} -> unconfirmed (recorded silence). Utility lock activated; Shield Mode on.",
             property_id=stay.property_id,
             stay_id=stay.id,
             meta={
                 "guest_id": stay.guest_id,
                 "owner_id": stay.owner_id,
                 "stay_end_date": stay.stay_end_date.isoformat(),
+                "occupancy_status_previous": prev_status,
+                "occupancy_status_new": OccupancyStatus.unconfirmed.value,
                 "utility_lock_activated": True,
-                "trespass_detection_armed": True,
             },
         )
         db.commit()

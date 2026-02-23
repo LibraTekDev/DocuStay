@@ -38,6 +38,8 @@ class User(Base):
     # Owner/Manager identity verification (Stripe Identity) – required before POA and dashboard
     identity_verified_at = Column(DateTime(timezone=True), nullable=True)
     stripe_verification_session_id = Column(String(255), nullable=True, index=True)
+    # Legacy owners (created before POA flow): waived POA requirement so they can access dashboard
+    poa_waived_at = Column(DateTime(timezone=True), nullable=True)
 
     # Owner type: Owner of Record vs Authorized Agent (property manager)
     owner_type = Column(SQLEnum(OwnerType), nullable=True)  # only for role=owner

@@ -3,7 +3,8 @@ import csv
 import io
 import secrets
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -34,7 +35,7 @@ class InvitationCreate(BaseModel):
     checkin_date: str = ""
     checkout_date: str = ""
     personal_message: str = ""
-    # Dead Man's Switch: auto-protect when lease ends without owner response
+    # Dead Man's Switch: auto-protect when lease ends without owner response (default: OFF, owner can enable)
     dead_mans_switch_enabled: bool = False
     dead_mans_switch_alert_email: bool = True
     dead_mans_switch_alert_sms: bool = False
@@ -137,13 +138,13 @@ def add_property(
         db,
         CATEGORY_STATUS_CHANGE,
         "Property registered",
-        f"Owner registered property: {property_display} (id={prop.id}).",
+        f"Owner registered property: {property_display} (id={prop.id}). Occupancy status: unknown (initial).",
         property_id=prop.id,
         actor_user_id=current_user.id,
         actor_email=current_user.email,
         ip_address=request.client.host if request.client else None,
         user_agent=(request.headers.get("user-agent") or "").strip() or None,
-        meta={"property_id": prop.id, "street": street, "city": data.city, "state": data.state, "region_code": region},
+        meta={"property_id": prop.id, "street": street, "city": data.city, "state": data.state, "region_code": region, "occupancy_status_new": "unknown"},
     )
     db.commit()
     db.refresh(prop)
@@ -382,6 +383,94 @@ def get_property(
     if not prop:
         raise HTTPException(status_code=404, detail="Property not found")
     return PropertyResponse.model_validate(prop)
+
+
+_ALLOWED_PROOF_TYPES = frozenset({"deed", "tax_bill", "utility_bill", "mortgage_statement"})
+_MAX_PROOF_SIZE = 10 * 1024 * 1024  # 10MB
+_ALLOWED_CONTENT_TYPES = frozenset({"application/pdf", "image/jpeg", "image/jpg", "image/png"})
+
+
+@router.post("/properties/{property_id}/ownership-proof", response_model=PropertyResponse)
+def upload_ownership_proof(
+    request: Request,
+    property_id: int,
+    proof_type: str = Form("deed"),
+    proof_file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Store ownership verification document (deed, tax bill, etc.) for the property."""
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="No owner profile")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    proof_type = (proof_type or "deed").strip().lower()
+    if proof_type not in _ALLOWED_PROOF_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid proof_type. Use one of: {sorted(_ALLOWED_PROOF_TYPES)}")
+    content_type = (proof_file.content_type or "").split(";")[0].strip().lower()
+    if content_type not in _ALLOWED_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File must be PDF or image (JPEG/PNG). Got: {content_type or 'unknown'}",
+        )
+    contents = proof_file.file.read()
+    if len(contents) > _MAX_PROOF_SIZE:
+        raise HTTPException(status_code=400, detail="File too large. Maximum size is 10MB.")
+    filename = (proof_file.filename or "proof").strip() or "proof"
+    if len(filename) > 255:
+        filename = filename[:251] + filename[filename.rfind("."):] if "." in filename else filename[:255]
+    now = datetime.now(timezone.utc)
+    prop.ownership_proof_type = proof_type
+    prop.ownership_proof_filename = filename
+    prop.ownership_proof_content_type = content_type
+    prop.ownership_proof_bytes = contents
+    prop.ownership_proof_uploaded_at = now
+    create_log(
+        db,
+        CATEGORY_STATUS_CHANGE,
+        "Ownership proof uploaded",
+        f"Owner uploaded {proof_type} proof ({filename}) for property {prop.name or prop.street}.",
+        property_id=prop.id,
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        ip_address=request.client.host if request.client else None,
+        meta={"proof_type": proof_type, "filename": filename},
+    )
+    db.commit()
+    db.refresh(prop)
+    return PropertyResponse.model_validate(prop)
+
+
+@router.get("/properties/{property_id}/ownership-proof")
+def get_ownership_proof(
+    property_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Return the ownership proof file for viewing/download. For properties without proof, returns 404 (no exception—frontend shows friendly message)."""
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="No owner profile")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    if not prop.ownership_proof_bytes:
+        raise HTTPException(status_code=404, detail="No ownership proof uploaded for this property.")
+    content_type = prop.ownership_proof_content_type or "application/octet-stream"
+    filename = prop.ownership_proof_filename or "proof"
+    return Response(
+        content=bytes(prop.ownership_proof_bytes),
+        media_type=content_type,
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 @router.post("/properties/{property_id}/release-usat-token", response_model=PropertyResponse)
@@ -636,6 +725,7 @@ def delete_property(
 
 @router.post("/properties/{property_id}/reactivate", response_model=PropertyResponse)
 def reactivate_property(
+    request: Request,
     property_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
@@ -650,7 +740,23 @@ def reactivate_property(
     if prop.deleted_at is None:
         db.refresh(prop)
         return PropertyResponse.model_validate(prop)
+    property_name = (prop.name or "").strip() or f"{prop.city}, {prop.state}".strip(", ") or f"Property {property_id}"
     prop.deleted_at = None
+    db.commit()
+    ip = request.client.host if request.client else None
+    ua = (request.headers.get("user-agent") or "").strip() or None
+    create_log(
+        db,
+        CATEGORY_STATUS_CHANGE,
+        "Property reactivated",
+        f"Owner reactivated property: {property_name} (id={property_id}). Property now visible in dashboard.",
+        property_id=property_id,
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        ip_address=ip,
+        user_agent=ua,
+        meta={"property_id": property_id, "property_name": property_name},
+    )
     db.commit()
     db.refresh(prop)
     return PropertyResponse.model_validate(prop)

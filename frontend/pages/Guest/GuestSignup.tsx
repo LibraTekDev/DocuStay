@@ -90,6 +90,8 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
       setLoading(false);
       if (result.status === 'success' && result.data) {
         const d = result.data as any;
+        // Store invite code BEFORE any navigation so it's available after email verification
+        if (inviteCode) sessionStorage.setItem('docustay_pending_invite_code', inviteCode);
         if (d.verificationRequired && d.user_id && setPendingVerification) {
           notify('success', result.message || 'Check your email for the verification code.');
           setPendingVerification({ userId: d.user_id, type: 'email', generatedAt: new Date().toISOString() });
@@ -97,7 +99,6 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
           return;
         }
         notify('success', inviteCode ? 'Account created. Sign the agreement on your dashboard to accept the invitation.' : 'Account created successfully.');
-        if (inviteCode) sessionStorage.setItem('docustay_pending_invite_code', inviteCode);
         if (onGuestLogin) onGuestLogin(result.data);
         navigate('guest-dashboard');
       } else {

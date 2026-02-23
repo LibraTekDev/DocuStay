@@ -40,5 +40,9 @@ class Stay(Base):
     dead_mans_switch_alert_phone = Column(Integer, nullable=False, default=0)
     dead_mans_switch_triggered_at = Column(DateTime(timezone=True), nullable=True)
 
+    # Confirmation flow: when DMS prompts, owner must select Unit Vacated | Lease Renewed | Holdover before deadline
+    occupancy_confirmation_response = Column(String(32), nullable=True)  # vacated | renewed | holdover
+    occupancy_confirmation_responded_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

@@ -58,6 +58,10 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
     is_primary_residence: false,
   });
   const [editError, setEditError] = useState<string | null>(null);
+  const [proofLoading, setProofLoading] = useState(false);
+  const [confirmingOccupancy, setConfirmingOccupancy] = useState(false);
+  const [confirmOccupancyAction, setConfirmOccupancyAction] = useState<'vacated' | 'renewed' | 'holdover' | null>(null);
+  const [renewEndDate, setRenewEndDate] = useState('');
 
   const id = Number(propertyId);
   const stateKey = property?.state ?? 'FL';
@@ -80,6 +84,9 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
       })
     : null;
   const isInactive = !!(property?.deleted_at);
+  // Display status: active stay → OCCUPIED; else use property.occupancy_status (vacant | occupied | unknown | unconfirmed)
+  const displayStatus = isOccupied ? 'OCCUPIED' : (property?.occupancy_status ?? 'unknown').toUpperCase();
+  const stayNeedingConfirmation = propertyStays.find((s) => s.show_occupancy_confirmation_ui);
 
   const loadData = useCallback(() => {
     if (!id || isNaN(id)) {
@@ -365,19 +372,170 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                     ))}
                   </dl>
                 </Card>
+                <Card className="p-6 border-slate-200">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-4">Ownership proof</h3>
+                  {property.ownership_proof_filename ? (
+                    <div className="space-y-2">
+                      <p className="text-sm text-slate-600">
+                        {property.ownership_proof_filename}
+                        {property.ownership_proof_type && (
+                          <span className="ml-2 text-slate-500">({property.ownership_proof_type.replace(/_/g, ' ')})</span>
+                        )}
+                      </p>
+                      <Button
+                        variant="outline"
+                        disabled={proofLoading}
+                        className="text-sm px-4 py-2"
+                        onClick={async () => {
+                          if (!property) return;
+                          setProofLoading(true);
+                          try {
+                            const blob = await propertiesApi.getOwnershipProofBlob(property.id);
+                            const url = URL.createObjectURL(blob);
+                            window.open(url, '_blank', 'noopener,noreferrer');
+                            setTimeout(() => URL.revokeObjectURL(url), 60000);
+                          } catch (e) {
+                            notify('error', (e as Error)?.message ?? 'Failed to load proof.');
+                          } finally {
+                            setProofLoading(false);
+                          }
+                        }}
+                      >
+                        {proofLoading ? 'Loading…' : 'View proof'}
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-500">You do not have any proof uploaded.</p>
+                  )}
+                </Card>
+                {stayNeedingConfirmation && (
+                  <Card className="mb-6 p-5 md:p-6 border-amber-200 bg-amber-50/80">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-amber-800 mb-2">Confirm occupancy status</h3>
+                    <p className="text-sm text-amber-900 mb-3">
+                      {stayNeedingConfirmation.needs_occupancy_confirmation
+                        ? `Please confirm the status of this unit before ${stayNeedingConfirmation.confirmation_deadline_at ? new Date(stayNeedingConfirmation.confirmation_deadline_at).toLocaleString() : 'the deadline'}.`
+                        : 'No response was received by the deadline. Status is UNCONFIRMED. Please confirm now.'}
+                    </p>
+                    <div className="flex flex-wrap gap-3">
+                      <Button
+                        variant="outline"
+                        className="border-amber-600 text-amber-800 hover:bg-amber-100"
+                        disabled={confirmingOccupancy}
+                        onClick={async () => {
+                          if (!stayNeedingConfirmation) return;
+                          setConfirmOccupancyAction('vacated');
+                          setConfirmingOccupancy(true);
+                          try {
+                            await dashboardApi.confirmOccupancyStatus(stayNeedingConfirmation.stay_id, 'vacated');
+                            notify('success', 'Unit marked as vacated.');
+                            loadData();
+                          } catch (e) {
+                            notify('error', (e as Error)?.message ?? 'Failed to confirm.');
+                          } finally {
+                            setConfirmingOccupancy(false);
+                            setConfirmOccupancyAction(null);
+                          }
+                        }}
+                      >
+                        Unit Vacated
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="border-amber-600 text-amber-800 hover:bg-amber-100"
+                        disabled={confirmingOccupancy}
+                        onClick={() => setConfirmOccupancyAction('renewed')}
+                      >
+                        Lease Renewed
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="border-amber-600 text-amber-800 hover:bg-amber-100"
+                        disabled={confirmingOccupancy}
+                        onClick={async () => {
+                          if (!stayNeedingConfirmation) return;
+                          setConfirmOccupancyAction('holdover');
+                          setConfirmingOccupancy(true);
+                          try {
+                            await dashboardApi.confirmOccupancyStatus(stayNeedingConfirmation.stay_id, 'holdover');
+                            notify('success', 'Holdover confirmed.');
+                            loadData();
+                          } catch (e) {
+                            notify('error', (e as Error)?.message ?? 'Failed to confirm.');
+                          } finally {
+                            setConfirmingOccupancy(false);
+                            setConfirmOccupancyAction(null);
+                          }
+                        }}
+                      >
+                        Holdover
+                      </Button>
+                    </div>
+                    {confirmOccupancyAction === 'renewed' && (
+                      <div className="mt-4 flex flex-wrap items-center gap-3">
+                        <input
+                          type="date"
+                          value={renewEndDate}
+                          onChange={(e) => setRenewEndDate(e.target.value)}
+                          className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+                          min={stayNeedingConfirmation?.stay_end_date ?? undefined}
+                        />
+                        <Button
+                          variant="outline"
+                          disabled={!renewEndDate || confirmingOccupancy}
+                          onClick={async () => {
+                            if (!stayNeedingConfirmation || !renewEndDate) return;
+                            setConfirmingOccupancy(true);
+                            try {
+                              await dashboardApi.confirmOccupancyStatus(stayNeedingConfirmation.stay_id, 'renewed', renewEndDate);
+                              notify('success', 'Lease renewed.');
+                              setRenewEndDate('');
+                              setConfirmOccupancyAction(null);
+                              loadData();
+                            } catch (e) {
+                              notify('error', (e as Error)?.message ?? 'Failed to confirm.');
+                            } finally {
+                              setConfirmingOccupancy(false);
+                            }
+                          }}
+                        >
+                          Confirm renewal
+                        </Button>
+                        <button
+                          type="button"
+                          className="text-sm text-slate-600 hover:text-slate-800"
+                          onClick={() => { setConfirmOccupancyAction(null); setRenewEndDate(''); }}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    )}
+                  </Card>
+                )}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
                   <Card className="p-5 md:p-6 border-slate-200 bg-slate-50/80 flex flex-col">
                     <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Occupancy status</h3>
                     <div className="flex flex-col gap-3 flex-1 min-h-0">
-                      <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium w-fit ${isOccupied ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-700'}`}>
-                        <span className={`w-2 h-2 rounded-full shrink-0 ${isOccupied ? 'bg-emerald-500' : 'bg-slate-400'}`} />
-                        {isOccupied ? 'OCCUPIED' : 'VACANT'}
+                      <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium w-fit ${
+                        displayStatus === 'OCCUPIED' ? 'bg-emerald-100 text-emerald-800' :
+                        displayStatus === 'VACANT' ? 'bg-slate-200 text-slate-700' :
+                        displayStatus === 'UNCONFIRMED' ? 'bg-amber-100 text-amber-800' :
+                        'bg-slate-100 text-slate-600'
+                      }`}>
+                        <span className={`w-2 h-2 rounded-full shrink-0 ${
+                          displayStatus === 'OCCUPIED' ? 'bg-emerald-500' :
+                          displayStatus === 'VACANT' ? 'bg-slate-400' :
+                          displayStatus === 'UNCONFIRMED' ? 'bg-amber-500' : 'bg-slate-400'
+                        }`} />
+                        {displayStatus}
                       </span>
                       {isOccupied && activeStay && (
                         <div className="text-sm text-slate-600 space-y-0.5">
                           <p>Current guest: <span className="font-medium text-slate-800">{activeStay.guest_name}</span></p>
                           <p>Lease end: <span className="font-medium text-slate-800">{activeStay.stay_end_date}</span></p>
                         </div>
+                      )}
+                      {displayStatus === 'UNCONFIRMED' && (
+                        <p className="text-xs text-amber-700">Confirmation requested but no response received by deadline. Use the confirmation options above.</p>
                       )}
                     </div>
                   </Card>
@@ -467,12 +625,6 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                     <p className="text-sm text-slate-600 leading-relaxed font-medium">Guests staying 30+ days in Florida may claim tenancy rights under {jurisdictionInfo.keyStatute}. DocuStay enforces a hard 29-day limit to maintain your legal shield.</p>
                   </div>
                 </div>
-              </Card>
-
-              <Card className="p-6 border-slate-200">
-                <h3 className="text-sm font-semibold text-slate-500 uppercase tracking-wide mb-4">Evidence Status</h3>
-                <p className="text-slate-600 text-sm mb-6 leading-relaxed">Stays and legal records are stored in your dashboard.</p>
-                <Button variant="outline" className="w-full text-xs font-black uppercase tracking-widest">Download Latest (ZIP)</Button>
               </Card>
             </div>
 
@@ -692,6 +844,11 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
         </div>
       </Modal>
 
+          </>
+        )}
+      </main>
+
+      {/* Modal placed outside loading conditional so it doesn't unmount during data refresh */}
       <InviteGuestModal
         open={showInviteModal}
         onClose={() => setShowInviteModal(false)}
@@ -701,9 +858,6 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
         navigate={navigate}
         initialPropertyId={id}
       />
-          </>
-        )}
-      </main>
     </div>
   );
 };

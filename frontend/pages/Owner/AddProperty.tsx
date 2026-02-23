@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Card, Input, Button } from '../../components/UI';
 import { propertiesApi } from '../../services/api';
 import { UserSession } from '../../types';
@@ -11,8 +11,18 @@ interface Props {
   notify: (t: 'success' | 'error', m: string) => void;
 }
 
+const ALLOWED_PROOF_TYPES = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+const MAX_PROOF_SIZE = 10 * 1024 * 1024; // 10MB
+
+function isAllowedProofFile(file: File): boolean {
+  const ok = ALLOWED_PROOF_TYPES.includes(file.type) && file.size <= MAX_PROOF_SIZE;
+  return ok;
+}
+
 const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) => {
   const [step, setStep] = useState(1);
+  const [proofFile, setProofFile] = useState<File | null>(null);
+  const proofInputRef = useRef<HTMLInputElement>(null);
   const [formData, setFormData] = useState({
     property_name: '',
     street_address: '',
@@ -24,7 +34,6 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
     bedrooms: '1',
     is_primary_residence: false,
     proof_type: 'deed',
-    proof_uploaded: true // Simulating upload
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -34,9 +43,14 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
       return;
     }
 
+    if (!proofFile) {
+      notify('error', 'Please upload proof of ownership (PDF or image) before continuing.');
+      return;
+    }
+
     setLoading(true);
     try {
-      await propertiesApi.add({
+      const prop = await propertiesApi.add({
         property_name: formData.property_name || undefined,
         street_address: formData.street_address,
         city: formData.city,
@@ -47,8 +61,9 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
         bedrooms: formData.bedrooms,
         is_primary_residence: formData.is_primary_residence,
       });
+      await propertiesApi.uploadOwnershipProof(prop.id, formData.proof_type, proofFile);
       setLoading(false);
-      notify('success', 'Property successfully added to your legal shield!');
+      notify('success', 'Property and ownership proof successfully added to your legal shield!');
       navigate('dashboard');
     } catch (err) {
       setLoading(false);
@@ -183,17 +198,47 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
                 ]}
               />
               
-              <div className="mt-8 border-2 border-dashed border-slate-300 rounded-3xl p-12 text-center bg-white/55 backdrop-blur-lg group hover:border-blue-400/50 transition-all">
+              <div
+                className="mt-8 border-2 border-dashed border-slate-300 rounded-3xl p-12 text-center bg-white/55 backdrop-blur-lg group hover:border-blue-400/50 transition-all cursor-pointer"
+                onClick={() => proofInputRef.current?.click()}
+                onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const file = e.dataTransfer?.files?.[0];
+                  if (file && isAllowedProofFile(file)) {
+                    setProofFile(file);
+                  } else if (file) {
+                    notify('error', file.size > MAX_PROOF_SIZE ? 'File too large. Max 10MB.' : 'Please upload a PDF or image (JPEG, PNG).');
+                  }
+                }}
+              >
+                <input
+                  ref={proofInputRef}
+                  type="file"
+                  accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file && isAllowedProofFile(file)) setProofFile(file);
+                    else if (file) notify('error', file.size > MAX_PROOF_SIZE ? 'File too large. Max 10MB.' : 'Please upload a PDF or image (JPEG, PNG).');
+                    e.target.value = '';
+                  }}
+                />
                 <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform">
                    <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
                 </div>
                 <h4 className="text-xl font-bold text-slate-800 mb-2">Upload Proof of Ownership</h4>
-                <p className="text-sm text-slate-500 mb-6">Drag and drop your file here, or click to browse.</p>
-                <Button variant="outline" className="px-8">Select File</Button>
-                <div className="mt-6 flex items-center justify-center gap-2 text-green-600 font-bold text-sm bg-green-50 py-2 px-4 rounded-full w-fit mx-auto">
-                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
-                   proof_document.pdf attached
-                </div>
+                <p className="text-sm text-slate-500 mb-6">Drag and drop your file here, or click to browse. PDF or image (JPEG, PNG), max 10MB.</p>
+                <Button type="button" variant="outline" className="px-8" onClick={(e) => { e.stopPropagation(); proofInputRef.current?.click(); }}>Select File</Button>
+                {proofFile ? (
+                  <div className="mt-6 flex items-center justify-center gap-2 text-green-600 font-bold text-sm bg-green-50 py-2 px-4 rounded-full w-fit mx-auto">
+                    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                    {proofFile.name}
+                  </div>
+                ) : (
+                  <p className="mt-6 text-sm text-slate-500">No file selected</p>
+                )}
               </div>
             </div>
           )}
@@ -204,7 +249,7 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
             ) : (
               <Button type="button" variant="outline" onClick={() => navigate('dashboard')} className="px-10">Cancel</Button>
             )}
-            <Button type="submit" className="flex-1 py-4 text-xl">
+            <Button type="submit" className="flex-1 py-4 text-xl" disabled={step === 3 && !proofFile}>
               {step === 3 ? 'Activate Legal Protection' : 'Continue to next step'}
             </Button>
           </div>

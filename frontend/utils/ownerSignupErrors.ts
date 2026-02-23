@@ -3,7 +3,7 @@
  * Maps backend/API error messages to clear copy and suggests where to send the user.
  */
 
-export type RedirectTarget = "register" | "verify" | "onboarding/identity" | "onboarding/poa" | null;
+export type RedirectTarget = "register" | "verify" | "login" | "onboarding/identity" | "onboarding/poa" | null;
 
 export interface OwnerSignupErrorResult {
   /** Message to show in UI (toast, inline, or modal). */
@@ -33,22 +33,16 @@ export function getOwnerSignupErrorFriendly(
   if (raw.includes("passwords do not match") || raw.includes("password")) {
     return { message: "Passwords do not match. Please check and try again.", redirectTo: null };
   }
-  if (raw.includes("phone") || raw.includes("digits")) {
-    return {
-      message: "Please enter a valid phone number (at least 10 digits, e.g. 5551234567 or +1 555 123 4567).",
-      redirectTo: null,
-    };
-  }
   if (raw.includes("agree") || raw.includes("terms") || raw.includes("privacy")) {
     return { message: "Please agree to the Terms of Service and Privacy Policy to continue.", redirectTo: null };
   }
   if (raw.includes("could not send the verification email") || raw.includes("verification email")) {
     return {
-      message: "We couldn’t send the verification email. Check that MAILGUN_API_KEY and MAILGUN_DOMAIN are set in .env, restart the server, and try again. You can run: python scripts/test_verification_email.py your@email.com",
+      message: "We couldn't send the verification email. Check that MAILGUN_API_KEY and MAILGUN_DOMAIN are set in .env, restart the server, and try again. You can run: python scripts/test_verification_email.py your@email.com",
       redirectTo: null,
     };
   }
-  if (raw.includes("email verification is required") || raw.includes("mailgun") || raw.includes("503")) {
+  if (raw.includes("email verification is required") || raw.includes("mailgun")) {
     return {
       message: "Email verification is temporarily unavailable. Set MAILGUN_API_KEY and MAILGUN_DOMAIN in .env, restart the server, then try again.",
       redirectTo: null,
@@ -56,20 +50,49 @@ export function getOwnerSignupErrorFriendly(
   }
 
   // --- Verify email (wrong or expired code) ---
-  if (raw.includes("invalid or expired") || raw.includes("wrong") && raw.includes("code")) {
-    return {
-      message: "That code isn’t correct. Check the 6-digit code from your email and try again.",
-      redirectTo: null,
-    };
-  }
-  if (raw.includes("expired") && raw.includes("code")) {
-    return {
-      message: "This verification code has expired. Please request a new code below.",
-      redirectTo: null,
-    };
-  }
-  if (raw.includes("verification code must be exactly 6 digits")) {
+  // IMPORTANT: These must come BEFORE phone number check to avoid false matches on "digits"
+  if (raw.includes("verification code must be exactly 6 digits") || (raw.includes("6 digits") && raw.includes("code"))) {
     return { message: "Please enter all 6 digits from your verification email.", redirectTo: null };
+  }
+  if (raw.includes("invalid or expired verification code") || raw.includes("invalid or expired code")) {
+    return {
+      message: "That code isn't correct. Check the 6-digit code from your email and try again.",
+      redirectTo: null,
+    };
+  }
+  if (raw.includes("verification code has expired") || (raw.includes("code") && raw.includes("expired"))) {
+    return {
+      message: "This verification code has expired. Please click 'Resend now' to get a new code.",
+      redirectTo: null,
+    };
+  }
+  if ((raw.includes("wrong") || raw.includes("incorrect")) && raw.includes("code")) {
+    return {
+      message: "That code isn't correct. Please check the 6-digit code from your email and try again.",
+      redirectTo: null,
+    };
+  }
+  if (raw.includes("invalid or expired")) {
+    return {
+      message: "That code isn't correct or has expired. Please try again or request a new code.",
+      redirectTo: null,
+    };
+  }
+
+  // --- Phone number validation (must come AFTER verification code checks) ---
+  if (raw.includes("phone") || (raw.includes("digits") && !raw.includes("verification") && !raw.includes("code"))) {
+    return {
+      message: "Please enter a valid phone number (at least 10 digits, e.g. 5551234567 or +1 555 123 4567).",
+      redirectTo: null,
+    };
+  }
+
+  // --- 503 errors (service unavailable) ---
+  if (raw.includes("503")) {
+    return {
+      message: "This service is temporarily unavailable. Please try again later.",
+      redirectTo: null,
+    };
   }
 
   // --- Stripe Identity (failure on identity-complete page: show message and "Back to owner signup", no redirect loop) ---
@@ -87,17 +110,17 @@ export function getOwnerSignupErrorFriendly(
   }
   if (raw.includes("invalid verification session") || raw.includes("session_id")) {
     return {
-      message: "We couldn’t confirm your verification. Please start identity verification again from the previous step.",
+      message: "We couldn't confirm your verification. Please start identity verification again from the previous step.",
       redirectTo: "onboarding/identity",
     };
   }
   if (raw.includes("no identity session") || raw.includes("no verification session")) {
     return {
-      message: "We couldn’t find your verification session. Please go back and start identity verification again.",
+      message: "We couldn't find your verification session. Please go back and start identity verification again.",
       redirectTo: "onboarding/identity",
     };
   }
-  if (raw.includes("identity verification is not configured") || raw.includes("503")) {
+  if (raw.includes("identity verification is not configured")) {
     return {
       message: "Identity verification is temporarily unavailable. Please try again later.",
       redirectTo: "onboarding/identity",
@@ -113,7 +136,7 @@ export function getOwnerSignupErrorFriendly(
   // --- Email verified (required before identity/POA) ---
   if (raw.includes("email not verified")) {
     return {
-      message: "Please verify your email first. You’ll be taken to the verification page. Check your inbox for the 6-digit code.",
+      message: "Please verify your email first. You'll be taken to the verification page. Check your inbox for the 6-digit code.",
       redirectTo: "verify",
     };
   }
@@ -127,18 +150,24 @@ export function getOwnerSignupErrorFriendly(
   }
   if (raw.includes("email does not match") || raw.includes("signature email")) {
     return {
-      message: "The email on the Master POA doesn’t match your account. Please sign using the same email you registered with.",
+      message: "The email on the Master POA doesn't match your account. Please sign using the same email you registered with.",
       redirectTo: null,
     };
   }
-  if (raw.includes("invalid master poa") || raw.includes("invalid") && raw.includes("poa")) {
+  if (raw.includes("invalid master poa") || (raw.includes("invalid") && raw.includes("poa"))) {
     return {
-      message: "We couldn’t use this signature. Please sign the Master POA again.",
+      message: "We couldn't use this signature. Please sign the Master POA again.",
       redirectTo: null,
     };
   }
   if (raw.includes("document has changed")) {
     return { message: "The document was updated. Please refresh the page and sign again.", redirectTo: null };
+  }
+  if (raw.includes("account may already be created") || raw.includes("try logging in")) {
+    return {
+      message: "Your account may already be created. Try logging in with your email and password.",
+      redirectTo: "login",
+    };
   }
   if (raw.includes("session expired") || raw.includes("unauthorized")) {
     return {
@@ -147,7 +176,7 @@ export function getOwnerSignupErrorFriendly(
     };
   }
 
-  // Default: show API message if it’s short enough, otherwise generic
+  // Default: show API message if it's short enough, otherwise generic
   const fallback =
     apiMessage && apiMessage.length <= 200 ? apiMessage : "Something went wrong. Please try again or contact support.";
   return { message: fallback, redirectTo: null };

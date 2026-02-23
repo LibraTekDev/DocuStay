@@ -47,8 +47,50 @@ const App: React.FC = () => {
     return '';
   });
   const [loading, setLoading] = useState(false);
+  const [sessionRestoring, setSessionRestoring] = useState(true); // Track if we're restoring session
   const [notification, setNotification] = useState<{ type: 'success'; message: string } | null>(null);
   const [errorModal, setErrorModal] = useState<{ open: boolean; message: string }>({ open: false, message: '' });
+
+  // Restore session from localStorage token on page load
+  useEffect(() => {
+    const restoreSession = async () => {
+      // Skip session restore on onboarding pages (they use pending-owner tokens, not full user tokens)
+      const currentView = hashToView(window.location.hash || '');
+      const isOnboardingPage = currentView.startsWith('onboarding/') || currentView === 'verify';
+      if (isOnboardingPage) {
+        setSessionRestoring(false);
+        return;
+      }
+
+      const token = authApi.getToken();
+      if (!token) {
+        setSessionRestoring(false);
+        return;
+      }
+
+      try {
+        const user = await authApi.me();
+        if (user) {
+          setState(prev => ({ ...prev, user }));
+          // If user is on login/register page but has valid session, redirect to dashboard
+          if (!currentView || currentView === 'login' || currentView === 'register' || currentView === 'guest-login' || currentView === 'guest-signup') {
+            const targetView = user.user_type === UserType.PROPERTY_OWNER
+              ? (!user.identity_verified ? 'onboarding/identity' : !user.poa_linked ? 'onboarding/poa' : 'dashboard')
+              : 'guest-dashboard';
+            window.location.hash = targetView;
+            setView(targetView);
+          }
+        }
+      } catch {
+        // Token invalid/expired, clear it
+        setToken(null);
+      } finally {
+        setSessionRestoring(false);
+      }
+    };
+
+    restoreSession();
+  }, []);
 
   const navigate = (newView: string) => {
     window.location.hash = newView;
@@ -59,10 +101,6 @@ const App: React.FC = () => {
     const syncViewFromUrl = () => {
       if (hasSessionIdInUrl()) {
         setView('onboarding/identity-complete');
-        if (!window.location.hash || !window.location.hash.includes('onboarding/identity-complete')) {
-          const q = window.location.search || '';
-          window.history.replaceState(null, '', window.location.pathname + q + '#onboarding/identity-complete');
-        }
         return;
       }
       const hash = window.location.hash;
@@ -133,7 +171,7 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-b from-blue-100/60 via-blue-50/30 to-sky-50/50 text-gray-800 overflow-x-hidden relative">
-      {loading && <LoadingOverlay />}
+      {(loading || sessionRestoring) && <LoadingOverlay />}
 
       {/* Navigation */}
       <nav className="bg-white border-b border-gray-200 sticky top-0 z-40">
@@ -248,18 +286,23 @@ const App: React.FC = () => {
         )}
 
         {/* Owner Dashboard Views */}
-        {(view === 'dashboard' || view === 'dashboard/properties') && state.user?.user_type === UserType.PROPERTY_OWNER && (
+        {(view === 'dashboard' || view === 'dashboard/properties' || view === 'settings' || view === 'help') && state.user?.user_type === UserType.PROPERTY_OWNER && (
           <OwnerDashboard
             user={state.user}
             navigate={navigate}
             setLoading={setLoading}
             notify={showNotification}
-            initialTab={view === 'dashboard/properties' ? 'properties' : undefined}
+            initialTab={
+              view === 'dashboard/properties' ? 'properties'
+              : view === 'settings' ? 'settings'
+              : view === 'help' ? 'help'
+              : undefined
+            }
           />
         )}
         {view === 'add-property' && <AddProperty user={state.user} navigate={navigate} setLoading={setLoading} notify={showNotification} />}
-        {view === 'settings' && <Settings user={state.user} navigate={navigate} />}
-        {view === 'help' && <HelpCenter navigate={navigate} />}
+        {view === 'settings' && state.user?.user_type !== UserType.PROPERTY_OWNER && <Settings user={state.user} navigate={navigate} />}
+        {view === 'help' && state.user?.user_type !== UserType.PROPERTY_OWNER && <HelpCenter navigate={navigate} />}
         {view.startsWith('property/') && state.user?.user_type === UserType.PROPERTY_OWNER && <PropertyDetail propertyId={view.split('/')[1]} user={state.user} navigate={navigate} setLoading={setLoading} notify={showNotification} />}
         
         {/* Guest Flow Views */}

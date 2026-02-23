@@ -28,6 +28,8 @@ class Settings(BaseSettings):
         return (v or "").strip()
 
     jwt_access_token_expire_minutes: int = 60
+    # Pending-owner signup flow (email verified → identity → POA) can take a while; use longer expiry
+    jwt_pending_owner_expire_minutes: int = 60 * 24  # 24 hours
 
     sendgrid_api_key: str = ""
     sendgrid_from_email: str = "noreply@docustay.demo"

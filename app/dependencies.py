@@ -76,9 +76,10 @@ def require_owner_onboarding_complete(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_identity_verified),
 ) -> User:
-    """Owner must have completed identity verification and linked Master POA (required for dashboard and properties)."""
+    """Owner must have completed identity verification and linked Master POA (required for dashboard and properties). Legacy owners may have poa_waived_at instead."""
     poa = db.query(OwnerPOASignature).filter(OwnerPOASignature.used_by_user_id == current_user.id).first()
-    if not poa:
+    poa_waived = bool(getattr(current_user, "poa_waived_at", None))
+    if not poa and not poa_waived:
         raise HTTPException(
             status_code=403,
             detail="Sign and link the Master POA to complete onboarding. You cannot add properties or access the dashboard until the Master POA is linked.",

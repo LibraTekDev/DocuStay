@@ -63,6 +63,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
   const [agreementModalCode, setAgreementModalCode] = useState<string | null>(null);
   const [inviteLinkInput, setInviteLinkInput] = useState('');
   const [addingInvite, setAddingInvite] = useState(false);
+  const [agreementDownloading, setAgreementDownloading] = useState(false);
 
   const loadData = useCallback(() => {
     Promise.all([
@@ -490,6 +491,30 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
       <div className="grid lg:grid-cols-3 gap-6">
         {/* Left: Authorization & Legal */}
         <div className="lg:col-span-2 space-y-6">
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h3 className="text-base font-semibold text-slate-900 mb-4">Signed agreement</h3>
+            <p className="text-sm text-slate-600 mb-4">Review and download your signed guest agreement for this stay.</p>
+            <Button
+              variant="outline"
+              disabled={agreementDownloading}
+              onClick={async () => {
+                if (!selectedStay) return;
+                setAgreementDownloading(true);
+                try {
+                  const blob = await dashboardApi.guestStaySignedAgreementBlob(selectedStay.stay_id);
+                  const url = URL.createObjectURL(blob);
+                  window.open(url, '_blank');
+                  setTimeout(() => URL.revokeObjectURL(url), 60000);
+                } catch (e) {
+                  notify('error', (e as Error)?.message ?? 'No signed agreement found for this stay.');
+                } finally {
+                  setAgreementDownloading(false);
+                }
+              }}
+            >
+              {agreementDownloading ? 'Loading…' : 'Download signed agreement'}
+            </Button>
+          </div>
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <h3 className="text-base font-semibold text-slate-900 mb-4">Authorization & classification</h3>
             <div className="space-y-3">

@@ -4,7 +4,7 @@ import { Card, Button } from '../../components/UI';
 const FAQS = [
   { q: "How does DocuStay prevent squatter rights?", a: "DocuStay uses AI to analyze jurisdiction-specific laws (like Florida's HB 621) and forces guests to sign a Revocable License rather than a lease. We also strictly cap stay durations and capture biometric verification to prove temporary status." },
   { q: "What is a USAT Token?", a: "The Utility Service Authorization Token is a cryptographically signed pass that authorizes a guest to USE utilities without establishing an account in their name, preventing a common residency indicator." },
-  { q: "How do I remove a guest who won't leave?", a: "If a guest overstays, go to your dashboard and select 'Generate Removal Packet'. This will create a state-specific bundle you can take directly to the Sheriff for immediate removal without a court eviction." },
+  { q: "How do I remove a guest who won't leave?", a: "If a guest overstays, go to your dashboard and click 'Initiate Removal'. This will revoke their USAT token (disabling utility access), send removal notices to both you and the guest, and log all actions for legal documentation. You can then contact local law enforcement with the documentation from your dashboard." },
 ];
 
 const HelpCenter: React.FC<{ navigate: (v: string) => void; embedded?: boolean }> = ({ navigate, embedded }) => {

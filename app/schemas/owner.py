@@ -68,6 +68,10 @@ class PropertyResponse(BaseModel):
     usat_token_released_at: datetime | None = None
     deleted_at: datetime | None = None
     shield_mode_enabled: bool = False
+    occupancy_status: str = "unknown"  # vacant | occupied | unknown | unconfirmed
+    ownership_proof_filename: str | None = None
+    ownership_proof_type: str | None = None
+    ownership_proof_uploaded_at: datetime | None = None
 
     @field_validator("shield_mode_enabled", mode="before")
     @classmethod

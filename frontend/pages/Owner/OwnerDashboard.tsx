@@ -140,8 +140,24 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
     }
   };
 
-  const handleDownloadPacket = (stay: OwnerStayView) => {
+  const handleInitiateRemoval = (stay: OwnerStayView) => {
     setPacketModalStay(stay);
+  };
+
+  const [removalLoading, setRemovalLoading] = useState(false);
+  const handleRemovalConfirm = async () => {
+    if (!packetModalStay) return;
+    setRemovalLoading(true);
+    try {
+      await dashboardApi.initiateRemoval(packetModalStay.stay_id);
+      notify('success', 'Removal initiated. USAT token revoked. Guest and owner notified via email.');
+      setPacketModalStay(null);
+      loadData();
+    } catch (e) {
+      notify('error', (e as Error)?.message ?? 'Failed to initiate removal.');
+    } finally {
+      setRemovalLoading(false);
+    }
   };
 
   const loadLogs = () => {
@@ -400,7 +416,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                               ) : revoked ? (
                                 <span className="text-xs text-slate-500">Revoked</span>
                               ) : overstay ? (
-                                <Button variant="danger" onClick={() => handleDownloadPacket(stay)} className="text-xs py-2">Packet</Button>
+                                <Button variant="danger" onClick={() => handleInitiateRemoval(stay)} className="text-xs py-2">Remove</Button>
                               ) : (
                                 <Button variant="ghost" onClick={() => handleRevokeClick(stay)} className="text-xs py-2 text-red-600 hover:text-red-700">Revoke</Button>
                               )}
@@ -763,14 +779,28 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                           </Button>
                         </div>
                       </div>
-                      {/* Occupancy status (read-only): the FACT */}
+                      {/* Occupancy status: VACANT | OCCUPIED | UNKNOWN | UNCONFIRMED */}
                       <div className="mt-6 pt-6 border-t border-slate-200 rounded-xl bg-slate-50/80 p-4">
                         <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Occupancy status</p>
                         <div className="flex items-center gap-3 flex-wrap">
-                          <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium ${isOccupied ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-700'}`}>
-                            <span className={`w-2 h-2 rounded-full ${isOccupied ? 'bg-emerald-500' : 'bg-slate-400'}`} />
-                            {isOccupied ? 'OCCUPIED' : 'VACANT'}
+                          {(() => {
+                            const displayStatus = isOccupied ? 'OCCUPIED' : (prop.occupancy_status ?? 'unknown').toUpperCase();
+                            return (
+                          <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium ${
+                            displayStatus === 'OCCUPIED' ? 'bg-emerald-100 text-emerald-800' :
+                            displayStatus === 'VACANT' ? 'bg-slate-200 text-slate-700' :
+                            displayStatus === 'UNCONFIRMED' ? 'bg-amber-100 text-amber-800' :
+                            'bg-slate-100 text-slate-600'
+                          }`}>
+                            <span className={`w-2 h-2 rounded-full ${
+                              displayStatus === 'OCCUPIED' ? 'bg-emerald-500' :
+                              displayStatus === 'VACANT' ? 'bg-slate-400' :
+                              displayStatus === 'UNCONFIRMED' ? 'bg-amber-500' : 'bg-slate-400'
+                            }`} />
+                            {displayStatus}
                           </span>
+                            );
+                          })()}
                           {isOccupied && activeStayForProp && (
                             <span className="text-sm text-slate-600">
                               Current guest: <span className="font-medium text-slate-800">{activeStayForProp.guest_name}</span>
@@ -1049,7 +1079,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                     <p className="text-red-700 text-sm">{firstOverstay.guest_name} has exceeded their authorized stay period in {firstOverstay.region_code}.</p>
                   </div>
                 </div>
-                <Button variant="danger" onClick={() => handleDownloadPacket(firstOverstay)} className="whitespace-nowrap">Generate Removal Packet</Button>
+                <Button variant="danger" onClick={() => handleInitiateRemoval(firstOverstay)} className="whitespace-nowrap">Initiate Removal</Button>
               </div>
             )}
 
@@ -1123,7 +1153,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                               {revoked ? (
                                 <span className="text-xs text-slate-500">Revoked</span>
                               ) : overstay ? (
-                                <Button variant="danger" onClick={() => handleDownloadPacket(stay)} className="text-xs py-2">Packet</Button>
+                                <Button variant="danger" onClick={() => handleInitiateRemoval(stay)} className="text-xs py-2">Remove</Button>
                               ) : (
                                 <Button variant="ghost" onClick={() => handleRevokeClick(stay)} className="text-xs py-2 text-red-600 hover:text-red-700">Kill Switch</Button>
                               )}
@@ -1324,32 +1354,47 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
         </>
       )}
 
-      {/* Removal packet modal */}
+      {/* Initiate Removal modal */}
       {packetModalStay && (
         <>
-          <div className="fixed inset-0 bg-black/70 z-40" onClick={() => setPacketModalStay(null)} />
+          <div className="fixed inset-0 bg-black/70 z-40" onClick={() => !removalLoading && setPacketModalStay(null)} />
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <Card className="w-full max-w-lg">
               <div className="p-6 border-b border-slate-200 flex items-center justify-between">
-                <h3 className="text-lg font-bold text-slate-800">Removal packet</h3>
-                <button onClick={() => setPacketModalStay(null)} className="text-slate-600 hover:text-slate-800">
+                <h3 className="text-lg font-bold text-red-700">Initiate Removal</h3>
+                <button onClick={() => !removalLoading && setPacketModalStay(null)} className="text-slate-600 hover:text-slate-800" disabled={removalLoading}>
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
               </div>
               <div className="p-6 space-y-4">
                 <p className="text-sm text-slate-600">
-                  Generating Law Enforcement Removal Packet for <span className="font-bold text-slate-800">{packetModalStay.guest_name}</span>.
+                  You are about to initiate formal removal for <span className="font-bold text-slate-800">{packetModalStay.guest_name}</span> who is in overstay.
                 </p>
+                <div className="bg-red-50 border border-red-200 rounded-lg p-4 space-y-2">
+                  <p className="text-sm font-bold text-red-800">This action will:</p>
+                  <ul className="text-sm text-red-700 list-disc list-inside space-y-1">
+                    <li>Revoke the guest's USAT token (utility access disabled)</li>
+                    <li>Send removal notice email to the guest</li>
+                    <li>Send confirmation email to you</li>
+                    <li>Log all actions for legal documentation</li>
+                  </ul>
+                </div>
+                <div className="text-sm">
+                  <p className="text-slate-500 mb-1">Property</p>
+                  <p className="text-slate-800">{packetModalStay.property_name}</p>
+                </div>
                 <div className="text-sm">
                   <p className="text-slate-500 mb-1">Jurisdiction</p>
                   <p className="text-slate-800 font-mono">{packetModalStay.region_code}</p>
                 </div>
-                <div className="text-sm">
-                  <p className="text-slate-500 mb-1">Applicable</p>
-                  <p className="text-slate-600">{packetModalStay.applicable_laws?.join(', ') || 'N/A'}</p>
+                <div className="flex gap-3 pt-2">
+                  <Button variant="danger" onClick={handleRemovalConfirm} disabled={removalLoading} className="flex-1">
+                    {removalLoading ? 'Processing...' : 'Confirm Removal'}
+                  </Button>
+                  <Button variant="outline" onClick={() => setPacketModalStay(null)} disabled={removalLoading}>
+                    Cancel
+                  </Button>
                 </div>
-                <p className="text-xs text-slate-500">PDF bundle will include: Verified Complaint, USAT Expiry Record, Biometric ID Verification Log.</p>
-                <Button onClick={() => setPacketModalStay(null)}>Close</Button>
               </div>
             </Card>
           </div>
