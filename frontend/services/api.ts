@@ -515,6 +515,53 @@ export interface BulkUploadResult {
   failure_reason: string | null;
 }
 
+/** Utility Bucket: providers and authority letters for a property. */
+export interface PropertyUtilityProviderItem {
+  id: number;
+  provider_name: string;
+  provider_type: string;
+  utilityapi_id: string | null;
+  contact_phone: string | null;
+  contact_email: string | null;
+}
+
+export interface PropertyAuthorityLetterItem {
+  id: number;
+  provider_name: string;
+  provider_type?: string;
+  letter_content: string;
+  email_sent_at?: string | null;
+  signed_at?: string | null;
+  has_signed_pdf?: boolean;
+}
+
+/** User-added provider not in list; verification from background job. */
+export interface PendingProviderItem {
+  id: number;
+  provider_name: string;
+  provider_type: string;
+  verification_status: string; // pending | in_progress | approved | rejected
+}
+
+export interface PropertyUtilitiesResponse {
+  providers: PropertyUtilityProviderItem[];
+  authority_letters: PropertyAuthorityLetterItem[];
+  pending_providers?: PendingProviderItem[];
+}
+
+/** Verify address + get utility options (for add-property flow). */
+export interface VerifyAddressAndUtilitiesResponse {
+  standardized_address: {
+    delivery_line_1?: string | null;
+    city_name?: string | null;
+    state_abbreviation?: string | null;
+    zipcode?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
+  } | null;
+  providers_by_type: Record<string, { name: string; phone: string | null }[]>;
+}
+
 export const propertiesApi = {
   /** Active properties only (dashboard main list and invite dropdown). */
   list: () => request<Property[]>("/owners/properties"),
@@ -536,6 +583,43 @@ export const propertiesApi = {
       body: JSON.stringify(data),
     }),
   get: (id: number) => request<Property>(`/owners/properties/${id}`),
+  /** Utility Bucket: providers and authority letters for this property. */
+  getUtilities: (id: number) => request<PropertyUtilitiesResponse>(`/owners/properties/${id}/utilities`),
+  /** Verify address (Smarty) and fetch utility options by type. For add-property utilities step. */
+  verifyAddressAndUtilities: (data: { street_address: string; city: string; state: string; zip_code?: string }) =>
+    request<VerifyAddressAndUtilitiesResponse>("/owners/verify-address-and-utilities", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  /** Save owner-selected utility providers and generate authority letters. */
+  setPropertyUtilities: (propertyId: number, data: { selected: { provider_type: string; provider_name: string }[]; pending: { provider_type: string; provider_name: string }[] }) =>
+    request<PropertyUtilitiesResponse>(`/owners/properties/${propertyId}/utilities`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  /** Start background lookup for provider contact emails (electric/gas/internet with null email). Returns 202 Accepted. */
+  lookupProviderContacts: (propertyId: number, providerIds?: number[]) =>
+    request<{ message: string }>(`/owners/properties/${propertyId}/provider-contacts/lookup`, {
+      method: "POST",
+      body: JSON.stringify(providerIds != null ? { provider_ids: providerIds } : {}),
+    }),
+  /** Owner config (e.g. test provider email for development). */
+  getOwnerConfig: () => request<{ test_provider_email: string | null }>("/owners/config"),
+  /** Send authority letters to providers by email (in dev: to TEST_PROVIDER_EMAIL). */
+  emailAuthorityLettersToProviders: (propertyId: number) =>
+    request<{ message: string; sent_count: number }>(`/owners/properties/${propertyId}/email-providers`, {
+      method: "POST",
+    }),
+  /** Get signed PDF for an authority letter (owner auth). Returns blob URL for opening in new tab. */
+  getAuthorityLetterSignedPdfUrl: async (propertyId: number, letterId: number): Promise<string> => {
+    const token = getToken();
+    const res = await fetch(`${API_URL}/owners/properties/${propertyId}/authority-letters/${letterId}/signed-pdf`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) throw new Error(await res.text().then((t) => t || res.statusText));
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  },
   update: (id: number, data: {
     property_name?: string;
     street_address?: string;
@@ -726,7 +810,31 @@ export const agreementsApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  /** Authority letter (provider sign flow, public link by token). */
+  getAuthorityLetterByToken: (token: string) =>
+    request<AuthorityLetterDocResponse>(`/agreements/authority-letter/${encodeURIComponent(token)}`),
+  signAuthorityLetterWithDropbox: (token: string, data: {
+    signer_email: string;
+    signer_name: string;
+    acks: { read: boolean; temporary: boolean; vacate: boolean; electronic: boolean };
+  }) =>
+    request<{ signature_id: number }>(`/agreements/authority-letter/${encodeURIComponent(token)}/sign-with-dropbox`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
 };
+
+export interface AuthorityLetterDocResponse {
+  letter_id: number;
+  provider_name: string;
+  provider_type: string;
+  content: string;
+  property_address?: string | null;
+  property_name?: string | null;
+  already_signed?: boolean;
+  signed_at?: string | null;
+  has_dropbox_signed_pdf?: boolean;
+}
 
 // --- Owner Master POA (signup) ---
 export interface OwnerPOADocResponse {

@@ -8,16 +8,26 @@ def _get_fresh_settings():
 
 
 def send_email(to_email: str, subject: str, html_content: str, text_content: str | None = None) -> bool:
-    """Send email via Mailgun (preferred) or SendGrid. Returns True if sent (or skipped when unconfigured)."""
-    # Use fresh settings when called from send_verification_email (cache was cleared there)
+    """Send email via Mailgun (preferred) or SendGrid. From address is always the app config (MAILGUN_FROM_EMAIL / sendgrid_from_email), never the owner or any user. Returns True if sent (or skipped when unconfigured)."""
+    return send_email_with_attachment(to_email, subject, html_content, text_content=text_content)
+
+
+def send_email_with_attachment(
+    to_email: str,
+    subject: str,
+    html_content: str,
+    text_content: str | None = None,
+    attachment: tuple[str, bytes] | None = None,
+) -> bool:
+    """Send email via Mailgun or SendGrid. attachment is (filename, bytes) e.g. ('letter.pdf', pdf_bytes). Returns True if sent."""
     settings = get_settings()
     has_key = bool(settings.mailgun_api_key)
     has_domain = bool(settings.mailgun_domain)
     if has_key and has_domain:
         print(f"[Email] Calling Mailgun API: to={to_email} subject={subject} domain={settings.mailgun_domain}", flush=True)
-        return _send_email_mailgun(to_email, subject, html_content, text_content=text_content, settings=settings)
+        return _send_email_mailgun(to_email, subject, html_content, text_content=text_content, settings=settings, attachment=attachment)
     if settings.sendgrid_api_key:
-        return _send_email_sendgrid(to_email, subject, html_content, text_content=text_content, settings=settings)
+        return _send_email_sendgrid(to_email, subject, html_content, text_content=text_content, settings=settings, attachment=attachment)
     print(
         f"[Email] NOT SENT: to={to_email} subject={subject}. MAILGUN_API_KEY={'set' if has_key else 'MISSING'} MAILGUN_DOMAIN={'set' if has_domain else 'MISSING'}. "
         "Set both in .env and restart the server.",
@@ -30,7 +40,14 @@ MAILGUN_US_BASE = "https://api.mailgun.net"
 MAILGUN_EU_BASE = "https://api.eu.mailgun.net"
 
 
-def _send_email_mailgun(to_email: str, subject: str, html_content: str, text_content: str | None = None, settings=None):
+def _send_email_mailgun(
+    to_email: str,
+    subject: str,
+    html_content: str,
+    text_content: str | None = None,
+    settings=None,
+    attachment: tuple[str, bytes] | None = None,
+):
     if settings is None:
         settings = get_settings()
     try:
@@ -52,8 +69,12 @@ def _send_email_mailgun(to_email: str, subject: str, html_content: str, text_con
             "text": text_content or "",
             "html": html_content or "",
         }
-        with httpx.Client(timeout=10.0) as client:
-            r = client.post(url, auth=("api", settings.mailgun_api_key), data=data)
+        files = None
+        if attachment:
+            filename, payload = attachment
+            files = {"attachment": (filename, payload, "application/pdf")}
+        with httpx.Client(timeout=15.0) as client:
+            r = client.post(url, auth=("api", settings.mailgun_api_key), data=data, files=files)
             ok = 200 <= r.status_code < 300
             if ok:
                 try:
@@ -73,7 +94,7 @@ def _send_email_mailgun(to_email: str, subject: str, html_content: str, text_con
             if r.status_code == 401 and base == MAILGUN_US_BASE:
                 print("[Mailgun] 401 with US endpoint. Retrying with EU endpoint...", flush=True)
                 url_eu = f"{MAILGUN_EU_BASE}/v3/{domain}/messages"
-                r2 = client.post(url_eu, auth=("api", settings.mailgun_api_key), data=data)
+                r2 = client.post(url_eu, auth=("api", settings.mailgun_api_key), data=data, files=files)
                 if 200 <= r2.status_code < 300:
                     print(f"[Mailgun] API success (EU): to={to_email}. If email not received, check spam or add recipient in Mailgun sandbox.", flush=True)
                     return True
@@ -87,12 +108,20 @@ def _send_email_mailgun(to_email: str, subject: str, html_content: str, text_con
         return False
 
 
-def _send_email_sendgrid(to_email: str, subject: str, html_content: str, text_content: str | None = None, settings=None) -> bool:
+def _send_email_sendgrid(
+    to_email: str,
+    subject: str,
+    html_content: str,
+    text_content: str | None = None,
+    settings=None,
+    attachment: tuple[str, bytes] | None = None,
+) -> bool:
     if settings is None:
         settings = get_settings()
     try:
         from sendgrid import SendGridAPIClient
-        from sendgrid.helpers.mail import Mail
+        from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
+        import base64
 
         message = Mail(
             from_email=(settings.sendgrid_from_email, settings.sendgrid_from_name),
@@ -101,6 +130,15 @@ def _send_email_sendgrid(to_email: str, subject: str, html_content: str, text_co
             html_content=html_content,
             plain_text_content=text_content or "",
         )
+        if attachment:
+            filename, payload = attachment
+            encoded = base64.b64encode(payload).decode("utf-8")
+            message.attachment = Attachment(
+                FileContent(encoded),
+                FileName(filename),
+                FileType("application/pdf"),
+                Disposition("attachment"),
+            )
         sg = SendGridAPIClient(settings.sendgrid_api_key)
         sg.send(message)
         return True

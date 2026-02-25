@@ -144,6 +144,7 @@ def main():
     test("POST /owners/properties", add_property)
     test("GET /owners/properties", lambda: req("GET", "/owners/properties", token=owner_token))
     test("GET /owners/properties/{id}", lambda: req("GET", f"/owners/properties/{property_id}", token=owner_token))
+    test("GET /owners/properties/{id}/utilities (Utility Bucket)", lambda: req("GET", f"/owners/properties/{property_id}/utilities", token=owner_token))
 
     # --- Module B2: Guest onboarding ---
     print("\n--- Module B2: Guest Onboarding ---")

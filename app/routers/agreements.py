@@ -8,10 +8,14 @@ from app.models.invitation import Invitation
 from app.models.user import User
 from app.models.agreement_signature import AgreementSignature
 from app.models.owner_poa_signature import OwnerPOASignature
+from app.models.property_utility import PropertyAuthorityLetter
+from app.models.owner import Property
 from app.schemas.agreements import (
     AgreementDocResponse,
     AgreementSignRequest,
     AgreementSignResponse,
+    AuthorityLetterDocResponse,
+    AuthorityLetterSignRequest,
     OwnerPOADocResponse,
     OwnerPOASignRequest,
     OwnerPOASignatureResponse,
@@ -550,4 +554,113 @@ def get_owner_poa_signed_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": 'inline; filename="DocuStay-Master-POA-Signed.pdf"'},
     )
+
+
+# --- Authority letter (utility provider sign via token link) ---
+
+
+def _format_property_address(prop: Property | None) -> str | None:
+    if not prop:
+        return None
+    parts = [prop.street, prop.city, prop.state]
+    if prop.zip_code:
+        parts.append(prop.zip_code)
+    return ", ".join([p for p in parts if p])
+
+
+@router.get("/authority-letter/{token}", response_model=AuthorityLetterDocResponse)
+def get_authority_letter_by_token(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Public: get authority letter by sign token (from email link). No auth."""
+    letter = db.query(PropertyAuthorityLetter).filter(
+        PropertyAuthorityLetter.sign_token == (token or "").strip(),
+    ).first()
+    if not letter:
+        raise HTTPException(status_code=404, detail="Authority letter not found or link expired")
+    prop = db.query(Property).filter(Property.id == letter.property_id).first()
+    return AuthorityLetterDocResponse(
+        letter_id=letter.id,
+        provider_name=letter.provider_name,
+        provider_type=letter.provider_type or "",
+        content=letter.letter_content,
+        property_address=_format_property_address(prop),
+        property_name=prop.name if prop else None,
+        already_signed=letter.signed_at is not None,
+        signed_at=letter.signed_at,
+        has_dropbox_signed_pdf=bool(letter.dropbox_sign_request_id or letter.signed_pdf_bytes),
+    )
+
+
+@router.post("/authority-letter/{token}/sign-with-dropbox", response_model=AgreementSignResponse)
+def sign_authority_letter_with_dropbox(
+    token: str,
+    data: AuthorityLetterSignRequest,
+    req: Request,
+    db: Session = Depends(get_db),
+):
+    """Public: record signer and send authority letter to Dropbox Sign. Signer gets email to sign; we store request_id."""
+    letter = db.query(PropertyAuthorityLetter).filter(
+        PropertyAuthorityLetter.sign_token == (token or "").strip(),
+    ).first()
+    if not letter:
+        raise HTTPException(status_code=404, detail="Authority letter not found or link expired")
+    if letter.signed_at is not None:
+        raise HTTPException(status_code=400, detail="This authority letter has already been signed")
+
+    from datetime import datetime, timezone
+
+    title = f"DocuStay Authority Letter – {letter.provider_name}"
+    pdf_bytes = agreement_content_to_pdf(title, letter.letter_content)
+    request_id = send_signature_request(
+        pdf_bytes,
+        title=title,
+        signer_email=data.signer_email,
+        signer_name=data.signer_name,
+        subject="DocuStay – Please sign the authority letter",
+        message="Please sign this authority letter to confirm receipt and authorization.",
+    )
+    if not request_id:
+        raise HTTPException(status_code=503, detail="Signature service is not configured")
+
+    letter.dropbox_sign_request_id = request_id
+    letter.signer_email = (data.signer_email or "").strip().lower()
+    db.commit()
+
+    return AgreementSignResponse(signature_id=letter.id)
+
+
+@router.get("/authority-letter/{token}/signed-pdf")
+def get_authority_letter_signed_pdf(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Public: return signed PDF for this authority letter (from DB or fetch from Dropbox Sign)."""
+    letter = db.query(PropertyAuthorityLetter).filter(
+        PropertyAuthorityLetter.sign_token == (token or "").strip(),
+    ).first()
+    if not letter:
+        raise HTTPException(status_code=404, detail="Authority letter not found")
+
+    if letter.signed_pdf_bytes:
+        return Response(
+            content=letter.signed_pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="DocuStay-Authority-Letter-{letter.provider_name or "signed"}.pdf"'},
+        )
+    if letter.dropbox_sign_request_id:
+        pdf_bytes = get_signed_pdf(letter.dropbox_sign_request_id)
+        if pdf_bytes:
+            from datetime import datetime, timezone
+            letter.signed_pdf_bytes = pdf_bytes
+            letter.signed_at = datetime.now(timezone.utc)  # approximate; Dropbox doesn't give exact time in this flow
+            db.commit()
+            return Response(
+                content=pdf_bytes,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'inline; filename="DocuStay-Authority-Letter-{letter.provider_name or "signed"}.pdf"'},
+            )
+
+    raise HTTPException(status_code=404, detail="Signed PDF not yet available. The document may still be pending signature.")
 

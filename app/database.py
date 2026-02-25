@@ -7,18 +7,28 @@ no migration scripts need to be run. The scripts in scripts/ (migrate_*.py) are 
 for existing databases that were created before a given column or table was added
 to the models.
 """
+import logging
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.config import get_settings
 
+logger = logging.getLogger("app.startup")
 settings = get_settings()
+logger.info("[startup] Database: creating engine")
+# connect_timeout avoids hanging startup when PostgreSQL is unreachable (e.g. wrong host or DB down)
+_connect_args = {}
+if settings.database_url.strip().startswith("postgresql"):
+    _connect_args["connect_timeout"] = 10
+
 engine = create_engine(
     settings.database_url,
     pool_pre_ping=True,
+    connect_args=_connect_args,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+logger.info("[startup] Database: engine and SessionLocal ready")
 
 
 def get_db():

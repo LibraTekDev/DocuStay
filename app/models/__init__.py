@@ -14,6 +14,7 @@ from app.models.reference_option import ReferenceOption
 from app.models.audit_log import AuditLog
 from app.models.owner_poa_signature import OwnerPOASignature
 from app.models.pending_registration import PendingRegistration
+from app.models.property_utility import PropertyUtilityProvider, PropertyAuthorityLetter
 
 __all__ = [
     "User",
@@ -29,4 +30,6 @@ __all__ = [
     "AuditLog",
     "OwnerPOASignature",
     "PendingRegistration",
+    "PropertyUtilityProvider",
+    "PropertyAuthorityLetter",
 ]

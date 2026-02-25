@@ -1,6 +1,5 @@
 """Smarty US Street API – address standardization for property registration."""
 from dataclasses import dataclass
-from typing import Any
 import httpx
 from app.config import get_settings
 
@@ -39,20 +38,28 @@ def verify_address(street: str, city: str, state: str, zipcode: str | None = Non
     if zipcode and str(zipcode).strip():
         params["zipcode"] = str(zipcode).strip().split("-")[0][:5]  # 5-digit ZIP only
 
+    print(f"[Smarty] API called: street={street!r} city={city!r} state={state!r} zipcode={zipcode!r}")
+
     try:
         with httpx.Client(timeout=15.0) as client:
             resp = client.get(base_url, params=params)
+            print(f"[Smarty] API response status={resp.status_code}")
             if resp.status_code != 200:
+                print(f"[Smarty] API failed: status={resp.status_code} body={resp.text[:500] if resp.text else '(empty)'}")
                 return None
             data = resp.json()
-    except Exception:
+            print(f"[Smarty] API response: {len(data) if isinstance(data, list) else 0} candidate(s)")
+    except Exception as e:
+        print(f"[Smarty] API error: {type(e).__name__}: {e}")
         return None
 
     if not isinstance(data, list) or not data:
+        print(f"[Smarty] API returned no match (empty or invalid response)")
         return None
 
     first = data[0]
     if not isinstance(first, dict):
+        print(f"[Smarty] API response invalid (first candidate not a dict)")
         return None
 
     delivery_line_1 = first.get("delivery_line_1") or ""
@@ -69,7 +76,7 @@ def verify_address(street: str, city: str, state: str, zipcode: str | None = Non
     latitude: float | None = float(lat) if lat is not None and lat != "" else None
     longitude: float | None = float(lon) if lon is not None and lon != "" else None
 
-    return SmartyAddressResult(
+    result = SmartyAddressResult(
         delivery_line_1=str(delivery_line_1).strip(),
         city_name=str(city_name).strip(),
         state_abbreviation=str(state_abbreviation).strip(),
@@ -78,3 +85,5 @@ def verify_address(street: str, city: str, state: str, zipcode: str | None = Non
         latitude=latitude,
         longitude=longitude,
     )
+    print(f"[Smarty] API success: delivery_line_1={result.delivery_line_1!r} city={result.city_name!r} state={result.state_abbreviation!r} zip={result.zipcode!r} plus4={result.plus4_code!r} lat={result.latitude} lon={result.longitude}")
+    return result

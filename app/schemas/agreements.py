@@ -90,3 +90,32 @@ class OwnerPOASignatureResponse(BaseModel):
     class Config:
         from_attributes = True
 
+
+# --- Authority letter (utility provider sign flow) ---
+
+
+class AuthorityLetterDocResponse(BaseModel):
+    """Authority letter document for provider to view and sign (public link by token)."""
+    letter_id: int
+    provider_name: str
+    provider_type: str
+    content: str
+    property_address: str | None = None
+    property_name: str | None = None
+    already_signed: bool = False
+    signed_at: datetime | None = None
+    has_dropbox_signed_pdf: bool = False
+
+
+class AuthorityLetterSignRequest(BaseModel):
+    """Provider signer info for Dropbox Sign."""
+    signer_email: EmailStr
+    signer_name: str = Field(..., min_length=1, max_length=255)
+    acks: AgreementAcks
+
+    @model_validator(mode="after")
+    def validate_acks(self):
+        if not (self.acks.read and self.acks.temporary and self.acks.vacate and self.acks.electronic):
+            raise ValueError("All acknowledgments must be accepted to sign")
+        return self
+

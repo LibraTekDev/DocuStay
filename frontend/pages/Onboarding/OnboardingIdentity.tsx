@@ -39,7 +39,11 @@ export default function OnboardingIdentity({ isPendingOwner, navigate, setLoadin
     const headers: HeadersInit = { "Content-Type": "application/json", Accept: "application/json" };
     if (token) (headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
 
-    const promise = fetch(`${API_URL}${path}`, { method: "POST", headers }).then(async (r) => {
+    const body = isPendingOwner
+      ? JSON.stringify({ return_url: `${window.location.origin}/onboarding/identity-complete` })
+      : undefined;
+
+    const promise = fetch(`${API_URL}${path}`, { method: "POST", headers, body }).then(async (r) => {
       const text = await r.text();
       if (!r.ok) {
         let msg = r.statusText;

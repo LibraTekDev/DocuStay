@@ -2,7 +2,7 @@
 import random
 import string
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 from sqlalchemy.exc import IntegrityError
@@ -28,6 +28,7 @@ from app.schemas.auth import (
     ResendVerificationRequest,
     RegisterPendingResponse,
     LinkPOARequest,
+    PendingOwnerIdentitySessionRequest,
     PendingOwnerIdentitySessionResponse,
     PendingOwnerConfirmIdentityRequest,
     PendingOwnerMeResponse,
@@ -646,18 +647,26 @@ def _stripe_session_failure_detail(session) -> str:
 
 @router.post("/pending-owner/identity-session", response_model=PendingOwnerIdentitySessionResponse)
 def pending_owner_create_identity_session(
+    data: PendingOwnerIdentitySessionRequest | None = Body(None),
     db: Session = Depends(get_db),
     pending: PendingRegistration = Depends(get_pending_owner),
 ):
-    """Create Stripe Identity session for pending owner (after email verified). return_url includes pending_id so we know who to update on return."""
+    """Create Stripe Identity session for pending owner (after email verified). return_url from frontend ensures Stripe redirects to same origin (preserves localStorage token)."""
     if not _stripe_identity_configured():
         raise HTTPException(status_code=503, detail="Identity verification is not configured.")
     import stripe
     settings = get_settings()
     stripe.api_key = settings.stripe_secret_key
-    # Use path-based return URL so Stripe can append ?session_id=... (fragments are often stripped or not updated by redirects).
+    # Prefer frontend-provided return_url so Stripe redirects to same origin (localhost vs 127.0.0.1) - otherwise token is lost.
     base_url = (settings.stripe_identity_return_url or "").split("#")[0].rstrip("/") or "http://localhost:3000"
-    return_url = f"{base_url}/onboarding/identity-complete"
+    candidate = (data.return_url or "").strip().split("#")[0].rstrip("/") if data and data.return_url else ""
+    if candidate and (
+        candidate.startswith("http://localhost") or candidate.startswith("https://localhost") or
+        candidate.startswith("http://127.0.0.1") or candidate.startswith("https://127.0.0.1")
+    ):
+        return_url = f"{candidate.rstrip('/')}/onboarding/identity-complete"
+    else:
+        return_url = f"{base_url}/onboarding/identity-complete"
     try:
         flow_id = (settings.stripe_identity_flow_id or "").strip()
         if flow_id:

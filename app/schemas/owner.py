@@ -95,3 +95,86 @@ class PropertyResponse(BaseModel):
 
 class OwnerProfileCreate(BaseModel):
     pass
+
+
+class UtilityProviderResponse(BaseModel):
+    id: int
+    provider_name: str
+    provider_type: str
+    utilityapi_id: str | None
+    contact_phone: str | None
+    contact_email: str | None
+
+
+class AuthorityLetterResponse(BaseModel):
+    id: int
+    provider_name: str
+    provider_type: str = ""
+    letter_content: str
+    email_sent_at: datetime | None = None
+    signed_at: datetime | None = None
+    has_signed_pdf: bool = False
+
+
+class PendingProviderResponse(BaseModel):
+    """User-added provider not in our list; verification status from background job."""
+    id: int
+    provider_name: str
+    provider_type: str
+    verification_status: str  # pending | in_progress | approved | rejected
+
+
+class PropertyUtilityProvidersResponse(BaseModel):
+    providers: list[UtilityProviderResponse]
+    authority_letters: list[AuthorityLetterResponse]
+    pending_providers: list[PendingProviderResponse] = []  # custom providers with verification status
+
+
+# --- Verify address + utility options (for add-property flow) ---
+
+
+class VerifyAddressRequest(BaseModel):
+    street_address: str
+    city: str
+    state: str
+    zip_code: str | None = None
+
+
+class UtilityOptionItem(BaseModel):
+    name: str
+    phone: str | None = None
+
+
+class StandardizedAddressResponse(BaseModel):
+    delivery_line_1: str | None = None
+    city_name: str | None = None
+    state_abbreviation: str | None = None
+    zipcode: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+class VerifyAddressAndUtilitiesResponse(BaseModel):
+    standardized_address: StandardizedAddressResponse | None = None
+    providers_by_type: dict[str, list[UtilityOptionItem]]  # electric, gas, water, internet
+
+
+class SelectedUtilityItem(BaseModel):
+    provider_type: str  # electric, gas, water, internet
+    provider_name: str
+
+
+class SetPropertyUtilitiesRequest(BaseModel):
+    selected: list[SelectedUtilityItem] = []  # user-chosen from list (or None skipped)
+    pending: list[SelectedUtilityItem] = []  # user-added custom names -> go to pending_providers table
+
+
+class OwnerConfigResponse(BaseModel):
+    """Config exposed to owner frontend (e.g. dev-only test provider email)."""
+    test_provider_email: str | None = None
+
+
+class EmailProvidersResponse(BaseModel):
+    """Result of sending authority letters to providers (or test address in dev)."""
+    message: str
+    sent_count: int = 0

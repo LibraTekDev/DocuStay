@@ -5,7 +5,7 @@ import { InviteGuestModal } from '../../components/InviteGuestModal';
 import { UserSession } from '../../types';
 import { analyzeStay, JURISDICTION_RULES } from '../../services/jleService';
 import { RiskAssessment } from '../../components/RiskAssessment';
-import { propertiesApi, dashboardApi, type Property, type OwnerStayView } from '../../services/api';
+import { propertiesApi, dashboardApi, type Property, type OwnerStayView, type PropertyUtilitiesResponse } from '../../services/api';
 
 function formatStayDuration(startStr: string, endStr: string): string {
   const start = new Date(startStr);
@@ -62,7 +62,11 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
   const [confirmingOccupancy, setConfirmingOccupancy] = useState(false);
   const [confirmOccupancyAction, setConfirmOccupancyAction] = useState<'vacated' | 'renewed' | 'holdover' | null>(null);
   const [renewEndDate, setRenewEndDate] = useState('');
-
+  const [utilities, setUtilities] = useState<PropertyUtilitiesResponse | null>(null);
+  const [utilitiesLoading, setUtilitiesLoading] = useState(false);
+  const [lookupContactsLoading, setLookupContactsLoading] = useState(false);
+  const [emailProvidersLoading, setEmailProvidersLoading] = useState(false);
+  const [expandedLetterId, setExpandedLetterId] = useState<number | null>(null);
   const id = Number(propertyId);
   const stateKey = property?.state ?? 'FL';
   const jurisdictionInfo = JURISDICTION_RULES[stateKey as keyof typeof JURISDICTION_RULES] ?? JURISDICTION_RULES.FL;
@@ -98,6 +102,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
     }
     setLoading(true);
     setError(null);
+    setUtilities(null); // clear so we don't show previous property's utilities
     Promise.all([propertiesApi.get(id), dashboardApi.ownerStays()])
       .then(([prop, staysData]) => {
         setProperty(prop);
@@ -114,6 +119,17 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  const loadUtilities = useCallback(() => {
+    if (!id || isNaN(id)) return;
+    setUtilitiesLoading(true);
+    propertiesApi.getUtilities(id).then(setUtilities).catch(() => setUtilities(null)).finally(() => setUtilitiesLoading(false));
+  }, [id]);
+
+  // Load utilities when user opens the Utilities tab
+  useEffect(() => {
+    if (activeTab === 'utilities' && property && property.id === id) loadUtilities();
+  }, [activeTab, property, id, loadUtilities]);
 
   /** When edit modal opens, always pre-fill form from current property so existing values are retained. */
   const syncEditFormFromProperty = useCallback(() => {
@@ -335,7 +351,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
       </header>
 
       <div className="flex border-b border-slate-200 mb-8 overflow-x-auto no-scrollbar">
-        {['Overview', 'Guests', 'Legal Info'].map(tab => (
+        {['Overview', 'Utilities', 'Guests', 'Legal Info'].map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab.toLowerCase())}
@@ -635,6 +651,163 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
           </div>
         )}
 
+        {activeTab === 'utilities' && (
+          <div className="space-y-8">
+            <Card className="p-6 border-slate-200">
+              <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">Utility providers (Utility Bucket)</h3>
+                <div className="flex flex-wrap items-center gap-2">
+                  {utilities?.authority_letters?.length ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={emailProvidersLoading}
+                      onClick={async () => {
+                        if (!id || isNaN(Number(id))) return;
+                        setEmailProvidersLoading(true);
+                        try {
+                          const res = await propertiesApi.emailAuthorityLettersToProviders(Number(id));
+                          notify('success', res.sent_count ? res.message : res.message);
+                        } catch (e) {
+                          notify('error', (e as Error)?.message ?? 'Failed to send emails.');
+                        } finally {
+                          setEmailProvidersLoading(false);
+                        }
+                      }}
+                    >
+                      {emailProvidersLoading ? 'Sending…' : 'Email authority letters to providers'}
+                    </Button>
+                  ) : null}
+                  {utilities?.providers?.length && utilities.providers.some((p) => !p.contact_email && ['electric', 'gas', 'internet'].includes(p.provider_type)) ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      disabled={lookupContactsLoading}
+                      onClick={async () => {
+                        if (!id || isNaN(Number(id))) return;
+                        setLookupContactsLoading(true);
+                        try {
+                          await propertiesApi.lookupProviderContacts(Number(id));
+                          notify('success', 'Contact lookup started. Refresh in a few seconds to see any new emails.');
+                          setTimeout(() => loadUtilities(), 3000);
+                        } catch (e) {
+                          notify('error', (e as Error)?.message ?? 'Lookup failed.');
+                        } finally {
+                          setLookupContactsLoading(false);
+                        }
+                      }}
+                    >
+                      {lookupContactsLoading ? 'Starting…' : 'Look up contacts'}
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+              {utilitiesLoading ? (
+                <p className="text-slate-500 text-sm">Loading…</p>
+              ) : !utilities?.providers?.length && !utilities?.pending_providers?.length ? (
+                <p className="text-slate-500 text-sm">No utility providers on file for this property. They are added automatically when the property is registered (manual or bulk upload).</p>
+              ) : null}
+              {(utilities?.providers?.length ?? 0) > 0 && !utilitiesLoading && (
+                <ul className="space-y-3">
+                  {utilities?.providers?.map((p) => (
+                    <li key={p.id} className="flex flex-col gap-1 py-3 border-b border-slate-100 last:border-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-700 capitalize">{p.provider_type}</span>
+                        <span className="font-medium text-slate-800">{p.provider_name}</span>
+                        {p.contact_phone && <span className="text-sm text-slate-600">{p.contact_phone}</span>}
+                      </div>
+                      <div className="text-sm text-slate-600">
+                        {p.contact_email ? (
+                          <a href={`mailto:${p.contact_email}`} className="text-blue-600 hover:underline">{p.contact_email}</a>
+                        ) : (
+                          <span className="text-slate-400 italic">No email on file</span>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {!utilitiesLoading && (utilities?.pending_providers?.length ?? 0) > 0 ? (
+                    <div className="mt-4 pt-4 border-t border-slate-200">
+                      <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-2">Custom providers (verification)</p>
+                      <ul className="space-y-2">
+                        {utilities.pending_providers.map((pp) => (
+                          <li key={pp.id} className="flex flex-wrap items-center gap-2 text-sm">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-50 text-amber-800 capitalize">{pp.provider_type}</span>
+                            <span className="font-medium text-slate-800">{pp.provider_name}</span>
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                              pp.verification_status === 'approved' ? 'bg-green-100 text-green-800' :
+                              pp.verification_status === 'in_progress' ? 'bg-blue-100 text-blue-800' :
+                              pp.verification_status === 'rejected' ? 'bg-red-100 text-red-800' :
+                              'bg-slate-100 text-slate-600'
+                            }`}>
+                              {pp.verification_status === 'approved' ? 'Approved' : pp.verification_status === 'in_progress' ? 'In progress' : pp.verification_status === 'rejected' ? 'Rejected' : 'Pending'}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+              ) : null}
+            </Card>
+            <Card className="p-6 border-slate-200">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-4">Authority letters</h3>
+              <p className="text-slate-600 text-sm mb-4">DocuStay is the only authorized agent to issue Burn-In codes for this address. Authority letters are shown only to the property owner. View the letter content sent to each utility below.</p>
+              {utilitiesLoading ? (
+                <p className="text-slate-500 text-sm">Loading…</p>
+              ) : !utilities?.authority_letters?.length ? (
+                <p className="text-slate-500 text-sm">No authority letters on file.</p>
+              ) : (
+                <div className="space-y-3">
+                  {utilities.authority_letters.map((letter) => (
+                    <div key={letter.id} className="border border-slate-200 rounded-lg overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setExpandedLetterId(expandedLetterId === letter.id ? null : letter.id)}
+                        className="w-full flex items-center justify-between px-4 py-3 text-left bg-slate-50 hover:bg-slate-100 transition-colors"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium text-slate-800">To: {letter.provider_name}</span>
+                          {letter.email_sent_at && (
+                            <span className="text-xs text-slate-500">Email sent</span>
+                          )}
+                          {letter.signed_at && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                              Signed {new Date(letter.signed_at).toLocaleDateString()}
+                            </span>
+                          )}
+                        </div>
+                        <svg className={`w-5 h-5 text-slate-500 transition-transform ${expandedLetterId === letter.id ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                      </button>
+                      {expandedLetterId === letter.id && (
+                        <div className="px-4 py-4 bg-white border-t border-slate-200 space-y-3">
+                          <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans">{letter.letter_content}</pre>
+                          {(letter.has_signed_pdf || letter.signed_at) && (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={async () => {
+                                try {
+                                  const url = await propertiesApi.getAuthorityLetterSignedPdfUrl(id, letter.id);
+                                  window.open(url, '_blank');
+                                } catch (e) {
+                                  notify('error', (e as Error)?.message ?? 'Failed to load signed PDF.');
+                                }
+                              }}
+                            >
+                              View signed PDF
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          </div>
+        )}
         {activeTab === 'guests' && (
           <Card className="overflow-hidden border-slate-200">
             <table className="w-full text-left">

@@ -71,6 +71,32 @@ class Settings(BaseSettings):
     def strip_smarty(cls, v: str) -> str:
         return (v or "").strip()
 
+    # Utility Bucket: Rewiring America, Water CSV, FCC BDC CSV (see docs/UTILITY_BUCKET.md)
+    rewiring_america_api_key: str = ""  # Electric + gas by ZIP
+    water_csv_path: str = ""  # EPA SDWIS CSV (e.g. CSV.csv); empty = project root CSV.csv
+    water_sdwa_csv_path: str = ""  # EPA SDWA bulk: path to SDWA_PUB_WATER_SYSTEMS.csv or folder (e.g. SDWA_latest_downloads); empty = auto-detect
+    fcc_broadband_csv_path: str = ""  # BDC provider summary CSV; empty = auto-detect in project root or data/fcc/
+    # FCC National Broadband Map Public Data API (location-based internet; optional)
+    fcc_broadband_api_username: str = ""  # FCC login email (e.g. from broadbandmap.fcc.gov)
+    fcc_public_map_data_apis: str = ""  # API token from Manage API Access
+    # SQLite cache for county-level internet providers (FCC Location Coverage); populated by background job
+    fcc_internet_cache_path: str = ""  # e.g. data/utility_providers/internet_cache.db; empty = default under project root
+    # Reserved for future use (e.g. bill fetch): utilityapi_api_key
+    utilityapi_api_key: str = ""
+    # Provider contact lookup (SerpApi): find contact email for electric/gas/internet providers in background
+    serpapi_key: str = ""
+    # Max concurrent utility background jobs (provider contact lookup, pending verification); excess jobs are queued
+    utility_background_jobs_max_workers: int = 2
+    # Development: email for "Test provider" shown per utility type (frontend-only); emails to providers can be sent here
+    test_provider_email: str = ""
+    # Base URL of the frontend app (for provider authority letter links in emails), e.g. https://app.docustay.com
+    frontend_base_url: str = ""
+
+    @field_validator("rewiring_america_api_key", "water_csv_path", "water_sdwa_csv_path", "fcc_broadband_csv_path", "fcc_broadband_api_username", "fcc_public_map_data_apis", "fcc_internet_cache_path", "utilityapi_api_key", "serpapi_key", "test_provider_email", "frontend_base_url", mode="before")
+    @classmethod
+    def strip_utility(cls, v: str) -> str:
+        return (v or "").strip()
+
     class Config:
         env_file = str(_env_path)
         extra = "ignore"

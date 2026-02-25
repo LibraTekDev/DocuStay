@@ -148,6 +148,11 @@ class LinkPOARequest(BaseModel):
     authorized_agent_certified: bool = False  # required True when owner_type is authorized_agent
 
 
+class PendingOwnerIdentitySessionRequest(BaseModel):
+    """Optional: frontend sends return_url so Stripe redirects to same origin (preserves localStorage token)."""
+    return_url: str | None = None
+
+
 class PendingOwnerIdentitySessionResponse(BaseModel):
     client_secret: str
     url: str | None = None

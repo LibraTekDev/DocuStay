@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { AppState, UserType, AccountStatus } from './types';
 import { Card, Button, LoadingOverlay, ErrorModal } from './components/UI';
 import { NotificationCenter } from './components/NotificationCenter';
@@ -20,6 +20,7 @@ import GuestLogin from './pages/Guest/GuestLogin';
 import OnboardingIdentity from './pages/Onboarding/OnboardingIdentity';
 import OnboardingIdentityComplete from './pages/Onboarding/OnboardingIdentityComplete';
 import OnboardingPOA from './pages/Onboarding/OnboardingPOA';
+import ProviderAuthorityLetter from './pages/Provider/ProviderAuthorityLetter';
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>({
@@ -53,6 +54,8 @@ const App: React.FC = () => {
 
   // Restore session from localStorage token on page load
   useEffect(() => {
+    const SESSION_RESTORE_TIMEOUT_MS = 15000;
+
     const restoreSession = async () => {
       // Skip session restore on onboarding pages (they use pending-owner tokens, not full user tokens)
       const currentView = hashToView(window.location.hash || '');
@@ -67,6 +70,10 @@ const App: React.FC = () => {
         setSessionRestoring(false);
         return;
       }
+
+      const timeoutId = setTimeout(() => {
+        setSessionRestoring(false);
+      }, SESSION_RESTORE_TIMEOUT_MS);
 
       try {
         const user = await authApi.me();
@@ -85,12 +92,22 @@ const App: React.FC = () => {
         // Token invalid/expired, clear it
         setToken(null);
       } finally {
+        clearTimeout(timeoutId);
         setSessionRestoring(false);
       }
     };
 
     restoreSession();
   }, []);
+
+  // Clear global loading when view changes so a previous page's setLoading(true) doesn't leave overlay stuck
+  const prevViewRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (prevViewRef.current !== null && prevViewRef.current !== view) {
+      setLoading(false);
+    }
+    prevViewRef.current = view;
+  }, [view]);
 
   const navigate = (newView: string) => {
     window.location.hash = newView;
@@ -304,7 +321,15 @@ const App: React.FC = () => {
         {view === 'settings' && state.user?.user_type !== UserType.PROPERTY_OWNER && <Settings user={state.user} navigate={navigate} />}
         {view === 'help' && state.user?.user_type !== UserType.PROPERTY_OWNER && <HelpCenter navigate={navigate} />}
         {view.startsWith('property/') && state.user?.user_type === UserType.PROPERTY_OWNER && <PropertyDetail propertyId={view.split('/')[1]} user={state.user} navigate={navigate} setLoading={setLoading} notify={showNotification} />}
-        
+
+        {/* Provider authority letter (public link from email) */}
+        {view.startsWith('provider/authority/') && (
+          <ProviderAuthorityLetter
+            token={view.replace(/^provider\/authority\//, '')}
+            notify={showNotification}
+          />
+        )}
+
         {/* Guest Flow Views */}
         {view === 'guest-dashboard' && state.user?.user_type === UserType.GUEST && <GuestDashboard user={state.user} navigate={navigate} notify={showNotification} />}
         {view === 'sign-agreement' && state.user?.user_type === UserType.GUEST && <SignAgreement user={state.user} navigate={navigate} notify={showNotification} />}

@@ -3,7 +3,7 @@ import csv
 import io
 import secrets
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -12,12 +12,40 @@ from app.models.user import User
 from app.models.owner import OwnerProfile, Property, PropertyType, USAT_TOKEN_STAGED, USAT_TOKEN_RELEASED
 from app.models.invitation import Invitation
 from app.models.guest import PurposeOfStay, RelationshipToOwner
-from app.schemas.owner import BulkUploadResult, PropertyCreate, PropertyResponse, PropertyUpdate, ReleaseUsatTokenRequest
+from app.schemas.owner import (
+    AuthorityLetterResponse,
+    BulkUploadResult,
+    EmailProvidersResponse,
+    OwnerConfigResponse,
+    PendingProviderResponse,
+    PropertyCreate,
+    PropertyResponse,
+    PropertyUpdate,
+    PropertyUtilityProvidersResponse,
+    ReleaseUsatTokenRequest,
+    SetPropertyUtilitiesRequest,
+    StandardizedAddressResponse,
+    UtilityOptionItem,
+    UtilityProviderResponse,
+    VerifyAddressAndUtilitiesResponse,
+    VerifyAddressRequest,
+)
 from app.dependencies import get_current_user, require_owner, require_owner_onboarding_complete
 from app.models.stay import Stay
 from app.models.guest import GuestProfile
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_SHIELD_MODE
 from app.services.smarty import verify_address
+from app.services.utility_lookup import lookup_utility_providers, generate_authority_letters, _provider_to_raw
+from app.services.utility_lookup import UtilityProvider
+from app.models.property_utility import PropertyUtilityProvider, PropertyAuthorityLetter
+from app.background_jobs import submit_utility_job
+from app.services.provider_contact_search import run_provider_contact_lookup_job
+from app.services.census_geocoder import geocode_coordinates
+from app.utility_providers.pending_provider_verification_job import run_pending_provider_verification_job
+from app.utility_providers.sqlite_cache import add_pending_provider, get_pending_providers_for_property
+from app.config import get_settings
+from app.services.authority_letter_email import send_authority_letter_to_provider
+from app.services.dropbox_sign import get_signed_pdf
 
 router = APIRouter(prefix="/owners", tags=["owners"])
 
@@ -61,6 +89,16 @@ def _ensure_property_usat_token(prop: Property, db: Session) -> None:
     db.add(prop)
 
 
+@router.get("/config", response_model=OwnerConfigResponse)
+def get_owner_config(
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Return owner-facing config (e.g. test provider email for development)."""
+    settings = get_settings()
+    email = (settings.test_provider_email or "").strip() or None
+    return OwnerConfigResponse(test_provider_email=email)
+
+
 @router.get("/properties", response_model=list[PropertyResponse])
 def list_my_properties(
     db: Session = Depends(get_db),
@@ -88,6 +126,66 @@ def list_my_properties(
     return [PropertyResponse.model_validate(p) for p in props]
 
 
+@router.post("/verify-address-and-utilities", response_model=VerifyAddressAndUtilitiesResponse)
+def verify_address_and_utilities(
+    data: VerifyAddressRequest,
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Run Smarty address verification and utility lookup; return standardized address and providers by type (for add-property utilities step)."""
+    street = (data.street_address or "").strip()
+    city = (data.city or "").strip()
+    state = (data.state or "").strip()
+    zip_code = (data.zip_code or "").strip() or None
+    print(f"[PropertyFlow] verify_address_and_utilities: street={street!r}, city={city!r}, state={state!r}, zip={zip_code!r}")
+    if not street or not city or not state:
+        raise HTTPException(status_code=400, detail="street_address, city, and state are required")
+    print(f"[PropertyFlow] Calling Smarty verify_address(...)")
+    result = verify_address(street=street, city=city, state=state, zipcode=zip_code)
+    standardized_address = None
+    lat = None
+    lon = None
+    zip5 = zip_code
+    if result:
+        standardized_address = StandardizedAddressResponse(
+            delivery_line_1=result.delivery_line_1,
+            city_name=result.city_name,
+            state_abbreviation=result.state_abbreviation,
+            zipcode=result.zipcode,
+            latitude=result.latitude,
+            longitude=result.longitude,
+        )
+        lat = result.latitude
+        lon = result.longitude
+        zip5 = result.zipcode or zip_code
+    address = ", ".join(filter(None, [
+        result.delivery_line_1 if result else street,
+        f"{result.city_name if result else city}, {result.state_abbreviation if result else state} {zip5 or ''}".strip(),
+    ])) if result else f"{street}, {city}, {state} {zip_code or ''}".strip()
+    print(f"[PropertyFlow] Smarty result: standardized={result is not None}; calling lookup_utility_providers(zip={zip5!r}, ...)")
+    providers = lookup_utility_providers(
+        zip_code=zip5,
+        lat=lat,
+        lon=lon,
+        address=address,
+        city=result.city_name if result else city,
+        state_abbreviation=result.state_abbreviation if result else state,
+    )
+    print(f"[PropertyFlow] lookup_utility_providers returned {len(providers)} provider(s)")
+    # Only show providers in the user's area; cap each type so we don't overwhelm the UI
+    _MAX_PROVIDERS_PER_TYPE = 50
+    by_type: dict[str, list[UtilityOptionItem]] = {}
+    for p in providers:
+        t = p.provider_type
+        if t not in by_type:
+            by_type[t] = []
+        if len(by_type[t]) < _MAX_PROVIDERS_PER_TYPE:
+            by_type[t].append(UtilityOptionItem(name=p.name, phone=p.phone))
+    return VerifyAddressAndUtilitiesResponse(
+        standardized_address=standardized_address,
+        providers_by_type=by_type,
+    )
+
+
 @router.post("/properties", response_model=PropertyResponse)
 def add_property(
     request: Request,
@@ -95,6 +193,7 @@ def add_property(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
 ):
+    print(f"[PropertyFlow] add_property: street={getattr(data, 'street_address', None) or getattr(data, 'street', None)!r}, ...")
     street = data.street_address or data.street
     if not street:
         raise HTTPException(status_code=400, detail="street or street_address required")
@@ -135,6 +234,7 @@ def add_property(
         prop.usat_token_state = USAT_TOKEN_STAGED
 
     _apply_smarty_address(prop, street, data.city, data.state, data.zip_code)
+    # Utility providers are set by the frontend via POST /properties/{id}/utilities after owner selects from dropdowns
 
     property_display = (data.property_name or "").strip() or f"{street}, {data.city}, {data.state}".strip(", ")
     create_log(
@@ -151,11 +251,13 @@ def add_property(
     )
     db.commit()
     db.refresh(prop)
+    print(f"[PropertyFlow] add_property: created property_id={prop.id}")
     return PropertyResponse.model_validate(prop)
 
 
 def _apply_smarty_address(prop: Property, street: str, city: str, state: str, zip_code: str | None) -> None:
     """Call Smarty US Street API and populate standardized address fields on the property."""
+    print(f"[PropertyFlow] _apply_smarty_address: calling Smarty verify_address for property_id={prop.id}")
     result = verify_address(street=street, city=city, state=state, zipcode=zip_code)
     if result:
         prop.smarty_delivery_line_1 = result.delivery_line_1
@@ -165,6 +267,57 @@ def _apply_smarty_address(prop: Property, street: str, city: str, state: str, zi
         prop.smarty_plus4_code = result.plus4_code
         prop.smarty_latitude = result.latitude
         prop.smarty_longitude = result.longitude
+
+
+def _run_utility_bucket_for_property(prop: Property, db: Session) -> None:
+    """Run Utility Bucket: Census → Rewiring America → Water CSV → FCC BDC CSV; save providers + authority letters."""
+    zip_code = prop.smarty_zipcode or prop.zip_code
+    lat = prop.smarty_latitude
+    lon = prop.smarty_longitude
+    city = prop.smarty_city_name or prop.city
+    state_abbrev = prop.smarty_state_abbreviation or prop.state
+    address = ", ".join(
+        filter(
+            None,
+            [
+                prop.smarty_delivery_line_1 or prop.street,
+                (prop.smarty_city_name or prop.city) + ", " + (prop.smarty_state_abbreviation or prop.state or "") + " " + (prop.smarty_zipcode or prop.zip_code or ""),
+            ],
+        )
+    )
+    if not address.strip():
+        address = (prop.street or "") + ", " + (prop.city or "") + ", " + (prop.state or "")
+    providers = lookup_utility_providers(
+        zip_code=zip_code,
+        lat=lat,
+        lon=lon,
+        address=address,
+        city=city,
+        state_abbreviation=state_abbrev,
+    )
+    if not providers:
+        return
+    letters = generate_authority_letters(providers, address, prop.name)
+    for p, content in letters:
+        prv = PropertyUtilityProvider(
+            property_id=prop.id,
+            provider_name=p.name,
+            provider_type=p.provider_type,
+            utilityapi_id=p.utilityapi_id,
+            contact_phone=p.phone,
+            contact_email=getattr(p, "email", None),
+            raw_data=_provider_to_raw(p),
+        )
+        db.add(prv)
+        db.flush()
+        letter = PropertyAuthorityLetter(
+            property_id=prop.id,
+            property_utility_provider_id=prv.id,
+            provider_name=p.name,
+            provider_type=p.provider_type,
+            letter_content=content,
+        )
+        db.add(letter)
 
 
 def _normalize_addr(s: str | None) -> str:
@@ -316,6 +469,10 @@ def bulk_upload_properties(
                 prop.usat_token = "USAT-" + secrets.token_hex(8).upper() + "-" + str(prop.id)
                 prop.usat_token_state = USAT_TOKEN_STAGED
             _apply_smarty_address(prop, street.strip(), city.strip(), state_upper, zip_code)
+            try:
+                _run_utility_bucket_for_property(prop, db)
+            except Exception as e:
+                print(f"[Owners] Utility bucket failed for property {prop.id} (row {row_num}): {e}")
             created += 1
             property_display = (property_name or "").strip() or f"{street.strip()}, {city.strip()}, {state_upper}".strip(", ")
             create_log(
@@ -390,6 +547,7 @@ def get_property(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
 ):
+    print(f"[PropertyFlow] get_property: property_id={property_id}")
     profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="No owner profile")
@@ -400,6 +558,391 @@ def get_property(
     if not prop:
         raise HTTPException(status_code=404, detail="Property not found")
     return PropertyResponse.model_validate(prop)
+
+
+@router.get("/properties/{property_id}/utilities", response_model=PropertyUtilityProvidersResponse)
+def get_property_utilities(
+    property_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Return utility providers and authority letters for the property (Utility Bucket)."""
+    print(f"[PropertyFlow] get_property_utilities: property_id={property_id}")
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="No owner profile")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    providers = db.query(PropertyUtilityProvider).filter(PropertyUtilityProvider.property_id == prop.id).all()
+    letters = db.query(PropertyAuthorityLetter).filter(PropertyAuthorityLetter.property_id == prop.id).all()
+    pending_list = get_pending_providers_for_property(prop.id)
+    test_email_override = (get_settings().test_provider_email or "").strip() or None
+    # Known wrong email from SerpApi when searching "Test provider" - never show this for Test provider
+    _wrong_test_provider_email = "contact@switchhealth.ca"
+    def _is_test_provider(p) -> bool:
+        return (p.provider_name or "").strip().lower() == "test provider"
+    # For "Test provider", fix DB and always use TEST_PROVIDER_EMAIL from config
+    if test_email_override:
+        test_lower = test_email_override.lower()
+        for p in providers:
+            if _is_test_provider(p):
+                current = (p.contact_email or "").strip().lower()
+                if current != test_lower:
+                    p.contact_email = test_email_override
+        db.commit()
+    def _contact_email(p) -> str | None:
+        if _is_test_provider(p):
+            # Never return wrong SerpApi email; use config or nothing
+            if test_email_override:
+                return test_email_override
+            stored = (p.contact_email or "").strip().lower()
+            if stored == _wrong_test_provider_email:
+                return None
+            return p.contact_email or None
+        return p.contact_email
+    with_email = sum(1 for p in providers if _contact_email(p))
+    print(f"[PropertyFlow] get_property_utilities: returning {len(providers)} providers ({with_email} with contact_email), {len(letters)} letters, {len(pending_list)} pending")
+    return PropertyUtilityProvidersResponse(
+        providers=[
+            UtilityProviderResponse(
+                id=p.id,
+                provider_name=p.provider_name,
+                provider_type=p.provider_type,
+                utilityapi_id=p.utilityapi_id,
+                contact_phone=p.contact_phone,
+                contact_email=_contact_email(p),
+            )
+            for p in providers
+        ],
+        authority_letters=[
+            AuthorityLetterResponse(
+                id=l.id,
+                provider_name=l.provider_name,
+                provider_type=l.provider_type or "",
+                letter_content=l.letter_content,
+                email_sent_at=getattr(l, "email_sent_at", None),
+                signed_at=getattr(l, "signed_at", None),
+                has_signed_pdf=bool(getattr(l, "signed_pdf_bytes", None)),
+            )
+            for l in letters
+        ],
+        pending_providers=[
+            PendingProviderResponse(id=pp["id"], provider_name=pp["provider_name"], provider_type=pp["provider_type"], verification_status=pp["verification_status"])
+            for pp in pending_list
+        ],
+    )
+
+
+@router.post("/properties/{property_id}/utilities", response_model=PropertyUtilityProvidersResponse)
+def set_property_utilities(
+    property_id: int,
+    body: SetPropertyUtilitiesRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Save owner-selected utility providers and generate authority letters. Pending (custom) providers are stored for later detail fetch."""
+    print(f"[PropertyFlow] set_property_utilities: property_id={property_id}, selected={len(body.selected or [])}, pending={len(body.pending or [])}")
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="No owner profile")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    # Replace existing providers and letters for this property
+    db.query(PropertyAuthorityLetter).filter(PropertyAuthorityLetter.property_id == prop.id).delete()
+    db.query(PropertyUtilityProvider).filter(PropertyUtilityProvider.property_id == prop.id).delete()
+    db.flush()
+    print(f"[PropertyFlow] Cleared existing providers and letters for property_id={property_id}")
+    address = ", ".join(filter(
+        None,
+        [
+            prop.smarty_delivery_line_1 or prop.street,
+            f"{prop.smarty_city_name or prop.city}, {prop.smarty_state_abbreviation or prop.state} {prop.smarty_zipcode or prop.zip_code or ''}".strip(),
+        ],
+    ))
+    if not address.strip():
+        address = f"{prop.street or ''}, {prop.city or ''}, {prop.state or ''}".strip(", ")
+    # County for pending providers (from Census if we have lat/lon)
+    county_name: str | None = None
+    lat, lon = prop.smarty_latitude, prop.smarty_longitude
+    if lat is not None and lon is not None:
+        geo = geocode_coordinates(lon, lat)
+        if geo:
+            county_name = geo.county_name or None
+    state_abbrev_for_pending = (prop.smarty_state_abbreviation or prop.state or "").strip().upper() or None
+    # Add pending (user-added custom) providers to SQLite with property_id, state, county for verification job
+    pending_count = 0
+    for item in body.pending or []:
+        pt = (item.provider_type or "").strip().lower()
+        pn = (item.provider_name or "").strip()
+        if pt and pn:
+            add_pending_provider(pt, pn, property_id=prop.id, state=state_abbrev_for_pending, county=county_name)
+            pending_count += 1
+            print(f"[PropertyFlow] Added pending provider to SQLite: type={pt}, name={pn}, state={state_abbrev_for_pending!r}, county={county_name!r}")
+    # Save selected providers and generate authority letters; look up contact for water
+    state_abbrev = (prop.smarty_state_abbreviation or prop.state or "").strip().upper()
+    city = (prop.smarty_city_name or prop.city or "").strip() or None
+    test_email_for_save = (get_settings().test_provider_email or "").strip() or None
+    print(f"[PropertyFlow] Property state={state_abbrev}, city={city or '(any)'}; saving selected providers")
+    for item in body.selected or []:
+        pn = (item.provider_name or "").strip()
+        pt = (item.provider_type or "").strip().lower()
+        if not pn or not pt:
+            continue
+        contact_phone: str | None = None
+        contact_email: str | None = None
+        if pn == "Test provider" and test_email_for_save:
+            contact_email = test_email_for_save
+            print(f"[PropertyFlow] Test provider selected for {pt}; using test_provider_email for authority letter")
+        elif pt == "water" and state_abbrev:
+            print(f"[PropertyFlow] Water provider: calling get_water_provider_contact(name={pn!r}, state={state_abbrev}, city={city!r})")
+            from app.services.water_lookup import get_water_provider_contact
+            contact = get_water_provider_contact(pn, state_abbrev, city=city or None)
+            contact_phone = contact.get("contact_phone")
+            contact_email = contact.get("contact_email")
+            print(f"[PropertyFlow] Water contact result: email={contact_email!r}, phone={contact_phone!r}")
+        u = UtilityProvider(name=pn, provider_type=pt, utilityapi_id=None, phone=contact_phone, email=contact_email, raw={})
+        prv = PropertyUtilityProvider(
+            property_id=prop.id,
+            provider_name=u.name,
+            provider_type=u.provider_type,
+            utilityapi_id=u.utilityapi_id,
+            contact_phone=u.phone,
+            contact_email=u.email,
+            raw_data=_provider_to_raw(u),
+        )
+        db.add(prv)
+        db.flush()
+        content = next(
+            (c for _p, c in generate_authority_letters([u], address, prop.name or "")),
+            "",
+        )
+        letter = PropertyAuthorityLetter(
+            property_id=prop.id,
+            property_utility_provider_id=prv.id,
+            provider_name=u.name,
+            provider_type=u.provider_type,
+            letter_content=content,
+        )
+        db.add(letter)
+        print(f"[PropertyFlow] Saved provider: name={pn}, type={pt}, contact_email={contact_email!r}")
+    db.commit()
+    print(f"[PropertyFlow] Committed {len(body.selected or [])} providers and authority letters")
+    # Send authority letter email only when the provider has contact_email. In testing (TEST_PROVIDER_EMAIL set), send only to that address—never to real authorities.
+    letters_for_email = db.query(PropertyAuthorityLetter).filter(PropertyAuthorityLetter.property_id == prop.id).all()
+    test_email_send = (get_settings().test_provider_email or "").strip().lower() or None
+    for letter in letters_for_email:
+        to_email = None
+        if (letter.provider_name or "").strip() == "Test provider" and test_email_send:
+            to_email = test_email_send
+        elif letter.property_utility_provider_id:
+            prv = db.query(PropertyUtilityProvider).filter(PropertyUtilityProvider.id == letter.property_utility_provider_id).first()
+            if prv and (prv.contact_email or "").strip():
+                to_email = (prv.contact_email or "").strip().lower()
+        if to_email:
+            if test_email_send and to_email != test_email_send:
+                print(f"[PropertyFlow] Testing env: skipping send to real authority {to_email} for {letter.provider_name}")
+                continue
+            try:
+                if send_authority_letter_to_provider(db, letter, to_email, letter.provider_name, prop.name):
+                    print(f"[PropertyFlow] Authority letter email sent to {to_email} for {letter.provider_name}")
+            except Exception as e:
+                print(f"[PropertyFlow] Failed to send authority letter email for {letter.provider_name}: {e}")
+    # Start background lookup for providers missing contact_email (electric/gas/internet)
+    serp_key = (get_settings().serpapi_key or "").strip()
+    if serp_key:
+        need_lookup = db.query(PropertyUtilityProvider).filter(
+            PropertyUtilityProvider.property_id == prop.id,
+            PropertyUtilityProvider.contact_email.is_(None),
+            PropertyUtilityProvider.provider_type.in_(("electric", "gas", "internet")),
+        ).all()
+        if need_lookup:
+            print(f"[PropertyFlow] BACKGROUND JOB ENQUEUED: provider_contact_lookup property_id={prop.id} ({len(need_lookup)} providers to lookup)")
+            background_tasks.add_task(submit_utility_job, run_provider_contact_lookup_job, prop.id)
+        else:
+            print(f"[PropertyFlow] SERPAPI_KEY set but no providers need lookup (all have contact_email or water-only)")
+    else:
+        print(f"[PropertyFlow] SERPAPI_KEY not set; skipping background provider-contact lookup")
+    if pending_count and serp_key:
+        print(f"[PropertyFlow] BACKGROUND JOB ENQUEUED: pending_provider_verification ({pending_count} new pending)")
+        background_tasks.add_task(submit_utility_job, run_pending_provider_verification_job)
+    providers = db.query(PropertyUtilityProvider).filter(PropertyUtilityProvider.property_id == prop.id).all()
+    letters = db.query(PropertyAuthorityLetter).filter(PropertyAuthorityLetter.property_id == prop.id).all()
+    pending_list = get_pending_providers_for_property(prop.id)
+    print(f"[PropertyFlow] set_property_utilities: returning 200 with {len(providers)} providers, {len(letters)} letters, {len(pending_list)} pending")
+    return PropertyUtilityProvidersResponse(
+        providers=[
+            UtilityProviderResponse(
+                id=p.id,
+                provider_name=p.provider_name,
+                provider_type=p.provider_type,
+                utilityapi_id=p.utilityapi_id,
+                contact_phone=p.contact_phone,
+                contact_email=p.contact_email,
+            )
+            for p in providers
+        ],
+        authority_letters=[
+            AuthorityLetterResponse(
+                id=l.id,
+                provider_name=l.provider_name,
+                provider_type=l.provider_type or "",
+                letter_content=l.letter_content,
+                email_sent_at=getattr(l, "email_sent_at", None),
+                signed_at=getattr(l, "signed_at", None),
+                has_signed_pdf=bool(getattr(l, "signed_pdf_bytes", None)),
+            )
+            for l in letters
+        ],
+        pending_providers=[
+            PendingProviderResponse(id=pp["id"], provider_name=pp["provider_name"], provider_type=pp["provider_type"], verification_status=pp["verification_status"])
+            for pp in pending_list
+        ],
+    )
+
+
+class ProviderContactsLookupRequest(BaseModel):
+    """Optional: limit lookup to these provider row ids. If omitted, all providers for the property with null contact_email (electric/gas/internet) are looked up."""
+    provider_ids: list[int] | None = None
+
+
+class ProviderContactsLookupResponse(BaseModel):
+    message: str
+
+
+@router.post(
+    "/properties/{property_id}/provider-contacts/lookup",
+    response_model=ProviderContactsLookupResponse,
+    status_code=202,
+)
+def lookup_provider_contacts(
+    property_id: int,
+    background_tasks: BackgroundTasks,
+    body: ProviderContactsLookupRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """
+    Start a background job to find contact emails for this property's providers (electric/gas/internet)
+    that have no contact_email set. Uses SerpApi when SERPAPI_KEY is configured.
+    Returns 202 Accepted; when the user loads the property later, provider emails may be filled.
+    """
+    print(f"[PropertyFlow] lookup_provider_contacts: property_id={property_id}, body.provider_ids={getattr(body, 'provider_ids', None) if body else None}")
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="No owner profile")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    if not (get_settings().serpapi_key or "").strip():
+        print(f"[PropertyFlow] lookup_provider_contacts: SERPAPI_KEY not set -> 202 with message (not configured)")
+        return ProviderContactsLookupResponse(message="Provider contact lookup not configured (SERPAPI_KEY).")
+    provider_ids = body.provider_ids if body else None
+    print(f"[PropertyFlow] BACKGROUND JOB ENQUEUED: provider_contact_lookup property_id={property_id} provider_ids={provider_ids}")
+    background_tasks.add_task(submit_utility_job, run_provider_contact_lookup_job, property_id, provider_ids)
+    return ProviderContactsLookupResponse(message="Provider contact lookup started.")
+
+
+@router.post("/properties/{property_id}/email-providers", response_model=EmailProvidersResponse)
+def email_authority_letters_to_providers(
+    property_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """
+    Send authority letter email to each provider that has contact_email (one email per letter with sign link).
+    When TEST_PROVIDER_EMAIL is set, only send to that address (i.e. only for providers the user chose as "Test provider"); never send to real authorities in testing.
+    """
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="No owner profile")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    letters = db.query(PropertyAuthorityLetter).filter(PropertyAuthorityLetter.property_id == prop.id).all()
+    if not letters:
+        return EmailProvidersResponse(message="No authority letters for this property.", sent_count=0)
+    test_email_send = (get_settings().test_provider_email or "").strip().lower() or None
+    sent_count = 0
+    for letter in letters:
+        to_email = None
+        if (letter.provider_name or "").strip() == "Test provider" and test_email_send:
+            to_email = test_email_send
+        elif letter.property_utility_provider_id:
+            prv = db.query(PropertyUtilityProvider).filter(PropertyUtilityProvider.id == letter.property_utility_provider_id).first()
+            if prv and (prv.contact_email or "").strip():
+                to_email = (prv.contact_email or "").strip().lower()
+        if to_email:
+            if test_email_send and to_email != test_email_send:
+                continue  # Testing: do not send to real authorities
+            try:
+                if send_authority_letter_to_provider(db, letter, to_email, letter.provider_name, prop.name, resend=True):
+                    sent_count += 1
+                    print(f"[PropertyFlow] email-providers: authority letter sent to {to_email} for {letter.provider_name}")
+            except Exception as e:
+                print(f"[PropertyFlow] email-providers: failed for {letter.provider_name}: {e}")
+    return EmailProvidersResponse(
+        message=f"Authority letter emails sent to {sent_count} provider(s)." if sent_count else "No emails sent (no provider with contact email, or in testing only Test provider receives emails).",
+        sent_count=sent_count,
+    )
+
+
+@router.get("/properties/{property_id}/authority-letters/{letter_id}/signed-pdf")
+def get_authority_letter_signed_pdf_owner(
+    property_id: int,
+    letter_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Return the signed PDF for an authority letter (owner only). Fetches from Dropbox if not yet in DB."""
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="No owner profile")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    letter = db.query(PropertyAuthorityLetter).filter(
+        PropertyAuthorityLetter.id == letter_id,
+        PropertyAuthorityLetter.property_id == prop.id,
+    ).first()
+    if not letter:
+        raise HTTPException(status_code=404, detail="Authority letter not found")
+    if letter.signed_pdf_bytes:
+        return Response(
+            content=letter.signed_pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="DocuStay-Authority-Letter-{letter.provider_name or "signed"}.pdf"'},
+        )
+    if letter.dropbox_sign_request_id:
+        pdf_bytes = get_signed_pdf(letter.dropbox_sign_request_id)
+        if pdf_bytes:
+            from datetime import datetime, timezone
+            letter.signed_pdf_bytes = pdf_bytes
+            letter.signed_at = letter.signed_at or datetime.now(timezone.utc)
+            db.commit()
+            return Response(
+                content=pdf_bytes,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'inline; filename="DocuStay-Authority-Letter-{letter.provider_name or "signed"}.pdf"'},
+            )
+    raise HTTPException(status_code=404, detail="Signed PDF not yet available. The provider may not have signed yet.")
 
 
 _ALLOWED_PROOF_TYPES = frozenset({"deed", "tax_bill", "utility_bill", "mortgage_statement"})
