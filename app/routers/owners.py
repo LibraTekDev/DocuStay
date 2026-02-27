@@ -297,7 +297,7 @@ def _run_utility_bucket_for_property(prop: Property, db: Session) -> None:
     )
     if not providers:
         return
-    letters = generate_authority_letters(providers, address, prop.name)
+    letters = generate_authority_letters(providers, address, prop.name, prop.region_code)
     for p, content in letters:
         prv = PropertyUtilityProvider(
             property_id=prop.id,
@@ -722,7 +722,7 @@ def set_property_utilities(
         db.add(prv)
         db.flush()
         content = next(
-            (c for _p, c in generate_authority_letters([u], address, prop.name or "")),
+            (c for _p, c in generate_authority_letters([u], address, prop.name or "", prop.region_code)),
             "",
         )
         letter = PropertyAuthorityLetter(

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Card, Input, Button, ErrorModal } from '../../components/UI';
+import { HeroBackground } from '../../components/HeroBackground';
 import { authApiGuest } from '../../services/api';
 
 interface GuestSignupProps {
@@ -116,15 +117,14 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
   };
 
   return (
-    <div className="flex-grow flex flex-col items-center p-6 py-10">
-      <div className="w-full max-w-4xl">
-        <Card className="p-0 overflow-hidden">
-          <div className="border-b border-gray-200 bg-white px-8 py-6">
+    <HeroBackground className="flex-grow flex flex-col items-center py-8">
+      <div className="w-full max-w-4xl rounded-xl overflow-hidden shadow-xl border border-gray-200/60 bg-white/40 backdrop-blur-sm">
+        <div className="border-b border-gray-200/50 bg-white/30 px-8 py-6">
             <h1 className="text-xl font-semibold text-gray-900">Guest Signup</h1>
             <p className="text-gray-600 text-sm mt-1">Create your guest account.</p>
           </div>
 
-          <div className="p-8 md:p-10 bg-gradient-to-b from-blue-100/80 via-blue-50/70 to-sky-100/60">
+          <div className="p-8 md:p-10 bg-gradient-to-b from-blue-100/35 via-blue-50/30 to-sky-100/25">
             <form onSubmit={handleSubmit} className="grid md:grid-cols-2 gap-x-10 gap-y-6">
               <div className="md:col-span-2">
                 <Input
@@ -221,15 +221,14 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
               </div>
             </form>
           </div>
-        </Card>
-      </div>
+        </div>
 
       <ErrorModal
         open={errorModal.open}
         message={errorModal.message}
         onClose={() => setErrorModal((p) => ({ ...p, open: false }))}
       />
-    </div>
+    </HeroBackground>
   );
 };
 

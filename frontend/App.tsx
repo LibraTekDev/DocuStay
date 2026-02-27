@@ -21,6 +21,7 @@ import OnboardingIdentity from './pages/Onboarding/OnboardingIdentity';
 import OnboardingIdentityComplete from './pages/Onboarding/OnboardingIdentityComplete';
 import OnboardingPOA from './pages/Onboarding/OnboardingPOA';
 import ProviderAuthorityLetter from './pages/Provider/ProviderAuthorityLetter';
+import Landing from './pages/Landing';
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>({
@@ -334,22 +335,9 @@ const App: React.FC = () => {
         {view === 'guest-dashboard' && state.user?.user_type === UserType.GUEST && <GuestDashboard user={state.user} navigate={navigate} notify={showNotification} />}
         {view === 'sign-agreement' && state.user?.user_type === UserType.GUEST && <SignAgreement user={state.user} navigate={navigate} notify={showNotification} />}
 
-        {/* Home / Default – also fallback when hash is a protected route but user not loaded (avoids blank page) */}
+        {/* Home / Landing – also fallback when hash is a protected route but user not loaded (avoids blank page) */}
         {(view === '' || (view && !state.user && ['dashboard', 'add-property', 'settings', 'guest-dashboard', 'onboarding/identity'].some((v) => view === v || view.startsWith(v + '/')))) && (
-          <div className="flex-grow flex flex-col items-center justify-center py-20 px-4">
-            <div className="text-center max-w-2xl mx-auto">
-              <h1 className="text-4xl md:text-5xl font-semibold text-gray-900 mb-4 leading-tight">
-                Your property, <span className="text-blue-700">legally protected.</span>
-              </h1>
-              <p className="text-gray-600 mb-10 max-w-lg mx-auto">
-                DocuStay helps property owners manage temporary stays with clear agreements and verification—reducing risk of tenancy claims.
-              </p>
-              <div className="flex flex-col sm:flex-row justify-center gap-4">
-                <Button variant="primary" onClick={() => navigate('register')} className="px-8 py-3.5 bg-blue-700 hover:bg-blue-800 focus:ring-blue-600">Get started</Button>
-                <Button variant="outline" onClick={() => navigate('login')} className="px-8 py-3.5 border-blue-300 text-blue-700 hover:bg-blue-100 hover:border-blue-400 focus:ring-blue-500">Sign in</Button>
-              </div>
-            </div>
-          </div>
+          <Landing navigate={navigate} />
         )}
       </main>
 

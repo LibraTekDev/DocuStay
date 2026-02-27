@@ -33,8 +33,29 @@ class UtilityProvider:
     raw: dict[str, Any]
 
 
-def _authority_letter_content(provider: UtilityProvider, address: str, property_name: str) -> str:
-    """Generate Authority Letter content for a utility provider."""
+def _territory_paragraph(region_code: str | None) -> str:
+    """Return territory-specific paragraph for the authority letter (placeholder content per region)."""
+    if not region_code or not (region_code := region_code.strip().upper()):
+        return "This authorization is issued for the property's jurisdiction."
+    # Dummy territory-specific content per region (can be replaced with real legal text later)
+    _territory_text: dict[str, str] = {
+        "NYC": "This authorization is issued for the territory of New York City. DocuStay operates in accordance with applicable New York short-term stay and utility authorization requirements.",
+        "FL": "This authorization is issued for the territory of Florida. DocuStay operates in accordance with applicable Florida short-term stay and utility authorization requirements.",
+        "CA": "This authorization is issued for the territory of California. DocuStay operates in accordance with applicable California short-term stay and utility authorization requirements.",
+        "TX": "This authorization is issued for the territory of Texas. DocuStay operates in accordance with applicable Texas short-term stay and utility authorization requirements.",
+        "WA": "This authorization is issued for the territory of Washington. DocuStay operates in accordance with applicable Washington short-term stay and utility authorization requirements.",
+    }
+    return _territory_text.get(region_code, f"This authorization is issued for the territory of {region_code}. DocuStay is the authorized agent for utility activation at the property listed below.")
+
+
+def _authority_letter_content(
+    provider: UtilityProvider,
+    address: str,
+    property_name: str,
+    region_code: str | None = None,
+) -> str:
+    """Generate Authority Letter content for a utility provider (per property and per territory)."""
+    territory_para = _territory_paragraph(region_code)
     return f"""DocuStay Authority Letter – Burn-In Code Authorization
 
 To: {provider.name}
@@ -46,6 +67,8 @@ This letter serves as official notice that DocuStay is the ONLY authorized agent
 No other party—including tenants, guests, or squatters—may activate or modify utility services for this property without authorization through DocuStay.
 
 Property address: {address}
+
+{territory_para}
 
 For verification, please contact DocuStay.
 """
@@ -247,6 +270,7 @@ def generate_authority_letters(
     providers: list[UtilityProvider],
     address: str,
     property_name: str | None = None,
+    region_code: str | None = None,
 ) -> list[tuple[UtilityProvider, str]]:
-    """Generate Authority Letter content for each provider. Returns [(provider, letter_content), ...]"""
-    return [(p, _authority_letter_content(p, address, property_name or "")) for p in providers]
+    """Generate Authority Letter content for each provider (per property and per territory). Returns [(provider, letter_content), ...]"""
+    return [(p, _authority_letter_content(p, address, property_name or "", region_code)) for p in providers]

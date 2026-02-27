@@ -1,6 +1,6 @@
-
 import React, { useState } from 'react';
 import { Card, Input, Button, ErrorModal } from '../../components/UI';
+import { HeroBackground } from '../../components/HeroBackground';
 import { authApi } from '../../services/api';
 
 interface LoginProps {
@@ -36,10 +36,10 @@ const Login: React.FC<LoginProps> = ({ onLogin, setLoading, notify, navigate }) 
   };
 
   return (
-    <div className="flex-grow flex items-center justify-center p-6">
-      <div className="w-full max-w-5xl flex rounded-xl overflow-hidden border border-gray-200 bg-white min-h-[520px] shadow-sm">
+    <HeroBackground className="flex-grow">
+      <div className="w-full max-w-5xl flex rounded-xl overflow-hidden border border-gray-200/60 bg-white/40 backdrop-blur-sm min-h-[520px] shadow-xl">
         {/* Left: Simple info */}
-        <div className="hidden lg:flex w-1/2 bg-gradient-to-br from-blue-100 via-blue-50 to-sky-100/90 p-10 flex-col justify-center border-r border-blue-200/80">
+        <div className="hidden lg:flex w-1/2 bg-gradient-to-br from-blue-100/40 via-blue-50/40 to-sky-100/40 p-10 flex-col justify-center border-r border-blue-200/40">
           <h2 className="text-2xl font-semibold text-gray-900 mb-3">Owner login</h2>
           <p className="text-gray-600 text-sm mb-8">Manage properties, invitations, and stays in one place.</p>
           <ul className="space-y-3 text-sm text-gray-600">
@@ -56,7 +56,7 @@ const Login: React.FC<LoginProps> = ({ onLogin, setLoading, notify, navigate }) 
         </div>
 
         {/* Right: Form */}
-        <div className="w-full lg:w-1/2 bg-white p-8 md:p-10 flex flex-col justify-center">
+        <div className="w-full lg:w-1/2 bg-white/40 backdrop-blur-sm p-8 md:p-10 flex flex-col justify-center">
           <div className="max-w-sm mx-auto w-full">
             <h1 className="text-xl font-semibold text-gray-900 mb-1 lg:hidden">Owner login</h1>
             <p className="text-gray-600 text-sm mb-6">Sign in to your account.</p>
@@ -127,7 +127,7 @@ const Login: React.FC<LoginProps> = ({ onLogin, setLoading, notify, navigate }) 
         message={errorModal.message}
         onClose={() => setErrorModal((p) => ({ ...p, open: false }))}
       />
-    </div>
+    </HeroBackground>
   );
 };
 

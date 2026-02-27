@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Input, Button, ErrorModal } from '../../components/UI';
+import { HeroBackground } from '../../components/HeroBackground';
 import { authApi } from '../../services/api';
 
 const parseInviteCode = (raw: string): string => {
@@ -64,10 +65,10 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
   };
 
   return (
-    <div className="flex-grow flex items-center justify-center p-6">
-      <div className="w-full max-w-5xl flex rounded-xl overflow-hidden border border-gray-200 bg-white min-h-[520px] shadow-sm">
+    <HeroBackground className="flex-grow">
+      <div className="w-full max-w-5xl flex rounded-xl overflow-hidden border border-gray-200/60 bg-white/40 backdrop-blur-sm min-h-[520px] shadow-xl">
         {/* Left: Info */}
-        <div className="hidden lg:flex w-1/2 bg-gradient-to-br from-blue-100 via-blue-50 to-sky-100/90 p-10 flex-col justify-center border-r border-blue-200/80">
+        <div className="hidden lg:flex w-1/2 bg-gradient-to-br from-blue-100/40 via-blue-50/40 to-sky-100/40 p-10 flex-col justify-center border-r border-blue-200/40">
           <h2 className="text-2xl font-semibold text-gray-900 mb-3">Guest login</h2>
           <p className="text-gray-600 text-sm mb-8">Access your stays and invitations.</p>
           <ul className="space-y-3 text-sm text-gray-600">
@@ -82,14 +83,14 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
             </li>
           </ul>
           {inviteCode && (
-            <div className="mt-8 p-4 rounded-lg bg-white/80 border border-blue-300">
+            <div className="mt-8 p-4 rounded-lg bg-white/70 border border-blue-300/80">
               <p className="text-sm text-gray-700">You have an invitation. Sign in and we’ll accept it.</p>
             </div>
           )}
         </div>
 
         {/* Right: Form */}
-        <div className="w-full lg:w-1/2 bg-white p-8 md:p-10 flex flex-col justify-center">
+        <div className="w-full lg:w-1/2 bg-white/40 backdrop-blur-sm p-8 md:p-10 flex flex-col justify-center">
           <div className="max-w-sm mx-auto w-full">
             <h1 className="text-xl font-semibold text-gray-900 mb-1 lg:hidden">Guest login</h1>
             <p className="text-gray-600 text-sm mb-6">
@@ -163,7 +164,7 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
         message={errorModal.message}
         onClose={() => setErrorModal((p) => ({ ...p, open: false }))}
       />
-    </div>
+    </HeroBackground>
   );
 };
 

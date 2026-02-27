@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Input, Button, ErrorModal } from '../../components/UI';
+import { HeroBackground } from '../../components/HeroBackground';
 import { authApi } from '../../services/api';
 import { getOwnerSignupErrorFriendly } from '../../utils/ownerSignupErrors';
 import { validatePhone } from '../../utils/validatePhone';
@@ -83,10 +84,10 @@ const RegisterOwner: React.FC<Props> = ({ setPendingVerification, onLogin, navig
   };
 
   return (
-    <div className="flex-grow flex flex-col items-center justify-center p-6">
-      <div className="w-full max-w-6xl flex rounded-xl overflow-hidden border border-gray-200 bg-white shadow-sm">
+    <HeroBackground className="flex-grow flex flex-col items-center justify-center">
+      <div className="w-full max-w-6xl flex rounded-xl overflow-hidden border border-gray-200/60 bg-white/40 backdrop-blur-sm shadow-xl">
         {/* Left: Info */}
-        <div className="hidden lg:flex w-2/5 bg-gradient-to-br from-blue-100 via-blue-50 to-sky-100/90 p-10 flex-col justify-center border-r border-blue-200/80">
+        <div className="hidden lg:flex w-2/5 bg-gradient-to-br from-blue-100/40 via-blue-50/40 to-sky-100/40 p-10 flex-col justify-center border-r border-blue-200/40">
           <h2 className="text-2xl font-semibold text-gray-900 mb-3">Create owner account</h2>
           <p className="text-gray-600 text-sm mb-8">Manage temporary stays with clear agreements and verification.</p>
           <ul className="space-y-4 text-sm">
@@ -106,8 +107,8 @@ const RegisterOwner: React.FC<Props> = ({ setPendingVerification, onLogin, navig
           </ul>
         </div>
 
-        {/* Right: Form */}
-        <div className="w-full lg:w-3/5 bg-white pt-8 px-8 pb-6 md:pt-12 md:px-12 md:pb-8 overflow-y-auto no-scrollbar max-h-[90vh]">
+        {/* Right: Form — no inner scroll; page scrolls as a whole */}
+        <div className="w-full lg:w-3/5 bg-white/40 backdrop-blur-sm pt-6 px-6 pb-6 md:pt-8 md:px-10 md:pb-8 flex flex-col justify-center min-h-0">
           <div className="max-w-2xl mx-auto w-full">
             <div className="flex justify-between items-center mb-6">
               <h1 className="text-xl font-semibold text-gray-900">Create Owner Account</h1>
@@ -236,7 +237,7 @@ const RegisterOwner: React.FC<Props> = ({ setPendingVerification, onLogin, navig
         actionLabel={errorModal.message.toLowerCase().includes("already registered") ? "Go to login" : undefined}
         onAction={errorModal.message.toLowerCase().includes("already registered") ? () => navigate("login") : undefined}
       />
-    </div>
+    </HeroBackground>
   );
 };
 

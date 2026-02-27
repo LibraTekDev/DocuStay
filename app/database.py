@@ -11,6 +11,7 @@ import logging
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from fastapi import HTTPException
 from app.config import get_settings
 
 logger = logging.getLogger("app.startup")
@@ -32,7 +33,11 @@ logger.info("[startup] Database: engine and SessionLocal ready")
 
 
 def get_db():
-    db = SessionLocal()
+    try:
+        db = SessionLocal()
+    except Exception as e:
+        logger.exception("Database session creation failed: %s", e)
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable") from e
     try:
         yield db
     finally:
