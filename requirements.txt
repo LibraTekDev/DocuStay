@@ -6,33 +6,22 @@ python-multipart>=0.0.9
 
 # Database
 sqlalchemy>=2.0.25
-asyncpg>=0.29.0
 psycopg2-binary>=2.9.9
-alembic>=1.13.1
 
 # Auth
 PyJWT>=2.8.0
-passlib[bcrypt]>=1.7.4
 bcrypt>=4.0.0
-pydantic[email-validator]>=2.6.1
 pydantic[email]>=2.6.1
-email-validator>=2.0.0
 pydantic-settings>=2.1.0
 
 # Notifications
 sendgrid>=6.11.0
 twilio>=8.11.1
 
-# Background / scheduler (Module G)
-apscheduler>=3.10.4
-
 # Utils
 python-dotenv>=1.0.1
 httpx>=0.25.0
 playwright>=1.49.0
-requests>=2.31.0
-pandas>=2.0.0
-pyarrow>=14.0.0
 reportlab>=4.0.0
 
 # Stripe (Identity verification)
