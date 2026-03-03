@@ -50,10 +50,10 @@ const Landing: React.FC<LandingProps> = ({ navigate }) => {
         <div className="relative z-10 max-w-4xl mx-auto px-6 text-center text-white">
           <h1 className="text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight mb-5 drop-shadow-lg">
             Your property,{' '}
-            <span className="text-sky-300">legally protected.</span>
+            <span className="text-sky-300">documented.</span>
           </h1>
           <p className="text-lg sm:text-xl text-slate-200/95 max-w-2xl mx-auto mb-10 leading-relaxed">
-            DocuStay helps property owners manage short-term stays with clear agreements, identity verification, and utility controls—reducing the risk of tenancy claims and keeping you in control.
+            DocuStay is a neutral documentation platform: authorization records, identity verification, and an immutable audit trail for temporary stays.
           </p>
           <div className="flex flex-col sm:flex-row justify-center gap-4">
             <Button
@@ -95,7 +95,7 @@ const Landing: React.FC<LandingProps> = ({ navigate }) => {
             Why DocuStay?
           </h2>
           <p className="text-gray-600 text-center max-w-2xl mx-auto mb-16">
-            Built for owners who want temporary guests without long-term tenant risk.
+            Built for owners who want clear documentation and authorization records for temporary stays.
           </p>
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-8">
             {[
@@ -116,7 +116,7 @@ const Landing: React.FC<LandingProps> = ({ navigate }) => {
               },
               {
                 title: 'Stay limits & alerts',
-                desc: 'Region-aware stay limits and Dead Man\'s Switch help protect your property.',
+                desc: 'Region-aware stay limits and status alerts keep your documentation up to date.',
                 icon: '🛡️',
               },
             ].map((item) => (
@@ -160,7 +160,7 @@ const Landing: React.FC<LandingProps> = ({ navigate }) => {
       <section className="py-20 px-6 bg-slate-900 text-white">
         <div className="max-w-2xl mx-auto text-center">
           <h2 className="text-2xl sm:text-3xl font-bold mb-4">
-            Ready to protect your property?
+            Ready to document your stays?
           </h2>
           <p className="text-slate-300 mb-8">
             Join DocuStay and manage short-term stays with confidence.
@@ -176,7 +176,7 @@ const Landing: React.FC<LandingProps> = ({ navigate }) => {
       </section>
 
       <footer className="py-6 px-4 bg-slate-950 text-slate-400 text-center text-sm">
-        © {new Date().getFullYear()} DocuStay. Legal technology platform—not a law firm.
+        © {new Date().getFullYear()} DocuStay. Documentation platform—not a law firm.
       </footer>
     </div>
   );

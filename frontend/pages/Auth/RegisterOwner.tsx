@@ -92,9 +92,9 @@ const RegisterOwner: React.FC<Props> = ({ setPendingVerification, onLogin, navig
           <p className="text-gray-600 text-sm mb-8">Manage temporary stays with clear agreements and verification.</p>
           <ul className="space-y-4 text-sm">
             {[
-              { title: "Legal Shield", desc: "Agreements that waive squatter claims." },
+              { title: "Stay documentation", desc: "Authorization records and audit trail for each stay." },
               { title: "Guest Verification", desc: "Know who is entering your property." },
-              { title: "Stay Tracking", desc: "Alerts before legal time limits." },
+              { title: "Stay Tracking", desc: "Alerts when stays approach documented limits." },
             ].map(f => (
               <li key={f.title} className="flex gap-3">
                 <span className="w-1.5 h-1.5 rounded-full bg-blue-600 mt-1.5 shrink-0" />
@@ -203,7 +203,7 @@ const RegisterOwner: React.FC<Props> = ({ setPendingVerification, onLogin, navig
               <div className={`md:col-span-2 space-y-3 mt-2 p-4 rounded-lg bg-gradient-to-r from-blue-50 to-sky-50/80 border ${errors.terms?.error || errors.privacy?.error ? 'border-red-300' : 'border-blue-200'}`}>
                 <label className="flex items-start gap-3 cursor-pointer">
                   <input type="checkbox" name="terms_agreed" checked={formData.terms_agreed} onChange={handleCheckboxChange} className="w-5 h-5 rounded border-gray-300 text-blue-700 focus:ring-blue-600 shrink-0 mt-0.5" />
-                  <span className="text-sm text-gray-600 leading-relaxed">I agree to the <a href="#" className="text-blue-700 font-medium hover:underline">Terms of Service</a> and the platform's specific protocols for preventing squatter tenancy rights.</span>
+                  <span className="text-sm text-gray-600 leading-relaxed">I agree to the <a href="#" className="text-blue-700 font-medium hover:underline">Terms of Service</a> and the platform's documentation and authorization protocols for temporary stays.</span>
                 </label>
                 {errors.terms?.error && <p className="text-xs text-red-500 pl-8">{errors.terms.error}</p>}
                 <label className="flex items-start gap-3 cursor-pointer">

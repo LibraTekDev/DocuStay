@@ -69,7 +69,7 @@ const Settings: React.FC<{
       )}
       <header className="mb-6">
         <h1 className="text-2xl md:text-3xl font-bold text-gray-900 tracking-tight">Settings</h1>
-        <p className="text-gray-600 text-sm mt-1">Manage your DocuStay account and enforcement preferences.</p>
+        <p className="text-gray-600 text-sm mt-1">Manage your DocuStay account and preferences.</p>
       </header>
 
       <div className="space-y-8">
@@ -145,7 +145,7 @@ const Settings: React.FC<{
           <Card className="p-8 md:p-10">
             <h2 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-3 mb-6">Master Power of Attorney (POA)</h2>
             <p className="text-gray-600 text-sm mb-4">
-              The Master POA is the one-time document you signed during registration that designates DocuStay as your Authorized Agent for utility tokens, legal evidence, and audit trails for all your properties.
+              The Master POA is the one-time document you signed during registration that designates DocuStay as your Authorized Agent for utility authorization and audit trails for all your properties.
             </p>
             {poaSignature === undefined ? (
               <p className="text-gray-500 text-sm">Loading…</p>
@@ -169,7 +169,7 @@ const Settings: React.FC<{
           <h2 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-3 mb-6">Multi-Channel Alerts</h2>
           <div className="space-y-4">
             {[
-              { id: 'emailNotifs', label: 'Email Notifications', desc: 'Receive detailed stay reports and legal copies.' },
+              { id: 'emailNotifs', label: 'Email Notifications', desc: 'Receive detailed stay reports and documentation copies.' },
              
             ].map((item) => (
               <div
@@ -194,7 +194,7 @@ const Settings: React.FC<{
           </div>
         </Card>
 
-        {/* Legal Defaults */}
+        {/* Default Stay Parameters */}
         <Card className="p-8 md:p-10">
           <h2 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-3 mb-6">Default Stay Parameters</h2>
           <div className="space-y-6">
@@ -211,17 +211,17 @@ const Settings: React.FC<{
                 className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-700"
               />
               <p className="mt-2 text-xs text-gray-500">
-                DocuStay caps duration at 29 days to help prevent tenancy rights.
+                DocuStay documents stays within the configured duration for your region.
               </p>
             </div>
-            <div className="p-4 rounded-lg bg-blue-50 border border-blue-200">
-              <h4 className="font-semibold text-blue-800 text-sm mb-2">Enforcement logic applied</h4>
+            <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
+              <h4 className="font-semibold text-slate-800 text-sm mb-2">Documentation defaults</h4>
               <ul className="text-sm text-gray-700 space-y-2">
                 <li className="flex items-center gap-2">
                   <svg className="w-4 h-4 text-blue-600 shrink-0" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
-                  Mandatory No-Homestead Waiver
+                  Temporary occupant status documented
                 </li>
                 <li className="flex items-center gap-2">
                   <svg className="w-4 h-4 text-blue-600 shrink-0" fill="currentColor" viewBox="0 0 20 20">

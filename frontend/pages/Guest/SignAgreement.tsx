@@ -53,7 +53,7 @@ const SignAgreement: React.FC<Props> = ({ user, navigate, notify }) => {
     }, 2000);
   };
 
-  if (!agreement) return <LoadingOverlay message="Assembling Legal Agreement..." />;
+  if (!agreement) return <LoadingOverlay message="Assembling agreement..." />;
 
   return (
     <div className="max-w-6xl mx-auto py-12 px-4">
@@ -64,7 +64,7 @@ const SignAgreement: React.FC<Props> = ({ user, navigate, notify }) => {
       </button>
 
       <div className="flex flex-col lg:flex-row gap-12">
-        {isSigning && <LoadingOverlay message="Finalizing Legal Execution..." />}
+        {isSigning && <LoadingOverlay message="Finalizing signature..." />}
         
         {/* Left: Document View */}
         <div className="lg:w-3/5 space-y-6">
@@ -95,7 +95,7 @@ const SignAgreement: React.FC<Props> = ({ user, navigate, notify }) => {
           <h2 className="text-3xl font-black text-white tracking-tighter">Sign & Confirm</h2>
           
           <Card className="p-8 space-y-6 border-blue-500/20 bg-blue-500/5">
-             <h3 className="text-sm font-black text-gray-400 uppercase tracking-widest">Legal Acknowledgments</h3>
+             <h3 className="text-sm font-black text-gray-400 uppercase tracking-widest">Acknowledgments</h3>
              <div className="space-y-4">
                 {[
                   { id: 'read', label: 'I have read the entire agreement' },

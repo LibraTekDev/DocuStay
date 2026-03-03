@@ -170,12 +170,12 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
               <div className="md:col-span-2 mt-8">
                 <h3 className="text-sm font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center text-xs font-medium">3</span>
-                  Legal Acknowledgments
+                  Stay acknowledgments
                 </h3>
                 <div className="grid md:grid-cols-3 gap-4 mb-6">
                   {[
                     { name: 'guest_status_acknowledged', label: 'Temporary Guest Status', desc: 'I acknowledge I am a guest only, not a tenant or resident.' },
-                    { name: 'no_tenancy_acknowledged', label: 'No Tenancy Rights', desc: 'I waive any claim to homestead or squatter rights.' },
+                    { name: 'no_tenancy_acknowledged', label: 'Temporary stay', desc: 'I acknowledge this stay is temporary and does not grant tenancy.' },
                     { name: 'vacate_acknowledged', label: 'Agreement to Vacate', desc: 'I agree to vacate by the scheduled checkout date.' },
                   ].map(ack => (
                     <div key={ack.name} className={`p-4 rounded-lg border ${formData[ack.name as keyof typeof formData] ? 'bg-white border-gray-400' : 'bg-white border-gray-200'}`}>
@@ -191,7 +191,7 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
                 </div>
 
                 <div className="pt-6 border-t border-slate-200 space-y-3">
-                  <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Legal agreements</p>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Agreements</p>
                   <label className="flex items-start gap-4 cursor-pointer p-4 rounded-xl border border-slate-200 bg-white/80 hover:border-slate-300 hover:bg-white transition-colors focus-within:ring-2 focus-within:ring-blue-500 focus-within:ring-offset-2 focus-within:border-blue-400">
                     <input type="checkbox" name="terms_agreed" checked={formData.terms_agreed} onChange={handleCheckboxChange} className="w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-0 shrink-0 mt-0.5 accent-blue-600" required />
                     <span className="text-sm text-slate-700 leading-relaxed">

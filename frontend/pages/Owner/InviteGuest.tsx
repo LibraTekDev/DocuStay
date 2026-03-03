@@ -47,7 +47,7 @@ const InviteGuest: React.FC<{ user: UserSession | null, navigate: (v: string) =>
       });
       setLoading(false);
       if (result.status === 'success' && result.data?.invitation_code) {
-        notify('success', 'Legal invitation generated and sent!');
+        notify('success', 'Invitation generated and sent!');
         const inviteCode = result.data.invitation_code;
         const link = `${window.location.origin}${window.location.pathname}#invite/${inviteCode}`;
         setInviteLink(link);
@@ -86,7 +86,7 @@ const InviteGuest: React.FC<{ user: UserSession | null, navigate: (v: string) =>
         <div className="lg:w-2/3">
           <Card className="p-10">
             <h2 className="text-3xl font-bold text-slate-800 mb-2">Invite a Temporary Guest</h2>
-            <p className="text-slate-500 mb-10">This will generate a legally-binding guest registration link for your property.</p>
+            <p className="text-slate-500 mb-10">This will generate a guest registration link for your property. The guest will sign authorization and stay documentation.</p>
             
             <form onSubmit={handleSubmit} className="space-y-8">
                <div className="bg-white/65 backdrop-blur-xl border border-slate-200 rounded-2xl p-6 mb-8">
@@ -137,7 +137,7 @@ const InviteGuest: React.FC<{ user: UserSession | null, navigate: (v: string) =>
 
               <div className="pt-6 border-t border-slate-200 flex gap-4">
                 <Button variant="outline" onClick={() => navigate('dashboard')} className="flex-1">Discard</Button>
-                <Button type="submit" className="flex-2 py-4 text-xl" disabled={properties.length === 0}>Generate Legal Invitation</Button>
+                <Button type="submit" className="flex-2 py-4 text-xl" disabled={properties.length === 0}>Generate invitation</Button>
               </div>
             </form>
           </Card>

@@ -87,7 +87,7 @@ export default function AgreementSignModal(props: {
                 <> · Region: <span className="font-semibold text-slate-800">{doc.region_code}</span></>
               ) : null}
             </p>
-            <p className="text-xs text-slate-500 italic">DocuStay is a legal technology platform, not a law firm.</p>
+            <p className="text-xs text-slate-500 italic">DocuStay is a documentation platform, not a law firm.</p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             {doc?.document_id ? (
@@ -182,7 +182,7 @@ export default function AgreementSignModal(props: {
                     required
                   />
                   <p className="text-xs text-slate-500 uppercase tracking-wide font-semibold">
-                    By signing, you agree this is legally binding.
+                    By signing, you agree to the terms of this agreement.
                   </p>
                   <div className="flex flex-col gap-3 pt-1">
                     <div className="flex gap-3">

@@ -193,7 +193,7 @@ def send_owner_welcome_email(to_email: str, full_name: str | None = None) -> boo
     html = f"""
     <p>Hi {name},</p>
     <p>Welcome to <strong>DocuStay</strong>. Your account is verified and you're all set.</p>
-    <p>You can now sign in to create properties, send invitations, and manage temporary stays with legal clarity.</p>
+    <p>You can now sign in to create properties, send invitations, and manage temporary stays with clear documentation.</p>
     <p>— DocuStay</p>
     """
     return send_email(to_email, subject, html, text_content=text)
@@ -297,7 +297,7 @@ def send_overstay_alert(
         subject = f"[DocuStay] Overstay notice: your stay has ended – {region_code}"
         body = (
             f"Your authorized stay at <strong>{property_name}</strong> ended on <strong>{stay_end_date}</strong>. "
-            "Please vacate and complete checkout to avoid legal complications."
+            "Please vacate and complete checkout by the documented end date."
         )
     html = f"""
     <p>Hello,</p>
@@ -339,10 +339,9 @@ def send_removal_notice_to_guest(
     subject = "[DocuStay] NOTICE: Removal Initiated – You must vacate immediately"
     html = f"""
     <p>Hello {guest_name},</p>
-    <p>The property owner has initiated formal removal proceedings for <strong>{property_name}</strong>.</p>
+    <p>The property owner has revoked your stay authorization for <strong>{property_name}</strong>.</p>
     <p><strong>Your utility access (USAT token) has been revoked.</strong></p>
-    <p>You are in overstay status and must vacate the property immediately. Continued presence may result in law enforcement involvement.</p>
-    <p>Please remove all belongings and vacate as soon as possible to avoid further legal action.</p>
+    <p>Your stay authorization has ended. Please vacate the property and remove all belongings. All actions are recorded in the audit trail.</p>
     <p>— DocuStay</p>
     """
     text = f"Hello {guest_name}, the owner has initiated removal for {property_name}. Your USAT token has been revoked. You must vacate immediately. — DocuStay"
@@ -359,14 +358,14 @@ def send_removal_confirmation_to_owner(
     subject = f"[DocuStay] Removal Initiated – {guest_name} at {property_name}"
     html = f"""
     <p>Hello,</p>
-    <p>You have initiated formal removal for <strong>{guest_name}</strong> at <strong>{property_name}</strong>.</p>
+    <p>You have revoked stay authorization for <strong>{guest_name}</strong> at <strong>{property_name}</strong>.</p>
     <p><strong>Actions taken:</strong></p>
     <ul>
         <li>Guest's USAT token has been revoked (utility access disabled)</li>
         <li>Guest has been notified via email to vacate immediately</li>
-        <li>All actions logged for legal documentation</li>
+        <li>All actions logged in the audit trail</li>
     </ul>
-    <p>If the guest does not vacate, you may contact local law enforcement with the documentation from your DocuStay dashboard.</p>
+    <p>Your DocuStay dashboard holds the full documentation and audit trail for your records.</p>
     <p>— DocuStay</p>
     """
     text = f"Hello, you have initiated removal for {guest_name} at {property_name}. USAT token revoked. Guest notified. — DocuStay"
@@ -434,15 +433,15 @@ def send_stay_legal_warning(
     statute_ref: str,
     is_owner: bool,
 ) -> bool:
-    """Module G: Legal warning email (region, statute, tenancy risk)."""
-    subject = f"[DocuStay] Legal notice: stay approaching limit – {region_code}"
+    """Module G: Stay limit reminder email (region, documented end date)."""
+    subject = f"[DocuStay] Stay approaching end date – {region_code}"
     html = f"""
     <p>Hello,</p>
-    <p>This is a legal notice regarding the stay for <strong>{guest_name}</strong>.</p>
+    <p>Reminder: the documented stay for <strong>{guest_name}</strong> is approaching its end date.</p>
     <p><strong>Stay end date:</strong> {stay_end_date}</p>
     <p><strong>Region:</strong> {region_code}</p>
-    <p><strong>Applicable law:</strong> {statute_ref}</p>
-    <p>Continued occupancy beyond the authorized period may create tenancy rights. Please ensure checkout by the end date.</p>
+    <p><strong>Region reference:</strong> {statute_ref}</p>
+    <p>Please ensure checkout by the end date so the stay record stays accurate.</p>
     <p>— DocuStay</p>
     """
     return send_email(to_email, subject, html)
@@ -497,7 +496,7 @@ def send_dead_mans_switch_auto_executed(
     <p>The system has automatically:</p>
     <ul>
         <li>Set occupancy status to UNCONFIRMED (no response by deadline)</li>
-        <li>Triggered Active Enforcement (Shield Mode activated)</li>
+        <li>Triggered active monitoring (Shield Mode activated)</li>
         <li>Activated utility lock (USAT token staged)</li>
         <li>Armed trespass detection</li>
         <li>Logged authority letters and police Live-Share for your records</li>
@@ -522,7 +521,7 @@ def send_shield_mode_activated_email(
         html = f"""
     <p>Hello,</p>
     <p><strong>Shield Mode has been automatically activated</strong> for <strong>{property_name}</strong>.</p>
-    <p>This was triggered by the Dead Man's Switch (no response received within 48 hours after the stay end date). Your property is now in <strong>Active Enforcement</strong>: occupancy set to vacant, utility lock on, trespass detection armed.</p>
+    <p>This was triggered by the Dead Man's Switch (no response received within 48 hours after the stay end date). Your property is now in <strong>active monitoring</strong>: occupancy set to vacant, utility lock on.</p>
     <p>You can turn Shield Mode off anytime in your DocuStay dashboard.</p>
     <p>— DocuStay</p>
     """
@@ -532,7 +531,7 @@ def send_shield_mode_activated_email(
         html = f"""
     <p>Hello,</p>
     <p><strong>Shield Mode has been automatically activated</strong> for <strong>{property_name}</strong>.</p>
-    <p>Today is the last day of your guest's stay{guest}. Shield Mode is now on to protect the property. DocuStay is actively monitoring and enforcing.</p>
+    <p>Today is the last day of your guest's stay{guest}. Shield Mode is now on. DocuStay is actively monitoring status.</p>
     <p>You can turn Shield Mode off anytime in your DocuStay dashboard.</p>
     <p>— DocuStay</p>
     """

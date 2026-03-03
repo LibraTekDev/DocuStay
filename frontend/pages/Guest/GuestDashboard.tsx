@@ -489,7 +489,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
       </section>
 
       <div className="grid lg:grid-cols-3 gap-6">
-        {/* Left: Authorization & Legal */}
+        {/* Left: Authorization & documentation */}
         <div className="lg:col-span-2 space-y-6">
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <h3 className="text-base font-semibold text-slate-900 mb-4">Signed agreement</h3>
@@ -539,7 +539,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <h3 className="text-base font-semibold text-slate-900 mb-4">Legal notices & restrictions</h3>
+            <h3 className="text-base font-semibold text-slate-900 mb-4">Stay documentation & restrictions</h3>
             <div className="space-y-4">
               <div className="p-4 rounded-xl bg-sky-50/80 border border-sky-100">
                 <h4 className="font-semibold text-sky-900 text-sm mb-1">Temporary stay only</h4>

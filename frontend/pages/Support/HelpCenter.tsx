@@ -2,9 +2,9 @@ import React, { useState } from 'react';
 import { Card, Button } from '../../components/UI';
 
 const FAQS = [
-  { q: "How does DocuStay prevent squatter rights?", a: "DocuStay uses AI to analyze jurisdiction-specific laws (like Florida's HB 621) and forces guests to sign a Revocable License rather than a lease. We also strictly cap stay durations and capture biometric verification to prove temporary status." },
-  { q: "What is a USAT Token?", a: "The Utility Service Authorization Token is a cryptographically signed pass that authorizes a guest to USE utilities without establishing an account in their name, preventing a common residency indicator." },
-  { q: "How do I remove a guest who won't leave?", a: "If a guest overstays, go to your dashboard and click 'Initiate Removal'. This will revoke their USAT token (disabling utility access), send removal notices to both you and the guest, and log all actions for legal documentation. You can then contact local law enforcement with the documentation from your dashboard." },
+  { q: "How does DocuStay document temporary stays?", a: "DocuStay records authorization and stay details by region. Guests sign a Revocable License; stay durations are documented and capped by region. Identity verification supports the audit trail." },
+  { q: "What is a USAT Token?", a: "The Utility Service Authorization Token is a cryptographically signed pass that authorizes a guest to use utilities for the stay period without establishing an account in their name." },
+  { q: "What if a guest stays past the end date?", a: "You can revoke the USAT token from your dashboard, which disables utility access. Notices and all actions are logged in the audit trail. Your dashboard holds the documentation for your records." },
 ];
 
 const HelpCenter: React.FC<{ navigate: (v: string) => void; embedded?: boolean }> = ({ navigate, embedded }) => {
@@ -26,7 +26,7 @@ const HelpCenter: React.FC<{ navigate: (v: string) => void; embedded?: boolean }
 
       <header className="mb-8">
         <h1 className="text-2xl md:text-3xl font-bold text-gray-900 tracking-tight">DocuStay Help Center</h1>
-        <p className="text-gray-600 text-sm mt-1">Legal-tech protection at your fingertips.</p>
+        <p className="text-gray-600 text-sm mt-1">Documentation and authorization at your fingertips.</p>
       </header>
 
       <section className="space-y-4 mb-10">
@@ -60,14 +60,14 @@ const HelpCenter: React.FC<{ navigate: (v: string) => void; embedded?: boolean }
       <Card className="p-8 md:p-10 bg-gradient-to-br from-blue-50 to-sky-50 border-blue-200 text-center">
         <h2 className="text-xl md:text-2xl font-bold text-gray-900 mb-3">Emergency Support?</h2>
         <p className="text-gray-600 text-sm mb-6 max-w-lg mx-auto">
-          Our AI Enforcement Team is available 24/7 for owners facing active unauthorized occupancy situations.
+          Need help with documentation or your account? Our support team can assist with stay records and authorization.
         </p>
         <div className="flex flex-col sm:flex-row justify-center gap-3">
           <Button variant="primary" type="button" className="px-8 py-3">
-            Live Chat with Legal AI
+            Contact support
           </Button>
           <Button variant="outline" type="button" className="px-8 py-3">
-            Request Removal Help
+            View documentation
           </Button>
         </div>
       </Card>

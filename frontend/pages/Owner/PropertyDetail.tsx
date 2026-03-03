@@ -3,8 +3,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Card, Button, Input, Modal } from '../../components/UI';
 import { InviteGuestModal } from '../../components/InviteGuestModal';
 import { UserSession } from '../../types';
-import { analyzeStay, JURISDICTION_RULES } from '../../services/jleService';
-import { RiskAssessment } from '../../components/RiskAssessment';
+import { JURISDICTION_RULES } from '../../services/jleService';
 import { propertiesApi, dashboardApi, type Property, type OwnerStayView, type PropertyUtilitiesResponse } from '../../services/api';
 
 function formatStayDuration(startStr: string, endStr: string): string {
@@ -77,16 +76,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
   const isOccupied = activeStaysForProperty.length > 0;
   const hasActiveStay = activeStaysForProperty.length > 0;
   const shieldOn = !!(property?.shield_mode_enabled);
-  const shieldStatus = shieldOn ? (isOccupied ? 'PASSIVE GUARD' : 'ACTIVE ENFORCEMENT') : null;
-  const currentGuestRisk = activeStay
-    ? analyzeStay(stateKey, {
-        durationDays: activeStay.max_stay_allowed_days,
-        paymentInvolved: false,
-        exclusivePossession: false,
-        checkInDate: activeStay.stay_start_date,
-        checkOutDate: activeStay.stay_end_date,
-      })
-    : null;
+  const shieldStatus = shieldOn ? (isOccupied ? 'PASSIVE GUARD' : 'ACTIVE MONITORING') : null;
   const isInactive = !!(property?.deleted_at);
   // Display status: active stay → OCCUPIED; else use property.occupancy_status (vacant | occupied | unknown | unconfirmed)
   const displayStatus = isOccupied ? 'OCCUPIED' : (property?.occupancy_status ?? 'unknown').toUpperCase();
@@ -356,7 +346,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
       </header>
 
       <div className="flex border-b border-slate-200 mb-8 overflow-x-auto no-scrollbar">
-        {['Overview', 'Utilities', 'Guests', 'Legal Info'].map(tab => (
+        {['Overview', 'Utilities', 'Guests', 'Documentation'].map(tab => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab.toLowerCase())}
@@ -369,8 +359,8 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
 
       <div className="animate-in fade-in slide-in-from-bottom-2 duration-500">
         {activeTab === 'overview' && (
-          <div className="grid lg:grid-cols-3 gap-8">
-            <div className="lg:col-span-2 space-y-8">
+          <div className="space-y-8">
+            <div className="space-y-8">
               {property && (
                 <>
                 <Card className="p-6 border-slate-200">
@@ -638,20 +628,12 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                       </div>
                     </div>
                   </div>
-                  <div className="p-6 rounded-2xl bg-amber-50 border border-amber-200">
-                    <p className="text-xs text-amber-700 font-black uppercase tracking-[0.2em] mb-4 flex items-center gap-2">
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
-                      Tenancy Trap Warning
-                    </p>
-                    <p className="text-sm text-slate-600 leading-relaxed font-medium">Guests staying 30+ days in Florida may claim tenancy rights under {jurisdictionInfo.keyStatute}. DocuStay enforces a hard 29-day limit to maintain your legal shield.</p>
+                  <div className="p-6 rounded-2xl bg-slate-50 border border-slate-200">
+                    <p className="text-xs text-slate-600 font-semibold uppercase tracking-wider mb-2">Stay documentation</p>
+                    <p className="text-sm text-slate-600 leading-relaxed">DocuStay records authorized stay limits by region for status documentation and audit history. Max stay for this region: {jurisdictionInfo.maxSafeStayDays} days.</p>
                   </div>
                 </div>
               </Card>
-            </div>
-
-            <div>
-              <h3 className="text-xs font-black text-gray-600 uppercase tracking-[0.2em] mb-4">Active Risk Monitoring</h3>
-              {currentGuestRisk ? <RiskAssessment data={currentGuestRisk} /> : <p className="text-slate-500 text-sm">No active stay at this property.</p>}
             </div>
           </div>
         )}
@@ -864,34 +846,29 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
           </Card>
         )}
 
-        {activeTab === 'legal info' && (
+        {activeTab === 'documentation' && (
           <div className="max-w-3xl space-y-8">
-            <h3 className="text-3xl font-black text-slate-800 tracking-tighter">Jurisdiction Deep Dive: {jurisdictionInfo.name}</h3>
+            <h3 className="text-3xl font-black text-slate-800 tracking-tighter">Region documentation: {jurisdictionInfo.name}</h3>
 
             <section>
-              <h4 className="text-lg font-bold text-blue-600 mb-4 uppercase tracking-wider">Tenancy Creation Rules</h4>
-              <p className="text-slate-600 leading-relaxed mb-4">In {jurisdictionInfo.name}, tenancy can be established automatically if a guest stays beyond {jurisdictionInfo.tenancyThresholdDays} days. Once established, removing an unwanted occupant requires a formal court eviction process rather than immediate removal.</p>
-              <ul className="list-disc list-inside text-slate-500 space-y-2 text-sm italic">
-                <li>Receiving mail at the property</li>
-                <li>Moving in substantial personal furniture</li>
-                <li>Exclusive control of keys or entrance</li>
-              </ul>
+              <h4 className="text-lg font-bold text-slate-700 mb-4 uppercase tracking-wider">Authorized stay limits</h4>
+              <p className="text-slate-600 leading-relaxed mb-4">DocuStay uses region-based stay limits for documentation and audit purposes. For {jurisdictionInfo.name}, the documented max stay is {jurisdictionInfo.maxSafeStayDays} days. All stays are recorded in the audit trail.</p>
             </section>
 
             <section className="p-6 rounded-xl border border-slate-200 bg-slate-50/50">
-              <h4 className="text-lg font-bold text-slate-800 mb-4 uppercase tracking-wider">Stay Classification Logic</h4>
+              <h4 className="text-lg font-bold text-slate-800 mb-4 uppercase tracking-wider">Stay status categories</h4>
               <div className="grid gap-4 text-sm">
-                <div className="p-4 rounded-xl bg-green-50 border border-green-200">
-                  <span className="font-black text-green-600 mr-2">GUEST:</span>
-                  <span className="text-slate-600">Duration &lt; {jurisdictionInfo.maxSafeStayDays - jurisdictionInfo.warningDays} days. Minimum risk.</span>
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                  <span className="font-semibold text-slate-700 mr-2">Within limit:</span>
+                  <span className="text-slate-600">Stay duration under {jurisdictionInfo.maxSafeStayDays - jurisdictionInfo.warningDays} days. Full documentation active.</span>
                 </div>
-                <div className="p-4 rounded-xl bg-amber-50 border border-amber-200">
-                  <span className="font-black text-amber-600 mr-2">TEMPORARY OCCUPANT:</span>
-                  <span className="text-slate-600">Approaching threshold. Extra verification logs active.</span>
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                  <span className="font-semibold text-slate-700 mr-2">Approaching limit:</span>
+                  <span className="text-slate-600">Within {jurisdictionInfo.warningDays} days of documented max. Verification logs recorded.</span>
                 </div>
-                <div className="p-4 rounded-xl bg-red-50 border border-red-200">
-                  <span className="font-black text-red-500 mr-2">TENANT RISK:</span>
-                  <span className="text-slate-600">Immediate action required. Stay duration unsafe for {property.state}.</span>
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
+                  <span className="font-semibold text-slate-700 mr-2">Past limit:</span>
+                  <span className="text-slate-600">Stay exceeds documented max for {property?.state}. Status and actions are recorded in the audit trail.</span>
                 </div>
               </div>
             </section>

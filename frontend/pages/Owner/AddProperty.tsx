@@ -195,7 +195,7 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
           {step === 2 && (
             <div className="animate-in fade-in slide-in-from-right-4 duration-500">
               <h2 className="text-3xl font-bold text-slate-800 mb-2">Property Details</h2>
-              <p className="text-slate-500 mb-8">Specific details help our AI calculate exact squatter protection limits.</p>
+              <p className="text-slate-500 mb-8">Specific details help set region-appropriate stay limits for documentation.</p>
               <label className="block text-sm font-medium text-slate-600 mb-4 ml-1">Property Type</label>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
                 {propertyTypes.map(type => (
@@ -225,7 +225,7 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
                     />
                     <div>
                       <span className="block text-sm font-bold text-slate-800">Primary Residence?</span>
-                      <span className="text-xs text-slate-500">Legal limits vary for homestead properties.</span>
+                      <span className="text-xs text-slate-500">Documented limits may vary for homestead properties.</span>
                     </div>
                   </label>
                 </div>
@@ -362,7 +362,7 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
                 (step === 4 && (utilityOptionsLoading || !UTILITY_TYPES.every((t) => (utilitySelections[t] ?? '') !== '')))
               }
             >
-              {step === 4 ? 'Activate Legal Protection' : 'Continue to next step'}
+              {step === 4 ? 'Add property and continue' : 'Continue to next step'}
             </Button>
           </div>
         </form>

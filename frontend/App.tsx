@@ -361,7 +361,7 @@ const App: React.FC = () => {
       {!['', 'login', 'register', 'verify'].includes(view) && !view.startsWith('guest-login') && !view.startsWith('guest-signup') && !view.startsWith('invite/') && !view.startsWith('onboarding/') && (
         <footer className="bg-white border-t border-gray-200 py-10">
           <div className="max-w-7xl mx-auto px-4 text-center">
-            <p className="text-gray-500 text-sm">© 2024 DocuStay AI. Legal technology platform—not a law firm.</p>
+            <p className="text-gray-500 text-sm">© 2024 DocuStay AI. Documentation platform—not a law firm.</p>
           </div>
         </footer>
       )}

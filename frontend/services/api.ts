@@ -552,7 +552,7 @@ export interface Property {
   usat_token_state?: string;
   usat_token_released_at?: string | null;
   deleted_at?: string | null;
-  /** Shield Mode: software monitoring/enforcement. ON = PASSIVE GUARD (occupied) or ACTIVE ENFORCEMENT (vacant). Owner can turn OFF. */
+  /** Shield Mode: software monitoring. ON = PASSIVE GUARD (occupied) or ACTIVE MONITORING (vacant). Owner can turn OFF. */
   shield_mode_enabled?: boolean;
   occupancy_status?: string;  // vacant | occupied | unknown | unconfirmed
   ownership_proof_filename?: string | null;

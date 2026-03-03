@@ -197,13 +197,13 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
             <div className="md:col-span-2 mt-12">
               <h3 className="text-2xl font-bold text-slate-800 mb-8 flex items-center gap-2">
                  <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 text-sm font-bold">3</div>
-                 Legal Acknowledgments
+                 Stay acknowledgments
               </h3>
               
               <div className="grid md:grid-cols-3 gap-6 mb-12">
                 {[
                   { name: 'guest_status_acknowledged', label: 'Temporary Guest Status', desc: 'I acknowledge I am a guest only, not a tenant or resident.' },
-                  { name: 'no_tenancy_acknowledged', label: 'No Tenancy Rights', desc: 'I explicitly waive any claim to homestead or squatter rights.' },
+                  { name: 'no_tenancy_acknowledged', label: 'Temporary stay', desc: 'I acknowledge this stay is temporary and does not grant tenancy.' },
                   { name: 'vacate_acknowledged', label: 'Agreement to Vacate', desc: 'I agree to vacate the property by the scheduled checkout date.' }
                 ].map(ack => (
                   <div key={ack.name} className={`p-6 rounded-3xl border transition-all duration-300 ${formData[ack.name] ? 'bg-blue-50 border-blue-300 shadow-md' : 'bg-white border-slate-200'}`}>

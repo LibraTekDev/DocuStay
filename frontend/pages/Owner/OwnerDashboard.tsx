@@ -317,7 +317,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                 {activeTab === 'properties' ? 'My Properties' : activeTab === 'guests' ? 'Guests' : activeTab === 'invitations' ? 'Invitations' : activeTab === 'billing' ? 'Billing' : activeTab === 'logs' ? 'Logs' : 'Overview'}
               </h1>
               <p className="text-slate-600 mt-1">
-                {activeTab === 'properties' ? 'View, edit, or remove your registered properties.' : activeTab === 'guests' ? 'Guests currently staying at your properties and their stay details.' : activeTab === 'invitations' ? 'Pending invitations waiting for guests to accept.' : activeTab === 'billing' ? 'Invoices and payment history. Onboarding and subscription charges appear here.' : activeTab === 'logs' ? 'Immutable audit trail: status changes, guest signatures, payment and billing activity, and failed attempts. Filter by time, category, or search.' : 'Protecting your properties with AI Enforcement.'}
+                {activeTab === 'properties' ? 'View, edit, or remove your registered properties.' : activeTab === 'guests' ? 'Guests currently staying at your properties and their stay details.' : activeTab === 'invitations' ? 'Pending invitations waiting for guests to accept.' : activeTab === 'billing' ? 'Invoices and payment history. Onboarding and subscription charges appear here.' : activeTab === 'logs' ? 'Immutable audit trail: status changes, guest signatures, payment and billing activity, and failed attempts. Filter by time, category, or search.' : 'Documentation and authorization for your properties.'}
               </p>
             </div>
             <div className="flex gap-4 flex-wrap items-center">
@@ -787,7 +787,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                   const activeStayForProp = activeStays.find((s) => s.property_id === prop.id);
                   const isOccupied = !!activeStayForProp;
                   const shieldOn = !!prop.shield_mode_enabled;
-                  const shieldStatus = shieldOn ? (isOccupied ? 'PASSIVE GUARD' : 'ACTIVE ENFORCEMENT') : null;
+                  const shieldStatus = shieldOn ? (isOccupied ? 'PASSIVE GUARD' : 'ACTIVE MONITORING') : null;
                   const tokenVisible = visibleTokenId === prop.id;
                   const tokenReleased = (prop.usat_token_state || 'staged') === 'released';
                   const releaseInProgress = releasingTokenPropertyId === prop.id;
@@ -1286,8 +1286,8 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                 <p className="text-4xl font-extrabold text-red-600 mt-1">{overstays.length}</p>
               </Card>
               <Card className="p-6 border-l-4 border-blue-400 hover:scale-[1.02] transition-transform cursor-pointer">
-                <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Legal Shield</p>
-                <p className="text-4xl font-extrabold text-slate-800 mt-1 uppercase tracking-tighter">{properties.length > 0 ? 'Protected' : '—'}</p>
+                <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Documentation</p>
+                <p className="text-4xl font-extrabold text-slate-800 mt-1 uppercase tracking-tighter">{properties.length > 0 ? 'Active' : '—'}</p>
               </Card>
             </div>
 
@@ -1532,7 +1532,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <Card className="w-full max-w-md">
               <div className="p-6">
-                <p className="text-green-600 font-medium mb-4">Revocation successful. Legal audit trail updated.</p>
+                <p className="text-green-600 font-medium mb-4">Revocation successful. Audit trail updated.</p>
                 <Button onClick={() => setRevokeSuccessGuest(null)}>Done</Button>
               </div>
             </Card>
@@ -1562,7 +1562,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                     <li>Revoke the guest's USAT token (utility access disabled)</li>
                     <li>Send removal notice email to the guest</li>
                     <li>Send confirmation email to you</li>
-                    <li>Log all actions for legal documentation</li>
+                    <li>Log all actions in the audit trail</li>
                   </ul>
                 </div>
                 <div className="text-sm">
