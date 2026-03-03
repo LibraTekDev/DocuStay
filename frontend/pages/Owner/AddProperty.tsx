@@ -1,7 +1,7 @@
 
-import React, { useState, useRef, useEffect } from 'react';
-import { Card, Input, Button, Modal } from '../../components/UI';
-import { propertiesApi, type VerifyAddressAndUtilitiesResponse } from '../../services/api';
+import React, { useState, useRef } from 'react';
+import { Card, Input, Button } from '../../components/UI';
+import { propertiesApi } from '../../services/api';
 import { UserSession } from '../../types';
 
 interface Props {
@@ -13,9 +13,8 @@ interface Props {
 
 const ALLOWED_PROOF_TYPES = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
 const MAX_PROOF_SIZE = 10 * 1024 * 1024; // 10MB
-const UTILITY_TYPES = ['electric', 'gas', 'water', 'internet'] as const;
-const STEP_LABELS = ['Location', 'Details', 'Proof', 'Utilities'];
-const TOTAL_STEPS = 4;
+const STEP_LABELS = ['Location', 'Details', 'Proof'];
+const TOTAL_STEPS = 3;
 
 function isAllowedProofFile(file: File): boolean {
   const ok = ALLOWED_PROOF_TYPES.includes(file.type) && file.size <= MAX_PROOF_SIZE;
@@ -38,42 +37,6 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
     is_primary_residence: false,
     proof_type: 'deed',
   });
-
-  // Step 3: utility options from API and user selections
-  const [utilityOptions, setUtilityOptions] = useState<VerifyAddressAndUtilitiesResponse | null>(null);
-  const [utilityOptionsLoading, setUtilityOptionsLoading] = useState(false);
-  const [utilityOptionsError, setUtilityOptionsError] = useState<string | null>(null);
-  const [utilitySelections, setUtilitySelections] = useState<Record<string, string>>({
-    electric: '', gas: '', water: '', internet: '',
-  });
-  const [customProviders, setCustomProviders] = useState<{ provider_type: string; provider_name: string }[]>([]);
-  const [addCustomOpen, setAddCustomOpen] = useState(false);
-  const [addCustomType, setAddCustomType] = useState('electric');
-  const [addCustomName, setAddCustomName] = useState('');
-  const [testProviderEmail, setTestProviderEmail] = useState<string | null>(null);
-
-  // When entering step 4 (Utilities), fetch utility options and owner config (test provider)
-  useEffect(() => {
-    if (step !== 4) return;
-    if (utilityOptions !== null) return;
-    setUtilityOptionsLoading(true);
-    setUtilityOptionsError(null);
-    propertiesApi
-      .verifyAddressAndUtilities({
-        street_address: formData.street_address,
-        city: formData.city,
-        state: formData.state,
-        zip_code: formData.zip_code || undefined,
-      })
-      .then((res) => {
-        setUtilityOptions(res);
-      })
-      .catch((e) => {
-        setUtilityOptionsError((e as Error)?.message ?? 'Failed to load utility options.');
-      })
-      .finally(() => setUtilityOptionsLoading(false));
-    propertiesApi.getOwnerConfig().then((c) => setTestProviderEmail(c.test_provider_email ?? null)).catch(() => setTestProviderEmail(null));
-  }, [step, formData.street_address, formData.city, formData.state, formData.zip_code, utilityOptions]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -101,30 +64,13 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
         is_primary_residence: formData.is_primary_residence,
       });
       await propertiesApi.uploadOwnershipProof(prop.id, formData.proof_type, proofFile);
-      const selected = UTILITY_TYPES
-        .filter((t) => {
-          const v = (utilitySelections[t] || '').trim();
-          return v !== '' && v !== 'None';
-        })
-        .map((provider_type) => ({ provider_type, provider_name: utilitySelections[provider_type].trim() }));
-      await propertiesApi.setPropertyUtilities(prop.id, { selected, pending: customProviders });
       setLoading(false);
-      notify('success', 'Property added. View utility providers and authority letters under the Utilities tab.');
+      notify('success', 'Property added.');
       navigate(`property/${prop.id}`);
     } catch (err) {
       setLoading(false);
       notify('error', (err as Error)?.message || 'Failed to add property.');
     }
-  };
-
-  const addCustomProvider = () => {
-    const name = (addCustomName || '').trim();
-    const type = (addCustomType || 'electric').toLowerCase();
-    if (!name) return;
-    setCustomProviders((prev) => [...prev, { provider_type: type, provider_name: name }]);
-    setUtilitySelections((prev) => ({ ...prev, [type]: name }));
-    setAddCustomName('');
-    setAddCustomOpen(false);
   };
 
   const propertyTypes = [
@@ -155,7 +101,7 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
           ))}
         </div>
         <div className="h-1 bg-slate-200 w-full absolute -z-0 max-w-4xl rounded-full translate-y-[-44px]">
-          <div className="h-full bg-gradient-to-r from-blue-600 to-green-500 transition-all duration-700 rounded-full" style={{ width: `${((step - 1) / (TOTAL_STEPS - 1)) * 100}%` }}></div>
+          <div className="h-full bg-gradient-to-r from-blue-600 to-green-500 transition-all duration-700 rounded-full" style={{ width: `${((step - 1) / Math.max(1, TOTAL_STEPS - 1)) * 100}%` }}></div>
         </div>
       </div>
 
@@ -236,7 +182,7 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
           {step === 3 && (
             <div className="animate-in fade-in slide-in-from-right-4 duration-500">
               <h2 className="text-3xl font-bold text-slate-800 mb-2">Ownership Verification</h2>
-              <p className="text-slate-500 mb-8">Upload proof of ownership. You will select utility providers in the next step.</p>
+              <p className="text-slate-500 mb-8">Upload proof of ownership.</p>
               <Input
                 label="Type of Proof" name="proof_type" value={formData.proof_type} onChange={e => setFormData({...formData, proof_type: e.target.value})}
                 options={[
@@ -288,66 +234,6 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
             </div>
           )}
 
-          {step === 4 && (
-            <div className="animate-in fade-in slide-in-from-right-4 duration-500">
-              <h2 className="text-3xl font-bold text-slate-800 mb-2">Utility Providers</h2>
-              <p className="text-slate-500 mb-6">Choose one provider for each utility below. Authority letters will be generated for your chosen providers.</p>
-              {testProviderEmail && (
-                <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 text-amber-800 text-sm mb-6">
-                  <strong>Testing:</strong> Authority letter emails are sent only to the test provider address ({testProviderEmail}). No emails are sent to real utility providers.
-                </div>
-              )}
-              {utilityOptionsLoading ? (
-                <p className="text-slate-500 py-8">Loading utility options for this address…</p>
-              ) : utilityOptionsError ? (
-                <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 text-amber-800 text-sm">{utilityOptionsError}</div>
-              ) : utilityOptions && (
-                <div className="space-y-6">
-                  {UTILITY_TYPES.map((type) => {
-                    const list = utilityOptions.providers_by_type?.[type] ?? [];
-                    const customForType = customProviders.filter((c) => c.provider_type === type).map((c) => c.provider_name);
-                    const options = [
-                      { value: '', label: '— Select one —' },
-                      { value: 'None', label: 'None' },
-                      ...list.map((p) => ({ value: p.name, label: p.name + (p.phone ? ` (${p.phone})` : '') })),
-                      ...customForType.map((n) => ({ value: n, label: `${n} (custom)` })),
-                      ...(testProviderEmail ? [{ value: 'Test provider', label: `Test provider (${testProviderEmail})` }] : []),
-                    ];
-                    const hasSelection = (utilitySelections[type] ?? '') !== '';
-                    return (
-                      <div key={type}>
-                        <label className="block text-sm font-medium text-slate-700 mb-1.5 capitalize">
-                          {type}
-                          {!hasSelection && <span className="text-amber-600 ml-1">(required)</span>}
-                        </label>
-                        <select
-                          value={utilitySelections[type] || ''}
-                          onChange={(e) => setUtilitySelections((prev) => ({ ...prev, [type]: e.target.value }))}
-                          className={`w-full px-4 py-2.5 bg-white border rounded-lg text-gray-900 focus:ring-2 focus:ring-blue-500 focus:border-blue-600 outline-none ${!hasSelection ? 'border-amber-400' : 'border-gray-300'}`}
-                        >
-                          {options.map((opt) => (
-                            <option key={opt.value || 'none'} value={opt.value}>{opt.label}</option>
-                          ))}
-                        </select>
-                      </div>
-                    );
-                  })}
-                  <p className="text-sm text-slate-500 pt-2">
-                    Don&apos;t see your provider?{' '}
-                    <button
-                      type="button"
-                      onClick={() => setAddCustomOpen(true)}
-                      className="text-blue-600 hover:text-blue-800 font-medium underline"
-                    >
-                      Add a custom provider
-                    </button>
-                    {' '}for any utility type above.
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
           <div className="mt-12 pt-8 border-t border-slate-200 flex gap-4">
             {step > 1 ? (
               <Button type="button" variant="outline" onClick={() => setStep(step - 1)} className="px-10">Back</Button>
@@ -357,48 +243,13 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
             <Button
               type="submit"
               className="flex-1 py-4 text-xl"
-              disabled={
-                (step === 3 && !proofFile) ||
-                (step === 4 && (utilityOptionsLoading || !UTILITY_TYPES.every((t) => (utilitySelections[t] ?? '') !== '')))
-              }
+              disabled={step === 3 && !proofFile}
             >
-              {step === 4 ? 'Add property and continue' : 'Continue to next step'}
+              {step === 3 ? 'Add property' : 'Continue to next step'}
             </Button>
           </div>
         </form>
       </Card>
-
-      <Modal open={addCustomOpen} title="Add custom provider" onClose={() => setAddCustomOpen(false)}>
-        <div className="p-6 space-y-4">
-          <p className="text-sm text-slate-500">Add a provider that isn’t in the dropdown for the selected utility type. It will appear in that dropdown so you can select it.</p>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1.5">Utility type</label>
-            <select
-              value={addCustomType}
-              onChange={(e) => setAddCustomType(e.target.value)}
-              className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900"
-            >
-              {UTILITY_TYPES.map((t) => (
-                <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1.5">Provider name</label>
-            <input
-              type="text"
-              value={addCustomName}
-              onChange={(e) => setAddCustomName(e.target.value)}
-              placeholder="e.g. My Local Water Co"
-              className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900 placeholder-gray-400"
-            />
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={() => setAddCustomOpen(false)}>Cancel</Button>
-            <Button variant="primary" onClick={addCustomProvider} disabled={!addCustomName.trim()}>Add custom provider</Button>
-          </div>
-        </div>
-      </Modal>
     </div>
   );
 };
