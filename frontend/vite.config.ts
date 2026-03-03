@@ -10,7 +10,8 @@ export default defineConfig(() => {
         host: '0.0.0.0',
         proxy: {
           '/api': {
-            target: process.env.VITE_API_URL || process.env.VITE_PROXY_TARGET || '',
+            // Must be a valid URL; empty string causes Vite proxy to throw. Env overrides for deployment.
+            target: process.env.VITE_API_URL || process.env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000',
             changeOrigin: true,
             rewrite: (path) => path.replace(/^\/api/, ''),
           },

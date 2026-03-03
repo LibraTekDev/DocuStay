@@ -33,7 +33,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   } catch (e) {
     const msg = (e as Error)?.message ?? "";
     if (msg === "Failed to fetch" || msg.includes("fetch") || msg.includes("NetworkError")) {
-      throw new Error(`Cannot reach the server${API_URL ? ` at ${API_URL}` : ""}. Set VITE_API_URL in .env and ensure the backend is running.`);
+      throw new Error("The server is unavailable. Please try again later.");
     }
     throw e;
   }

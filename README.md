@@ -57,10 +57,7 @@ FastAPI + PostgreSQL backend with a **Vite + React** frontend. Implements Auth (
    npm install
    ```
 
-2. **API URL** (optional): The frontend calls the backend at `http://127.0.0.1:8000` by default. To override, create `frontend/.env` or `frontend/.env.local` and set:
-   ```bash
-   VITE_API_URL=http://127.0.0.1:8000
-   ```
+2. **Env** (optional): Copy `frontend/.env.example` to `frontend/.env`. For local dev the app uses `/api` (proxied by Vite to the backend). For production build see [Frontend production build](#frontend-production-build) below.
 
 ## Run the app
 
@@ -87,6 +84,18 @@ npm run dev
 ```
 
 - App: http://localhost:3000  
+
+### Frontend production build
+
+When deploying, build the frontend and serve the `frontend/dist` folder (e.g. with nginx). So that Vite doesn’t cause issues:
+
+1. **Create `frontend/.env.production`** (or set env when running `npm run build`) with values that match your backend and server:
+   - **`VITE_APP_ORIGIN`** – same as backend `FRONTEND_BASE_URL` / `STRIPE_IDENTITY_RETURN_URL` origin (no trailing slash). Example: `http://13.58.166.68` or `https://your-domain.com`.
+   - **`VITE_API_URL`** – use `/api` if the same server proxies `/api` to the backend (recommended). Only use a full URL if the API is on a different host.
+
+2. **Build**: From `frontend/`, run `npm run build`. The built app will use these values; if they’re unset, it falls back to `/api` and `window.location.origin`, which is fine when the app is served from the same host that proxies `/api` to the backend.
+
+3. **Backend .env**: Ensure `FRONTEND_BASE_URL` and `STRIPE_IDENTITY_RETURN_URL` are set to your app URL (e.g. `http://13.58.166.68`).
 
 ### Quick test
 
