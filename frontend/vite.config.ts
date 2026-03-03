@@ -1,19 +1,24 @@
 import path from 'path';
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
-export default defineConfig(() => {
+export default defineConfig(({ mode }) => {
+    // Load .env from frontend dir and from project root (so root .env can define VITE_PROXY_TARGET / VITE_API_URL)
+    const rootEnv = loadEnv(mode, path.resolve(__dirname, '..'), '');
+    const frontendEnv = loadEnv(mode, __dirname, '');
+    const env = { ...rootEnv, ...frontendEnv };
+    const proxyTarget = env.VITE_PROXY_TARGET || env.VITE_API_URL || process.env.VITE_PROXY_TARGET || process.env.VITE_API_URL || 'http://127.0.0.1:8000';
+
     return {
       server: {
         port: 3000,
         host: '0.0.0.0',
         proxy: {
           '/api': {
-            // Must be a valid URL; empty string causes Vite proxy to throw. Env overrides for deployment.
-            target: process.env.VITE_API_URL || process.env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000',
+            target: proxyTarget,
             changeOrigin: true,
-            rewrite: (path) => path.replace(/^\/api/, ''),
+            rewrite: (p) => p.replace(/^\/api/, ''),
           },
         },
       },
@@ -26,4 +31,3 @@ export default defineConfig(() => {
       }
     };
 });
-//test
