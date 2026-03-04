@@ -88,6 +88,33 @@ def _count_units_and_shield(db: Session, profile: OwnerProfile) -> tuple[int, in
     return total, shield
 
 
+_BASELINE_PRODUCT_NAME = "DocuStay Baseline (per unit)"
+_SHIELD_PRODUCT_NAME = "DocuStay Shield (per unit)"
+
+
+def _get_or_create_stripe_products() -> tuple[str, str]:
+    """Get or create Stripe Products for baseline and shield; return (baseline_prod_id, shield_prod_id)."""
+    import stripe
+    stripe.api_key = get_settings().stripe_secret_key
+    baseline_id: str | None = None
+    shield_id: str | None = None
+    for prod in stripe.Product.list(limit=100).auto_paging_iter():
+        name = (prod.name or "").strip()
+        if name == _BASELINE_PRODUCT_NAME:
+            baseline_id = prod.id
+        elif name == _SHIELD_PRODUCT_NAME:
+            shield_id = prod.id
+        if baseline_id and shield_id:
+            return baseline_id, shield_id
+    if not baseline_id:
+        p = stripe.Product.create(name=_BASELINE_PRODUCT_NAME)
+        baseline_id = p.id
+    if not shield_id:
+        p = stripe.Product.create(name=_SHIELD_PRODUCT_NAME)
+        shield_id = p.id
+    return baseline_id, shield_id
+
+
 def ensure_subscription(db: Session, profile: OwnerProfile) -> None:
     """Create Stripe subscription (baseline $1/unit + Shield $10/unit) if not already created. Idempotent."""
     if not _stripe_enabled() or not profile.stripe_customer_id:
@@ -107,29 +134,88 @@ def ensure_subscription(db: Session, profile: OwnerProfile) -> None:
 
     import stripe
     stripe.api_key = get_settings().stripe_secret_key
+    # #region agent log
     try:
-        sub = stripe.Subscription.create(
-            customer=profile.stripe_customer_id,
-            items=[
+        with open("debug-d17206.log", "a", encoding="utf-8") as _dbg:
+            _dbg.write(
+                __import__("json").dumps(
+                    {
+                        "sessionId": "d17206",
+                        "hypothesisId": "A",
+                        "location": "billing.py:ensure_subscription",
+                        "message": "ensure_subscription entry",
+                        "data": {"profile_id": profile.id, "units": units, "shield_units": shield_units},
+                        "timestamp": __import__("time").time_ns() // 1_000_000,
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+    # #endregion
+    try:
+        baseline_prod_id, shield_prod_id = _get_or_create_stripe_products()
+        # #region agent log
+        try:
+            with open("debug-d17206.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(
+                    __import__("json").dumps(
+                        {
+                            "sessionId": "d17206",
+                            "hypothesisId": "A",
+                            "location": "billing.py:ensure_subscription",
+                            "message": "Stripe product IDs resolved",
+                            "data": {"baseline_prod_id": baseline_prod_id[:12] + "...", "shield_prod_id": shield_prod_id[:12] + "..."},
+                            "timestamp": __import__("time").time_ns() // 1_000_000,
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
+        # Build items with price_data.product (product ID only). Do NOT use product_data - Stripe API rejects it.
+        item0_price_data = {
+            "currency": "usd",
+            "unit_amount": 100,
+            "recurring": {"interval": "month"},
+            "product": baseline_prod_id,
+        }
+        items = [{"price_data": item0_price_data, "quantity": units}]
+        if shield_units > 0:
+            items.append(
                 {
                     "price_data": {
                         "currency": "usd",
-                        "unit_amount": 100,  # $1 per unit
+                        "unit_amount": 1000,
                         "recurring": {"interval": "month"},
-                        "product_data": {"name": "DocuStay Baseline (per unit)"},
-                    },
-                    "quantity": units,
-                },
-                {
-                    "price_data": {
-                        "currency": "usd",
-                        "unit_amount": 1000,  # $10 per unit
-                        "recurring": {"interval": "month"},
-                        "product_data": {"name": "DocuStay Shield (per unit)"},
+                        "product": shield_prod_id,
                     },
                     "quantity": shield_units,
-                },
-            ],
+                }
+            )
+        # #region agent log
+        try:
+            with open("debug-d17206.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(
+                    __import__("json").dumps(
+                        {
+                            "sessionId": "d17206",
+                            "hypothesisId": "B",
+                            "location": "billing.py:ensure_subscription",
+                            "message": "Payload before Subscription.create",
+                            "data": {"items_keys": [list(i.get("price_data", {}).keys()) for i in items], "product_in_first": "product" in items[0].get("price_data", {})},
+                            "timestamp": __import__("time").time_ns() // 1_000_000,
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
+        sub = stripe.Subscription.create(
+            customer=profile.stripe_customer_id,
+            items=items,
             metadata={"owner_profile_id": str(profile.id)},
         )
         baseline_item_id: str | None = None
@@ -150,6 +236,25 @@ def ensure_subscription(db: Session, profile: OwnerProfile) -> None:
         profile.stripe_subscription_shield_item_id = shield_item_id
         db.commit()
         logger.info("Subscription created for profile_id=%s, units=%s, shield=%s", profile.id, units, shield_units)
+        # #region agent log
+        try:
+            with open("debug-d17206.log", "a", encoding="utf-8") as _dbg:
+                _dbg.write(
+                    __import__("json").dumps(
+                        {
+                            "sessionId": "d17206",
+                            "hypothesisId": "A",
+                            "location": "billing.py:ensure_subscription",
+                            "message": "Subscription created",
+                            "data": {"profile_id": profile.id, "sub_id": sub.id},
+                            "timestamp": __import__("time").time_ns() // 1_000_000,
+                        }
+                    )
+                    + "\n"
+                )
+        except Exception:
+            pass
+        # #endregion
     except stripe.StripeError as e:
         logger.exception("Stripe error creating subscription for profile_id=%s: %s", profile.id, e)
         raise

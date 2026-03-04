@@ -44,7 +44,7 @@ def guest_pending_invites(
     )
     out = []
     for p in pendings:
-        inv = db.query(Invitation).filter(Invitation.id == p.invitation_id, Invitation.status == "pending").first()
+        inv = db.query(Invitation).filter(Invitation.id == p.invitation_id, Invitation.status.in_(["pending", "ongoing"])).first()
         if not inv:
             continue
         prop = db.query(Property).filter(Property.id == inv.property_id).first()
@@ -75,7 +75,7 @@ def guest_add_pending_invite(
     code = (invitation_code or "").strip().upper()
     if not code:
         raise HTTPException(status_code=400, detail="invitation_code is required")
-    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status == "pending").first()
+    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
     if not inv:
         ip = request.client.host if request.client else None
         ua = (request.headers.get("user-agent") or "").strip() or None
@@ -160,7 +160,7 @@ def owner_invitations(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
 ):
-    """Owner view: all invitations (pending, accepted, cancelled) with property name. Pending invites older than 12h are marked is_expired."""
+    """Owner view: all invitations (pending, accepted, cancelled) with property name. Pending invites older than 12h are marked is_expired. Status display: Ongoing when invite accepted or a stay exists, else Pending/Cancelled/Expired."""
     invs = db.query(Invitation).filter(Invitation.owner_id == current_user.id).order_by(Invitation.created_at.desc()).all()
     threshold = datetime.now(timezone.utc) - timedelta(hours=PENDING_INVITATION_EXPIRE_HOURS)
     out = []
@@ -175,6 +175,17 @@ def owner_invitations(
                 and inv.created_at < threshold
             )
         )
+        # Display status: ongoing when unit is occupied (stay exists, or CSV bulk-upload BURNED invite); else pending/cancelled/expired. We do not auto-set invitation.status to accepted when stay is created; this is display-only.
+        has_stay = db.query(Stay).filter(Stay.invitation_id == inv.id).first() is not None
+        token_state = (getattr(inv, "token_state", None) or "STAGED").upper()
+        if inv.status == "cancelled":
+            display_status = "cancelled"
+        elif inv.status == "expired" or is_expired:
+            display_status = "expired"
+        elif inv.status == "ongoing" or has_stay or inv.status == "accepted" or (token_state == "BURNED" and inv.status == "pending"):
+            display_status = "ongoing"
+        else:
+            display_status = "pending"
         out.append(
             OwnerInvitationView(
                 id=inv.id,
@@ -186,7 +197,7 @@ def owner_invitations(
                 stay_start_date=inv.stay_start_date,
                 stay_end_date=inv.stay_end_date,
                 region_code=inv.region_code,
-                status=inv.status,
+                status=display_status,
                 token_state=getattr(inv, "token_state", None) or "STAGED",
                 created_at=inv.created_at,
                 is_expired=is_expired,
@@ -209,8 +220,8 @@ def owner_cancel_invitation(
     ).first()
     if not inv:
         raise HTTPException(status_code=404, detail="Invitation not found")
-    if inv.status != "pending":
-        raise HTTPException(status_code=400, detail="Only pending invitations can be cancelled.")
+    if inv.status not in ("pending", "ongoing"):
+        raise HTTPException(status_code=400, detail="Only pending or ongoing invitations can be cancelled.")
     inv.status = "cancelled"
     prev_token = getattr(inv, "token_state", None) or "STAGED"
     inv.token_state = "REVOKED"

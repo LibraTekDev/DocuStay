@@ -71,7 +71,7 @@ def build_invitation_agreement(
     if not code:
         return None
 
-    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status == "pending").first()
+    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
     if not inv:
         return None
 

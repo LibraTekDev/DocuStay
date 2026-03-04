@@ -630,15 +630,15 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
               </div>
             </Card>
 
-            {/* Accepted: show stay status (Active / Completed) and Invite ID status */}
+            {/* Accepted / Ongoing: guest accepted (stay created) or unit occupied (e.g. CSV bulk upload) */}
             <Card className="overflow-hidden">
               <div className="p-6 border-b border-slate-200 bg-emerald-50">
-                <h3 className="text-xl font-bold text-slate-800">Accepted</h3>
-                <p className="text-xs text-slate-500 mt-1">Invites accepted by the guest (stay created). Stay status reflects whether the stay is active or completed.</p>
+                <h3 className="text-xl font-bold text-slate-800">Accepted / Ongoing</h3>
+                <p className="text-xs text-slate-500 mt-1">Invites accepted by the guest (stay created) or occupied units from bulk upload. Status shows Ongoing or stay status.</p>
               </div>
               <div className="overflow-x-auto">
-                {invitations.filter((i) => i.status === 'accepted').length === 0 ? (
-                  <p className="p-6 text-slate-500 text-sm">No accepted invitations.</p>
+                {invitations.filter((i) => i.status === 'accepted' || i.status === 'ongoing').length === 0 ? (
+                  <p className="p-6 text-slate-500 text-sm">No accepted or ongoing invitations.</p>
                 ) : (
                   <table className="w-full text-left">
                     <thead className="bg-slate-100 text-slate-500 uppercase text-[10px] tracking-widest font-extrabold border-b border-slate-200">
@@ -649,14 +649,17 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                         <th className="px-6 py-4">Region</th>
                         <th className="px-6 py-4">Invitation code</th>
                         <th className="px-6 py-4">Invite ID status</th>
-                        <th className="px-6 py-4">Stay status</th>
+                        <th className="px-6 py-4">Status</th>
+                        <th className="px-6 py-4">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
-                      {invitations.filter((i) => i.status === 'accepted').map((inv) => {
+                      {invitations.filter((i) => i.status === 'accepted' || i.status === 'ongoing').map((inv) => {
                         const tokenState = (inv.token_state || 'BURNED').toUpperCase();
                         const stayStatusLabel = tokenState === 'EXPIRED' ? 'Completed' : tokenState === 'REVOKED' ? 'Revoked' : 'Active stay';
                         const stayStatusClass = tokenState === 'EXPIRED' ? 'bg-slate-100 text-slate-600 border-slate-200' : tokenState === 'REVOKED' ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-emerald-100 text-emerald-700 border-emerald-200';
+                        const statusLabel = inv.status === 'ongoing' ? 'Ongoing' : stayStatusLabel;
+                        const statusClass = inv.status === 'ongoing' ? 'bg-sky-100 text-sky-700 border-sky-200' : stayStatusClass;
                         return (
                           <tr key={inv.id} className="hover:bg-slate-50 transition-colors">
                             <td className="px-6 py-5">
@@ -675,9 +678,14 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                               <TokenStateBadge tokenState={inv.token_state} />
                             </td>
                             <td className="px-6 py-5">
-                              <span className={`inline-flex px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest border ${stayStatusClass}`}>
-                                {stayStatusLabel}
+                              <span className={`inline-flex px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest border ${statusClass}`}>
+                                {statusLabel}
                               </span>
+                            </td>
+                            <td className="px-6 py-5">
+                              {(inv.status === 'ongoing' || inv.status === 'accepted') && (
+                                <Button variant="outline" size="sm" onClick={async () => { try { await dashboardApi.cancelInvitation(inv.id); notify('success', 'Invitation cancelled.'); loadData(); } catch (e) { notify('error', (e as Error)?.message ?? 'Failed to cancel.'); } }}>Cancel invite</Button>
+                              )}
                             </td>
                           </tr>
                         );

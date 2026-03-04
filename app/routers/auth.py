@@ -355,7 +355,7 @@ def _complete_pending_guest(
     code = (extra.get("invitation_code") or "").strip().upper()
     inv = None
     if code:
-        inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status == "pending").first()
+        inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
     sig = None
     sig_id = extra.get("agreement_signature_id")
     if sig_id and code:
@@ -1052,7 +1052,7 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
     # No verification: create user immediately (e.g. Mailgun not configured). Validate invite if provided.
     inv = None
     if code:
-        inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status == "pending").first()
+        inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
         if not inv:
             create_log(
                 db,
@@ -1194,7 +1194,7 @@ def accept_invite(
     code = (data.invitation_code or "").strip().upper()
     if not code:
         raise HTTPException(status_code=400, detail="Invitation code is required")
-    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status == "pending").first()
+    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
     if not inv:
         create_log(
             db,

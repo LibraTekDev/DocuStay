@@ -23,7 +23,7 @@ class Invitation(Base):
     relationship_to_owner = Column(SQLEnum(RelationshipToOwner), nullable=False)
     region_code = Column(String(20), nullable=False)
 
-    status = Column(String(20), nullable=False, default="pending")  # pending, accepted, cancelled
+    status = Column(String(20), nullable=False, default="pending")  # pending, ongoing (e.g. CSV occupied), accepted, cancelled
 
     # Invite-as-token state (Invite ID = invitation_code; used as Stay ID for display)
     # STAGED=created, BURNED=guest accepted+signed MoA, EXPIRED=stay ended/checked out, REVOKED=cancelled by owner/guest

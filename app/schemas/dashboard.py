@@ -15,7 +15,7 @@ class OwnerInvitationView(BaseModel):
     stay_start_date: date
     stay_end_date: date
     region_code: str
-    status: str  # pending, accepted, cancelled
+    status: str  # pending, ongoing (e.g. CSV occupied), accepted, cancelled, expired
     token_state: str = "STAGED"  # STAGED | BURNED | EXPIRED | REVOKED
     created_at: datetime | None
     is_expired: bool = False  # True when pending and created_at older than 12 hours

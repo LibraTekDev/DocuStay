@@ -532,11 +532,12 @@ def bulk_upload_properties(
             else:
                 prop.usat_token = "USAT-" + secrets.token_hex(8).upper() + "-" + str(prop.id)
             prop.usat_token_state = USAT_TOKEN_RELEASED if occupied else USAT_TOKEN_STAGED
-            _apply_smarty_address(prop, street.strip(), city.strip(), state_upper, zip_code)
-            try:
-                _run_utility_bucket_for_property(prop, db)
-            except Exception as e:
-                print(f"[Owners] Utility bucket failed for property {prop.id} (row {row_num}): {e}")
+            # Address normalization and utility lookup shelved for now.
+            # _apply_smarty_address(prop, street.strip(), city.strip(), state_upper, zip_code)
+            # try:
+            #     _run_utility_bucket_for_property(prop, db)
+            # except Exception as e:
+            #     print(f"[Owners] Utility bucket failed for property {prop.id} (row {row_num}): {e}")
             created += 1
             property_display = (property_name or "").strip() or f"{street.strip()}, {city.strip()}, {state_upper}".strip(", ")
             create_log(
@@ -564,7 +565,7 @@ def bulk_upload_properties(
                     purpose_of_stay=PurposeOfStay.other,
                     relationship_to_owner=RelationshipToOwner.other,
                     region_code=prop.region_code,
-                    status="pending",
+                    status="ongoing",
                     token_state="BURNED",
                     dead_mans_switch_enabled=1,
                     dead_mans_switch_alert_email=1,
@@ -636,7 +637,7 @@ def bulk_upload_properties(
                         Invitation.guest_name == (tenant_name or "").strip(),
                         Invitation.stay_start_date == lease_start,
                         Invitation.stay_end_date == lease_end,
-                        Invitation.status == "pending",
+                        Invitation.status.in_(["pending", "ongoing"]),
                     )
                     .first()
                 )
@@ -653,7 +654,7 @@ def bulk_upload_properties(
                         purpose_of_stay=PurposeOfStay.other,
                         relationship_to_owner=RelationshipToOwner.other,
                         region_code=existing_match.region_code,
-                        status="pending",
+                        status="ongoing",
                         token_state="BURNED",
                         dead_mans_switch_enabled=1,
                         dead_mans_switch_alert_email=1,
@@ -1505,9 +1506,9 @@ def get_invitation_details(
     code: str,
     db: Session = Depends(get_db),
 ):
-    """Public: get invitation details by code for the invite signup page (pending only)."""
+    """Public: get invitation details by code for the invite signup page (pending or ongoing from bulk upload)."""
     code = code.strip().upper()
-    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status == "pending").first()
+    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
     if not inv:
         return {"valid": False}
     prop = db.query(Property).filter(Property.id == inv.property_id).first()

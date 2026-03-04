@@ -131,7 +131,7 @@ def sign_invitation_agreement(
     db: Session = Depends(get_db),
 ):
     code = (data.invitation_code or "").strip().upper()
-    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status == "pending").first()
+    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
     if not inv:
         create_log(
             db,
@@ -255,7 +255,7 @@ def sign_invitation_agreement_with_dropbox(
 ):
     """Record signature and send the agreement to Dropbox Sign. Signer receives email to sign; signed PDF available once complete."""
     code = (data.invitation_code or "").strip().upper()
-    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status == "pending").first()
+    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
     if not inv:
         create_log(
             db,
