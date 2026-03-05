@@ -446,6 +446,11 @@ export interface GuestStayView {
   statute_reference?: string | null;
   plain_english_explanation?: string | null;
   applicable_laws: string[];
+  /** Jurisdiction wrap from SOT (same as live property page). */
+  jurisdiction_state_name?: string | null;
+  jurisdiction_statutes?: { citation: string; plain_english?: string | null }[];
+  removal_guest_text?: string | null;
+  removal_tenant_text?: string | null;
   usat_token?: string | null;
   revoked_at?: string | null;
   vacate_by?: string | null;

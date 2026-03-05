@@ -17,8 +17,9 @@ from app.models.owner import Property, OwnerProfile, USAT_TOKEN_STAGED, USAT_TOK
 from app.models.guest_pending_invite import GuestPendingInvite
 from app.models.agreement_signature import AgreementSignature
 from app.models.region_rule import StayClassification, RiskLevel
-from app.schemas.dashboard import OwnerStayView, OwnerInvitationView, GuestStayView, GuestPendingInviteView, OwnerAuditLogEntry, BillingResponse, BillingInvoiceView, BillingPaymentView, BillingPortalSessionResponse, PortfolioLinkResponse
+from app.schemas.dashboard import OwnerStayView, OwnerInvitationView, GuestStayView, GuestPendingInviteView, JurisdictionStatuteInDashboard, OwnerAuditLogEntry, BillingResponse, BillingInvoiceView, BillingPaymentView, BillingPortalSessionResponse, PortfolioLinkResponse
 from app.services.jle import resolve_jurisdiction
+from app.services.jurisdiction_sot import get_jurisdiction_for_property
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_DEAD_MANS_SWITCH, CATEGORY_FAILED_ATTEMPT, CATEGORY_BILLING
 from app.services.billing import sync_subscription_quantities
 from app.services.notifications import send_vacate_12h_notice, send_owner_guest_checkout_email, send_guest_checkout_confirmation_email, send_owner_guest_cancelled_stay_email, send_removal_notice_to_guest, send_removal_confirmation_to_owner
@@ -711,17 +712,36 @@ def guest_stays(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_guest),
 ):
-    """Guest view: property, approved stay dates, region classification, legal notice and laws."""
+    """Guest view: property, approved stay dates, region classification, legal notice and laws. All jurisdiction content from Jurisdiction SOT (same as live property page)."""
     stays = db.query(Stay).filter(Stay.guest_id == current_user.id).all()
     out = []
     for s in stays:
         prop = db.query(Property).filter(Property.id == s.property_id).first()
         property_name = (prop.name if prop else None) or (f"{prop.city}, {prop.state}" if prop else None) or "Property"
-        rule = db.query(RegionRule).filter(RegionRule.region_code == s.region_code).first()
-        classification = rule.stay_classification_label.value if rule else "guest"
-        statute = rule.statute_reference if rule else None
-        explanation = rule.plain_english_explanation if rule else None
-        laws = [rule.statute_reference] if rule and rule.statute_reference else []
+        region_code = (prop.region_code if prop else None) or s.region_code
+        # Prefer Jurisdiction SOT (DB) for classification, statutes, removal text — same source as live page and agreements
+        jinfo = get_jurisdiction_for_property(db, prop.zip_code if prop else None, region_code)
+        if jinfo is not None:
+            classification = jinfo.stay_classification.value
+            statute = jinfo.statutes[0].citation if jinfo.statutes else None
+            explanation = jinfo.statutes[0].plain_english if jinfo.statutes and jinfo.statutes[0].plain_english else None
+            laws = [st.citation + (f": {st.plain_english}" if st.plain_english else "") for st in jinfo.statutes]
+            legal_notice = jinfo.removal_guest_text or "This stay does not grant tenancy or homestead rights."
+            jurisdiction_state_name = jinfo.name
+            jurisdiction_statutes = [JurisdictionStatuteInDashboard(citation=st.citation, plain_english=st.plain_english) for st in jinfo.statutes]
+            removal_guest_text = jinfo.removal_guest_text
+            removal_tenant_text = jinfo.removal_tenant_text
+        else:
+            rule = db.query(RegionRule).filter(RegionRule.region_code == s.region_code).first()
+            classification = rule.stay_classification_label.value if rule else "guest"
+            statute = rule.statute_reference if rule else None
+            explanation = rule.plain_english_explanation if rule else None
+            laws = [rule.statute_reference] if rule and rule.statute_reference else []
+            legal_notice = "This stay does not grant tenancy or homestead rights."
+            jurisdiction_state_name = None
+            jurisdiction_statutes = []
+            removal_guest_text = None
+            removal_tenant_text = None
         # Owner tokens are not shared with guests; guest never sees USAT token.
         usat_token = None
         revoked_at = getattr(s, "revoked_at", None)
@@ -746,10 +766,14 @@ def guest_stays(
                 approved_stay_end_date=s.stay_end_date,
                 region_code=s.region_code,
                 region_classification=classification,
-                legal_notice="This stay does not grant tenancy or homestead rights.",
+                legal_notice=legal_notice,
                 statute_reference=statute,
                 plain_english_explanation=explanation,
                 applicable_laws=laws,
+                jurisdiction_state_name=jurisdiction_state_name,
+                jurisdiction_statutes=jurisdiction_statutes,
+                removal_guest_text=removal_guest_text,
+                removal_tenant_text=removal_tenant_text,
                 usat_token=usat_token,
                 revoked_at=revoked_at,
                 vacate_by=vacate_by,

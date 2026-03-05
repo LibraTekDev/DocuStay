@@ -59,8 +59,14 @@ class OwnerStayView(BaseModel):
     occupancy_confirmation_response: str | None = None  # vacated | renewed | holdover
 
 
+class JurisdictionStatuteInDashboard(BaseModel):
+    """One statute from Jurisdiction SOT (citation + plain English)."""
+    citation: str
+    plain_english: str | None = None
+
+
 class GuestStayView(BaseModel):
-    """Guest view: property, approved dates, region classification, legal notice and laws. usat_token when released; vacate_by when revoked."""
+    """Guest view: property, approved dates, region classification, legal notice and laws from Jurisdiction SOT. usat_token when released; vacate_by when revoked."""
     stay_id: int
     invite_id: str | None = None  # Invite ID (invitation code) for this stay
     token_state: str | None = None  # STAGED | BURNED | EXPIRED | REVOKED
@@ -74,6 +80,11 @@ class GuestStayView(BaseModel):
     statute_reference: str | None = None
     plain_english_explanation: str | None = None
     applicable_laws: list[str] = []
+    # Jurisdiction wrap from SOT (same as live property page): state name, statutes, removal text
+    jurisdiction_state_name: str | None = None
+    jurisdiction_statutes: list[JurisdictionStatuteInDashboard] = []
+    removal_guest_text: str | None = None
+    removal_tenant_text: str | None = None
     usat_token: str | None = None
     revoked_at: datetime | None = None
     vacate_by: str | None = None  # ISO datetime: revoked_at + 12 hours

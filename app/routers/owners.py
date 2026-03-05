@@ -235,6 +235,9 @@ def add_property(
         property_type_label=data.property_type,
         bedrooms=data.bedrooms,
     )
+    # Primary residence (owner-occupied) implies unit is occupied by the owner
+    if owner_occ:
+        prop.occupancy_status = OccupancyStatus.occupied.value
     if data.tax_id is not None:
         prop.tax_id = data.tax_id.strip() or None
     if data.apn is not None:
@@ -267,13 +270,13 @@ def add_property(
         db,
         CATEGORY_STATUS_CHANGE,
         "Property registered",
-        f"Owner registered property: {property_display} (id={prop.id}). Occupancy status: unknown (initial).",
+        f"Owner registered property: {property_display} (id={prop.id}). Occupancy status: {prop.occupancy_status} (initial).",
         property_id=prop.id,
         actor_user_id=current_user.id,
         actor_email=current_user.email,
         ip_address=request.client.host if request.client else None,
         user_agent=(request.headers.get("user-agent") or "").strip() or None,
-        meta={"property_id": prop.id, "street": street, "city": data.city, "state": data.state, "region_code": region, "occupancy_status_new": "unknown"},
+        meta={"property_id": prop.id, "street": street, "city": data.city, "state": data.state, "region_code": region, "occupancy_status_new": prop.occupancy_status},
     )
     db.commit()
     db.refresh(prop)
@@ -462,6 +465,7 @@ def bulk_upload_properties(
         lease_start_str = _get_cell(row, "lease_start", "lease_start")
         lease_end_str = _get_cell(row, "lease_end", "lease_end")
         shield_mode_raw = _get_cell(row, "shield_mode", "shield_mode")
+        primary_residence_raw = _get_cell(row, "is_primary_residence", "owner_occupied", "primary_residence")
         tax_id_raw = _get_cell(row, "tax_id", "tax_id")
         apn_raw = _get_cell(row, "apn", "parcel", "apn")
 
@@ -499,6 +503,7 @@ def bulk_upload_properties(
 
         occupied = _parse_bool_cell(occupied_raw)
         shield_mode = _parse_bool_cell(shield_mode_raw)
+        primary_residence = _parse_bool_cell(primary_residence_raw)
         region_code = (state_upper).upper()[:20]
         # Name = property address (street, city, state) for CSV upload
         address_as_name = f"{street.strip()}, {city.strip()}, {state_upper}".strip(", ")
@@ -531,6 +536,9 @@ def bulk_upload_properties(
                 break
 
         if existing_match is None:
+            # Primary residence (owner-occupied) implies unit is occupied; same as tenant Occupied=YES
+            owner_occ = primary_residence
+            occ_status = OccupancyStatus.occupied.value if (occupied or owner_occ) else OccupancyStatus.vacant.value
             prop = Property(
                 owner_profile_id=profile.id,
                 name=address_as_name,
@@ -539,11 +547,11 @@ def bulk_upload_properties(
                 state=state_upper,
                 zip_code=zip_code.strip() if zip_code else None,
                 region_code=region_code,
-                owner_occupied=False,
+                owner_occupied=owner_occ,
                 property_type=None,
                 property_type_label=None,
                 bedrooms=None,
-                occupancy_status=OccupancyStatus.vacant.value if not occupied else OccupancyStatus.occupied.value,
+                occupancy_status=occ_status,
                 shield_mode_enabled=1 if shield_mode else 0,
             )
             prop.tax_id = (tax_id_raw or "").strip() or None
@@ -618,6 +626,9 @@ def bulk_upload_properties(
             db.refresh(prop)
             existing_props.append(prop)
         else:
+            # Primary residence (owner-occupied) implies unit is occupied; same as tenant Occupied=YES
+            owner_occ = primary_residence
+            new_occ_status = OccupancyStatus.occupied.value if (occupied or owner_occ) else OccupancyStatus.vacant.value
             updates: dict[str, object] = {}
             if (existing_match.name or "").strip() != address_as_name:
                 updates["name"] = address_as_name
@@ -629,8 +640,10 @@ def bulk_upload_properties(
                 updates["state"] = state_upper
             if zip_code and (existing_match.zip_code or "").strip() != zip_code.strip():
                 updates["zip_code"] = zip_code.strip()
-            if existing_match.occupancy_status != (OccupancyStatus.occupied.value if occupied else OccupancyStatus.vacant.value):
-                updates["occupancy_status"] = OccupancyStatus.occupied.value if occupied else OccupancyStatus.vacant.value
+            if existing_match.owner_occupied != owner_occ:
+                updates["owner_occupied"] = owner_occ
+            if existing_match.occupancy_status != new_occ_status:
+                updates["occupancy_status"] = new_occ_status
             if (1 if shield_mode else 0) != (existing_match.shield_mode_enabled or 0):
                 updates["shield_mode_enabled"] = 1 if shield_mode else 0
             tax_id_val = (tax_id_raw or "").strip() or None
@@ -655,6 +668,8 @@ def bulk_upload_properties(
                     existing_match.state = val
                 elif key == "zip_code":
                     existing_match.zip_code = val
+                elif key == "owner_occupied":
+                    existing_match.owner_occupied = val
                 elif key == "occupancy_status":
                     existing_match.occupancy_status = val
                 elif key == "shield_mode_enabled":
@@ -1270,6 +1285,7 @@ def _snapshot_property(prop: Property) -> dict:
         "zip_code": prop.zip_code,
         "region_code": prop.region_code,
         "owner_occupied": prop.owner_occupied,
+        "occupancy_status": getattr(prop, "occupancy_status", None),
         "property_type": prop.property_type.value if prop.property_type else None,
         "property_type_label": prop.property_type_label,
         "bedrooms": prop.bedrooms,
@@ -1312,6 +1328,9 @@ def update_property(
         prop.owner_occupied = data.owner_occupied
     if data.is_primary_residence is not None and data.owner_occupied is None:
         prop.owner_occupied = data.is_primary_residence
+    # When property is marked as Primary Residence (owner-occupied), unit status is Occupied
+    if prop.owner_occupied:
+        prop.occupancy_status = OccupancyStatus.occupied.value
     if data.property_type_enum is not None:
         prop.property_type = data.property_type_enum
     if data.property_type is not None:

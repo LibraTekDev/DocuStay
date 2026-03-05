@@ -704,6 +704,31 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
               {agreementDownloading ? 'Loading…' : 'Download signed agreement'}
             </Button>
           </div>
+
+          {/* Applicable law from Jurisdiction SOT (same as live property page) */}
+          {stay && (stay.jurisdiction_state_name || (stay.jurisdiction_statutes && stay.jurisdiction_statutes.length > 0)) && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <p className="text-xs font-semibold uppercase tracking-wider text-indigo-600/90">Applicable law ({stay.jurisdiction_state_name ?? stay.region_code})</p>
+              <ul className="mt-2 space-y-2">
+                {(stay.jurisdiction_statutes ?? []).map((s, i) => (
+                  <li key={i} className="text-sm text-slate-700">
+                    <span className="font-medium text-slate-900">{s.citation}</span>
+                    {s.plain_english && <span className="block text-slate-600 mt-0.5">{s.plain_english}</span>}
+                  </li>
+                ))}
+              </ul>
+              {stay.removal_guest_text && (
+                <p className="text-slate-600 text-sm mt-2">
+                  <span className="font-medium text-slate-700">Guest removal: </span>{stay.removal_guest_text}
+                </p>
+              )}
+              {stay.removal_tenant_text && (
+                <p className="text-slate-600 text-sm mt-0.5">
+                  <span className="font-medium text-slate-700">Tenant eviction: </span>{stay.removal_tenant_text}
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Right: Help */}
