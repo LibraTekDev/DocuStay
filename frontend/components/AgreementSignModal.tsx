@@ -1,6 +1,32 @@
 import React, { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, Modal } from "./UI";
-import { agreementsApi, API_URL, type AgreementDocResponse } from "../services/api";
+import { agreementsApi, invitationsApi, API_URL, type AgreementDocResponse, type InvitationDetails } from "../services/api";
+
+/** Form data for guest invite accept (step 1). Exported for parent to call register after sign. Password not collected in modal. */
+export interface GuestInviteFormData {
+  full_name: string;
+  email: string;
+  phone: string;
+  password: string;
+  confirm_password: string;
+  permanent_address: string;
+  permanent_city: string;
+  permanent_state: string;
+  permanent_zip: string;
+  terms_agreed: boolean;
+  privacy_agreed: boolean;
+  guest_status_acknowledged: boolean;
+  no_tenancy_acknowledged: boolean;
+  vacate_acknowledged: boolean;
+}
+
+/** Prefilled guest info (from DB) for read-only display in step 1. No password. */
+export interface PrefilledGuestInfo {
+  full_name: string;
+  email: string;
+  phone: string;
+  permanent_address: string;
+}
 
 type AckKey = "read" | "temporary" | "vacate" | "electronic";
 
@@ -46,6 +72,28 @@ function renderAgreementContent(content: string) {
   ));
 }
 
+const INITIAL_GUEST_FORM: GuestInviteFormData = {
+  full_name: "",
+  email: "",
+  phone: "",
+  password: "",
+  confirm_password: "",
+  permanent_address: "",
+  permanent_city: "",
+  permanent_state: "",
+  permanent_zip: "",
+  terms_agreed: false,
+  privacy_agreed: false,
+  guest_status_acknowledged: false,
+  no_tenancy_acknowledged: false,
+  vacate_acknowledged: false,
+};
+
+function formatInviteDate(s: string | undefined): string {
+  if (!s) return "—";
+  return new Date(s).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
 export default function AgreementSignModal(props: {
   open: boolean;
   invitationCode: string;
@@ -56,8 +104,14 @@ export default function AgreementSignModal(props: {
   notify: (t: "success" | "error", m: string) => void;
   /** When provided and we get a sign_url, we call this and the parent redirects the user to Dropbox (same tab). */
   onRedirectToDropbox?: (invitationCode: string, signatureId: number, signUrl: string) => void;
+  /** Invite-accept flow: show step 1 (property address + guest form + acknowledgments) before agreement/sign. */
+  inviteAcceptMode?: boolean;
+  /** Called when user completes step 1 so parent can store form data and call register after onSigned. */
+  onContinueToSign?: (formData: GuestInviteFormData) => void;
+  /** When set (e.g. dashboard): show this info read-only from DB; no form, no password. */
+  prefilledGuestInfo?: PrefilledGuestInfo | null;
 }) {
-  const { open, invitationCode, guestEmail, guestFullName, onClose, onSigned, notify, onRedirectToDropbox } = props;
+  const { open, invitationCode, guestEmail, guestFullName, onClose, onSigned, notify, onRedirectToDropbox, inviteAcceptMode, onContinueToSign, prefilledGuestInfo } = props;
   const normalizedCode = invitationCode.trim().toUpperCase();
 
   const notifyRef = useRef(notify);
@@ -82,7 +136,24 @@ export default function AgreementSignModal(props: {
   const [pendingDropboxSignatureId, setPendingDropboxSignatureId] = useState<number | null>(null);
   const [pendingSignUrl, setPendingSignUrl] = useState<string | null>(null);
 
+  /** Invite-accept mode: step 1 = details form, step 2 = agreement + sign */
+  const [inviteStep, setInviteStep] = useState<"details" | "sign">("details");
+  const [inviteDetails, setInviteDetails] = useState<InvitationDetails | null>(null);
+  const [inviteDetailsLoading, setInviteDetailsLoading] = useState(false);
+  const [step1FormData, setStep1FormData] = useState<GuestInviteFormData>(INITIAL_GUEST_FORM);
+  const [step1Error, setStep1Error] = useState<string | null>(null);
+
   const allAcks = useMemo(() => Object.values(acks).every(Boolean), [acks]);
+
+  /** Effective guest email/name: from step 1 form or prefilled when in invite mode step 2, else from props */
+  const effectiveGuestEmail =
+    inviteAcceptMode && inviteStep === "sign"
+      ? (prefilledGuestInfo?.email ?? step1FormData.email ?? "").trim()
+      : (guestEmail ?? "").trim();
+  const effectiveGuestFullName =
+    inviteAcceptMode && inviteStep === "sign"
+      ? (prefilledGuestInfo?.full_name ?? step1FormData.full_name ?? "").trim()
+      : (guestFullName ?? "").trim();
 
   const signatureIdToPoll =
     pendingDropboxSignatureId ??
@@ -104,6 +175,20 @@ export default function AgreementSignModal(props: {
     return () => clearInterval(t);
   }, [open, signatureIdToPoll]);
 
+  /** Fetch invite details when in invite-accept mode step 1 */
+  useEffect(() => {
+    if (!open || !inviteAcceptMode || !normalizedCode) return;
+    setInviteStep("details");
+    setStep1FormData(INITIAL_GUEST_FORM);
+    setInviteDetails(null);
+    setInviteDetailsLoading(true);
+    invitationsApi
+      .getDetails(normalizedCode)
+      .then((d) => setInviteDetails(d))
+      .catch(() => setInviteDetails({ valid: false }))
+      .finally(() => setInviteDetailsLoading(false));
+  }, [open, inviteAcceptMode, normalizedCode]);
+
   useEffect(() => {
     if (!open) return;
     setTypedSignature(guestFullName || "");
@@ -111,14 +196,26 @@ export default function AgreementSignModal(props: {
     setAcks({ read: false, temporary: false, vacate: false, electronic: false });
     setLoadError(null);
     setSignError(null);
+    setStep1Error(null);
 
     if (!normalizedCode) return;
+    if (inviteAcceptMode && inviteStep !== "sign") return;
+    const email =
+      inviteAcceptMode && inviteStep === "sign"
+        ? (prefilledGuestInfo?.email ?? step1FormData.email ?? "").trim()
+        : (guestEmail ?? "").trim();
+    const name =
+      inviteAcceptMode && inviteStep === "sign"
+        ? (prefilledGuestInfo?.full_name ?? step1FormData.full_name ?? "").trim()
+        : (guestFullName ?? "").trim();
+    if (!email && !name) return;
+
     setLoading(true);
     setDoc(null);
     setPendingDropboxSignatureId(null);
     setPendingSignUrl(null);
     agreementsApi
-      .getInvitationAgreement(normalizedCode, guestEmail?.trim() || undefined, guestFullName?.trim() || undefined)
+      .getInvitationAgreement(normalizedCode, email || undefined, name || undefined)
       .then((d) => {
         setDoc(d);
         setLoadError(null);
@@ -134,7 +231,38 @@ export default function AgreementSignModal(props: {
         notifyRef.current("error", userMsg);
       })
       .finally(() => setLoading(false));
-  }, [open, normalizedCode, guestFullName, guestEmail]);
+  }, [open, normalizedCode, guestFullName, guestEmail, inviteAcceptMode, inviteStep, step1FormData.email, step1FormData.full_name, prefilledGuestInfo?.email, prefilledGuestInfo?.full_name]);
+
+  const handleStep1Continue = () => {
+    setStep1Error(null);
+    if (prefilledGuestInfo) {
+      const d = step1FormData;
+      if (!d.terms_agreed || !d.privacy_agreed) {
+        setStep1Error("Please agree to the Terms of Service and Privacy Policy to continue.");
+        notify("error", "Please agree to the Terms of Service and Privacy Policy to continue.");
+        return;
+      }
+      setInviteStep("sign");
+      return;
+    }
+    const d = step1FormData;
+    const requiredFilled =
+      d.full_name.trim() &&
+      d.email.trim() &&
+      d.phone.trim() &&
+      d.permanent_address.trim() &&
+      d.permanent_city.trim() &&
+      d.permanent_state.trim() &&
+      d.permanent_zip.trim();
+    if (!requiredFilled || !d.terms_agreed || !d.privacy_agreed) {
+      const msg = "Please fill in all required fields and agree to the Terms of Service and Privacy Policy.";
+      setStep1Error(msg);
+      notify("error", msg);
+      return;
+    }
+    onContinueToSign?.(step1FormData);
+    setInviteStep("sign");
+  };
 
   const handleSign = async () => {
     setSignError(null);
@@ -142,7 +270,9 @@ export default function AgreementSignModal(props: {
       notify("error", "Invitation code is missing.");
       return;
     }
-    if (!guestEmail?.trim()) {
+    const email = effectiveGuestEmail || guestEmail?.trim();
+    const name = effectiveGuestFullName || guestFullName?.trim();
+    if (!email) {
       notify("error", "Enter your email first.");
       return;
     }
@@ -165,8 +295,8 @@ export default function AgreementSignModal(props: {
     try {
       const res = await agreementsApi.signInvitationAgreementWithDropbox({
         invitation_code: normalizedCode,
-        guest_email: guestEmail.trim(),
-        guest_full_name: guestFullName?.trim() || typedSignature.trim(),
+        guest_email: email,
+        guest_full_name: name || typedSignature.trim(),
         typed_signature: typedSignature.trim(),
         acks,
         document_hash: doc.document_hash,
@@ -176,13 +306,15 @@ export default function AgreementSignModal(props: {
         onRedirectToDropbox(normalizedCode, res.signature_id, res.sign_url);
         return;
       }
-      if (res.sign_url) {
+      if (res.sign_url && res.signature_id != null) {
+        setPendingDropboxSignatureId(res.signature_id);
+        setPendingSignUrl(res.sign_url);
         window.open(res.sign_url, "_blank", "noopener");
-        notify("success", "Agreement sent to Dropbox Sign. Complete signing in the new tab. Your stay will confirm once you've signed.");
+        notify("success", "Complete signing in the new tab. This will close automatically when you're done.");
       } else {
         notify("success", "Agreement sent to Dropbox Sign. Check your email to complete signing.");
+        onClose();
       }
-      onClose();
     } catch (e) {
       const msg = (e as Error)?.message || "Could not sign agreement.";
       setSignError(msg);
@@ -193,9 +325,101 @@ export default function AgreementSignModal(props: {
   };
 
   const shortTitle = doc?.title?.includes("(") ? doc.title.slice(0, doc.title.indexOf("(")).trim() || doc.title : (doc?.title || "Review & Sign Agreement");
+  const modalTitle = inviteAcceptMode && inviteStep === "details" ? "Accept invitation" : shortTitle;
+
+  /** Step 1: Property address + guest form + acknowledgments (invite-accept only) */
+  const renderStep1 = () => {
+    if (inviteDetailsLoading) {
+      return (
+        <div className="p-6 md:p-8 text-center text-slate-600">
+          Loading invitation…
+        </div>
+      );
+    }
+    if (inviteDetails && !inviteDetails.valid) {
+      return (
+        <div className="p-6 md:p-8 text-center">
+          <p className="text-slate-600 mb-4">
+            {inviteDetails.expired ? "This invitation has expired." : inviteDetails.used ? "This invitation has already been used." : "This invitation could not be loaded."}
+          </p>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+        </div>
+      );
+    }
+    const d = step1FormData;
+    const isReadOnly = !!prefilledGuestInfo;
+    return (
+      <div className="p-6 md:p-8 space-y-6 bg-slate-50/50 max-h-[85vh] overflow-y-auto">
+        <div className="rounded-xl border border-slate-200 bg-white p-5">
+          <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Property (reference only)</p>
+          <p className="text-slate-800 font-medium">{inviteDetails?.property_address || inviteDetails?.property_name || "—"}</p>
+          {inviteDetails?.stay_start_date && inviteDetails?.stay_end_date && (
+            <p className="text-sm text-slate-500 mt-1">
+              {formatInviteDate(inviteDetails.stay_start_date)} – {formatInviteDate(inviteDetails.stay_end_date)}
+            </p>
+          )}
+        </div>
+
+        {isReadOnly ? (
+          <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-3">
+            <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Your information (from your account)</p>
+            <p className="text-slate-800"><span className="text-slate-500 text-sm">Full name</span> {prefilledGuestInfo.full_name}</p>
+            <p className="text-slate-800"><span className="text-slate-500 text-sm">Email</span> {prefilledGuestInfo.email}</p>
+            <p className="text-slate-800"><span className="text-slate-500 text-sm">Phone</span> {prefilledGuestInfo.phone || "—"}</p>
+            <p className="text-slate-800"><span className="text-slate-500 text-sm">Permanent residence</span> {prefilledGuestInfo.permanent_address}</p>
+          </div>
+        ) : (
+          <div className="grid md:grid-cols-2 gap-6">
+            <div className="space-y-4">
+              <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Your information</p>
+              <Input label="Full name" value={d.full_name} onChange={(e) => setStep1FormData({ ...d, full_name: e.target.value })} required />
+              <Input label="Email" type="email" value={d.email} onChange={(e) => setStep1FormData({ ...d, email: e.target.value })} required />
+              <Input label="Phone" value={d.phone} onChange={(e) => setStep1FormData({ ...d, phone: e.target.value })} placeholder="+1 555-000-0000" required />
+            </div>
+            <div className="space-y-4">
+              <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Permanent residence</p>
+              <Input label="Street address" value={d.permanent_address} onChange={(e) => setStep1FormData({ ...d, permanent_address: e.target.value })} required />
+              <div className="grid grid-cols-2 gap-3">
+                <Input label="City" value={d.permanent_city} onChange={(e) => setStep1FormData({ ...d, permanent_city: e.target.value })} required />
+                <Input label="State" value={d.permanent_state} onChange={(e) => setStep1FormData({ ...d, permanent_state: e.target.value })} required />
+              </div>
+              <Input label="ZIP" value={d.permanent_zip} onChange={(e) => setStep1FormData({ ...d, permanent_zip: e.target.value })} required />
+            </div>
+          </div>
+        )}
+
+        <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-3">
+          <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Agreements</p>
+          {[
+            { key: "terms_agreed" as const, label: "I agree to the Terms of Service." },
+            { key: "privacy_agreed" as const, label: "I agree to the Privacy Policy." },
+          ].map(({ key, label }) => (
+            <label key={key} className="flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={d[key]}
+                onChange={(e) => setStep1FormData({ ...d, [key]: e.target.checked })}
+                className="mt-0.5 w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 shrink-0"
+              />
+              <span className="text-sm text-slate-700">{label}</span>
+            </label>
+          ))}
+        </div>
+
+        {step1Error && <p className="text-sm text-red-600 font-medium" role="alert">{step1Error}</p>}
+        <div className="flex gap-3">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleStep1Continue}>Continue to review & sign</Button>
+        </div>
+      </div>
+    );
+  };
 
   return (
-    <Modal open={open} onClose={onClose} title={shortTitle} className="max-w-5xl">
+    <Modal open={open} onClose={onClose} title={modalTitle} className="max-w-5xl">
+      {inviteAcceptMode && inviteStep === "details" ? (
+        renderStep1()
+      ) : (
       <div className="p-6 md:p-8 space-y-6 bg-slate-50/50">
         {/* Meta row */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -216,8 +440,8 @@ export default function AgreementSignModal(props: {
               <a
                 href={`${API_URL}/agreements/invitation/${encodeURIComponent(normalizedCode)}/pdf${(() => {
                   const params = [
-                    guestEmail?.trim() && `guest_email=${encodeURIComponent(guestEmail.trim())}`,
-                    (guestFullName || typedSignature)?.trim() && `guest_full_name=${encodeURIComponent((guestFullName || typedSignature).trim())}`,
+                    (effectiveGuestEmail || guestEmail?.trim()) && `guest_email=${encodeURIComponent((effectiveGuestEmail || guestEmail?.trim() || ""))}`,
+                    (effectiveGuestFullName || guestFullName || typedSignature)?.trim() && `guest_full_name=${encodeURIComponent((effectiveGuestFullName || guestFullName || typedSignature || "").trim())}`,
                   ].filter(Boolean);
                   return params.length ? `?${params.join("&")}` : "";
                 })()}`}
@@ -281,7 +505,7 @@ export default function AgreementSignModal(props: {
                           ? renderAgreementContent(
                               contentForDisplay(
                                 doc.content,
-                                guestFullName || typedSignature || "[Guest Name]",
+                                effectiveGuestFullName || guestFullName || typedSignature || "[Guest Name]",
                                 ipAddress
                               )
                             )
@@ -388,6 +612,7 @@ export default function AgreementSignModal(props: {
           </div>
         </div>
       </div>
+      )}
     </Modal>
   );
 }

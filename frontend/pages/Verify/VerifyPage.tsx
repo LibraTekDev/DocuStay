@@ -16,7 +16,7 @@ export const VerifyPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<VerifyResponse | null>(null);
 
-  // Pre-fill from query params (#verify?token=...&address=... or ?token=...&address=...)
+  // Pre-fill from query params (#check?token=...&address=... or ?token=...&address=...)
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const hash = window.location.hash || '';
@@ -52,7 +52,7 @@ export const VerifyPage: React.FC = () => {
     }
   };
 
-  const liveLink = typeof window !== 'undefined' ? window.location.href : `${APP_ORIGIN}/#verify`;
+  const liveLink = typeof window !== 'undefined' ? window.location.href : `${APP_ORIGIN}/#check`;
 
   const inputClass = "w-full px-4 py-2.5 rounded-lg border border-gray-300 text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-colors";
 

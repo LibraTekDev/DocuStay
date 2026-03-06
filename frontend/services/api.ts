@@ -680,6 +680,9 @@ export const dashboardApi = {
     return request<OwnerAuditLogEntry[]>(`/dashboard/owner/logs${q ? `?${q}` : ""}`);
   },
   guestStays: () => request<GuestStayView[]>("/dashboard/guest/stays"),
+  /** Guest profile (full_legal_name, permanent_home_address). Guest only. */
+  guestProfile: () =>
+    request<{ id: number; full_legal_name: string; permanent_home_address: string; gps_checkin_acknowledgment: boolean } | null>("/guests/profile"),
   guestPendingInvites: () => request<GuestPendingInviteView[]>("/dashboard/guest/pending-invites"),
   guestAddPendingInvite: (invitationCode: string) =>
     request<GuestPendingInviteView>("/dashboard/guest/pending-invites", {

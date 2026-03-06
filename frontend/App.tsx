@@ -2,7 +2,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AppState, UserType, AccountStatus } from './types';
 import { Card, Button, LoadingOverlay, ErrorModal } from './components/UI';
-import { NotificationCenter } from './components/NotificationCenter';
 import { authApi, setToken, toUserSession, type TokenResponse } from './services/api';
 import Login from './pages/Auth/Login';
 import RegisterOwner from './pages/Auth/RegisterOwner';
@@ -67,7 +66,7 @@ const App: React.FC = () => {
     const restoreSession = async () => {
       // Skip session restore on onboarding pages (they use pending-owner tokens, not full user tokens)
       const currentView = hashToView(window.location.hash || '');
-      const isOnboardingPage = currentView.startsWith('onboarding/') || currentView === 'verify';
+      const isOnboardingPage = currentView.startsWith('onboarding/') || currentView === 'verify' || currentView === 'check';
       if (isOnboardingPage) {
         setSessionRestoring(false);
         return;
@@ -217,10 +216,9 @@ const App: React.FC = () => {
             </div>
             
             <div className="flex items-center gap-6">
-              <button onClick={() => navigate('verify')} className="text-gray-600 hover:text-gray-900 font-medium text-sm transition-colors">Verify</button>
+              <button onClick={() => navigate('check')} className="text-gray-600 hover:text-gray-900 font-medium text-sm transition-colors">Verify</button>
               {state.user ? (
                 <>
-                  <NotificationCenter />
                   <div className="hidden md:block text-right">
                     <p className="text-sm font-semibold text-gray-900">{state.user.user_name}</p>
                     <p className="text-xs text-gray-500 uppercase tracking-wide">
@@ -278,6 +276,8 @@ const App: React.FC = () => {
             setLoading={setLoading}
             notify={showNotification}
             navigate={navigate}
+            setPendingVerification={(data) => setState(prev => ({ ...prev, pendingVerification: data }))}
+            onGuestLogin={(user) => { setState(prev => ({ ...prev, user })); navigate('guest-dashboard'); }}
           />
         )}
         {view === 'register' && <RegisterOwner setPendingVerification={(data) => setState(prev => ({ ...prev, pendingVerification: data }))} onLogin={handleLogin} navigate={navigate} setLoading={setLoading} notify={showNotification} />}
@@ -363,8 +363,8 @@ const App: React.FC = () => {
           <PortfolioPage slug={view.replace(/^portfolio\/?/, '').split('/')[0] || ''} />
         )}
 
-        {/* Public verify portal (no auth; token + address verification, all attempts logged) */}
-        {view === 'verify' && <VerifyPage />}
+        {/* Public check portal (no auth; token + address verification, all attempts logged). Uses #check to avoid overlapping with #verify email verification. */}
+        {view === 'check' && <VerifyPage />}
 
         {/* Provider authority letter (public link from email) */}
         {view.startsWith('provider/authority/') && (

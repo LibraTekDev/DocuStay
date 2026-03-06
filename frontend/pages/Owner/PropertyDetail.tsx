@@ -1033,7 +1033,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
         </div>
       )}
 
-      {/* Verify with QR code modal – opens /verify with token pre-filled */}
+      {/* Verify with QR code modal – opens #check with token pre-filled */}
       {showVerifyQRModal && verifyQRInviteId && (
         <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
           <div className="max-w-sm w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200 relative">
@@ -1045,7 +1045,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
             <div className="flex justify-center mb-4">
               <div className="bg-slate-50 p-4 rounded-xl">
                 <img
-                  src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`)}`}
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#check?token=${encodeURIComponent(verifyQRInviteId)}`)}`}
                   alt="QR code for verify page"
                   className="w-40 h-40 rounded-lg"
                 />
@@ -1056,7 +1056,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                 type="button"
                 variant="primary"
                 className="w-full"
-                onClick={() => window.open(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`, '_blank', 'noopener,noreferrer')}
+                onClick={() => window.open(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#check?token=${encodeURIComponent(verifyQRInviteId)}`, '_blank', 'noopener,noreferrer')}
               >
                 Open verify page
               </Button>
@@ -1065,7 +1065,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                 variant="outline"
                 className="w-full"
                 onClick={async () => {
-                  const url = `${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`;
+                  const url = `${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#check?token=${encodeURIComponent(verifyQRInviteId)}`;
                   const ok = await copyToClipboard(url);
                   setCopyToast(ok ? 'Verify link copied.' : 'Could not copy.');
                   setTimeout(() => setCopyToast(null), 3000);

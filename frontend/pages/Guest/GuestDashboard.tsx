@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Button, Input } from '../../components/UI';
 import { UserSession } from '../../types';
 import { dashboardApi, authApi, agreementsApi, APP_ORIGIN, type GuestStayView, type GuestPendingInviteView } from '../../services/api';
 import { copyToClipboard } from '../../utils/clipboard';
-import AgreementSignModal from '../../components/AgreementSignModal';
+import AgreementSignModal, { type PrefilledGuestInfo } from '../../components/AgreementSignModal';
+import PendingSignatureModal from '../../components/PendingSignatureModal';
 import { PENDING_INVITE_STORAGE_KEY } from './GuestLogin';
 
 const DROPBOX_REDIRECT_INVITATION_CODE = 'docustay_dropbox_redirect_invitation_code';
@@ -107,6 +108,27 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
   const [verifyQRInviteId, setVerifyQRInviteId] = useState<string | null>(null);
   const [copyToast, setCopyToast] = useState<string | null>(null);
   const [checkingInStay, setCheckingInStay] = useState<GuestStayView | null>(null);
+  const [prefilledGuestInfoForModal, setPrefilledGuestInfoForModal] = useState<PrefilledGuestInfo | null>(null);
+  const [pendingSignatureModalInvite, setPendingSignatureModalInvite] = useState<GuestPendingInviteView | null>(null);
+  /** Track accept-invite attempts that failed so we don't retry in a loop (same invite+signature). */
+  const acceptFailedRef = useRef<Set<string>>(new Set());
+
+  const openAgreementModal = useCallback((code: string) => {
+    dashboardApi.guestProfile()
+      .then((profile) => {
+        setPrefilledGuestInfoForModal({
+          full_name: (profile?.full_legal_name || user?.user_name || '').trim(),
+          email: (user?.email || '').trim(),
+          phone: (user as { phone?: string })?.phone ?? '',
+          permanent_address: (profile?.permanent_home_address || '').trim(),
+        });
+        setAgreementModalCode(code);
+      })
+      .catch(() => {
+        setPrefilledGuestInfoForModal(null);
+        setAgreementModalCode(code);
+      });
+  }, [user]);
 
   const loadData = useCallback(() => {
     Promise.all([
@@ -133,8 +155,13 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
   useEffect(() => {
     if (!pendingInvites.length) return;
     const toAccept = pendingInvites.filter(
-      (inv): inv is GuestPendingInviteView & { accept_now_signature_id: number } =>
-        typeof (inv as GuestPendingInviteView).accept_now_signature_id === 'number'
+      (inv): inv is GuestPendingInviteView & { accept_now_signature_id: number } => {
+        const sid = (inv as GuestPendingInviteView).accept_now_signature_id;
+        if (typeof sid !== 'number') return false;
+        const key = `${inv.invitation_code}:${sid}`;
+        if (acceptFailedRef.current.has(key)) return false; // already tried and failed, don't retry
+        return true;
+      }
     );
     if (toAccept.length === 0) return;
     Promise.all(
@@ -143,6 +170,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
       loadData();
       notify('success', 'Your stay is confirmed. It will appear in your current or upcoming stays.');
     }).catch((e) => {
+      toAccept.forEach((inv) => acceptFailedRef.current.add(`${inv.invitation_code}:${inv.accept_now_signature_id}`));
       notify('error', (e as Error)?.message ?? 'Could not confirm your stay.');
       loadData();
     });
@@ -187,6 +215,51 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
     return () => clearInterval(t);
   }, [loadData, notify]);
 
+  // When user returns to the tab (e.g. after signing in Dropbox in another tab), refetch so backend can re-check Dropbox and we accept/create stay
+  useEffect(() => {
+    const hasPendingDropbox = () => pendingInvites.some((inv) => inv.needs_dropbox_signature);
+    if (!hasPendingDropbox()) return;
+    const onFocus = () => loadData();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [pendingInvites, loadData]);
+
+  // Delayed refetch when there are pending Dropbox invites: backend may not have signed PDF on first load (Dropbox delay). Refetch after 5s so stay can appear after signing.
+  useEffect(() => {
+    const hasPendingDropbox = pendingInvites.some((inv) => inv.needs_dropbox_signature);
+    if (!hasPendingDropbox) return;
+    const t = setTimeout(() => loadData(), 5000);
+    return () => clearTimeout(t);
+  }, [pendingInvites, loadData]);
+
+  // When "Complete signing" modal is open: poll signature status; when completed, accept invite so stay appears and close modal
+  useEffect(() => {
+    const inv = pendingSignatureModalInvite;
+    const sigId = inv?.pending_signature_id;
+    if (!inv || sigId == null || typeof sigId !== 'number') return;
+    const POLL_MS = 3000;
+    const MAX_POLLS = 80; // ~4 min
+    let count = 0;
+    const t = setInterval(() => {
+      count += 1;
+      agreementsApi.getSignatureStatus(sigId).then((res) => {
+        if (res.completed) {
+          clearInterval(t);
+          authApi.acceptInvite(inv.invitation_code, sigId).then(() => {
+            loadData();
+            setPendingSignatureModalInvite(null);
+            notify('success', 'Your stay is confirmed. It will appear in your current or upcoming stays.');
+          }).catch((e) => {
+            notify('error', (e as Error)?.message ?? 'Could not confirm your stay.');
+            loadData();
+          });
+        }
+      }).catch(() => {});
+      if (count >= MAX_POLLS) clearInterval(t);
+    }, POLL_MS);
+    return () => clearInterval(t);
+  }, [pendingSignatureModalInvite, loadData, notify]);
+
   useEffect(() => {
     const code = sessionStorage.getItem(PENDING_INVITE_STORAGE_KEY);
     if (!code) return;
@@ -194,13 +267,13 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
     dashboardApi.guestAddPendingInvite(code)
       .then(() => {
         loadData();
-        setAgreementModalCode(code);
+        openAgreementModal(code);
       })
       .catch((e) => {
         loadData();
         notify('error', (e as Error)?.message ?? 'Invalid or expired invitation.');
       });
-  }, [loadData, notify]);
+  }, [loadData, notify, openAgreementModal]);
 
   const handleAgreementSigned = useCallback(async (signatureId: number) => {
     if (!agreementModalCode) return;
@@ -270,14 +343,14 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
       .then(() => {
         setInviteLinkInput('');
         loadData();
-        setAgreementModalCode(code);
+        openAgreementModal(code);
         notify('success', 'Invitation added. Review and sign the agreement below.');
       })
       .catch((e) => {
         notify('error', (e as Error)?.message ?? 'Invalid or expired invitation. Please check the link.');
       })
       .finally(() => setAddingInvite(false));
-  }, [inviteLinkInput, loadData, notify]);
+  }, [inviteLinkInput, loadData, notify, openAgreementModal]);
 
   if (loading) {
     return (
@@ -401,7 +474,14 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
           <section className="order-2 mb-6 lg:mb-8">
             <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-5 sm:p-6 shadow-sm">
               <h2 className="text-base font-semibold text-slate-900 mb-1">Pending actions</h2>
-              <p className="text-sm text-slate-600 mb-4">Complete signing in Dropbox to confirm these stays. Your stay will not be confirmed until the agreement is signed.</p>
+              <p className="text-sm text-slate-600 mb-2">Complete signing in Dropbox to confirm these stays. Your stay will not be confirmed until the agreement is signed.</p>
+              <p className="text-sm text-slate-500 mb-4">
+                Already signed?{' '}
+                <button type="button" onClick={() => loadData()} className="text-blue-600 hover:text-blue-800 font-medium underline underline-offset-1">
+                  Check again
+                </button>
+                {' '}— your stay will appear once we detect it.
+              </p>
               <ul className="space-y-3">
                 {pendingInvites
                   .filter((inv) => inv.needs_dropbox_signature)
@@ -414,7 +494,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                         </p>
                         <p className="text-xs text-amber-700 font-medium mt-1">Awaiting your signature in Dropbox</p>
                       </div>
-                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => setAgreementModalCode(inv.invitation_code)}>
+                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => setPendingSignatureModalInvite(inv)}>
                         Complete signing
                       </Button>
                     </li>
@@ -422,6 +502,19 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
               </ul>
             </div>
           </section>
+        )}
+
+        {pendingSignatureModalInvite && (
+          <PendingSignatureModal
+            open={!!pendingSignatureModalInvite}
+            onClose={() => setPendingSignatureModalInvite(null)}
+            invitationCode={pendingSignatureModalInvite.invitation_code}
+            propertyName={pendingSignatureModalInvite.property_name}
+            stayStartDate={pendingSignatureModalInvite.stay_start_date}
+            stayEndDate={pendingSignatureModalInvite.stay_end_date}
+            guestEmail={guestEmail}
+            guestFullName={guestFullName}
+          />
         )}
 
         {/* Stay cards - right margin on desktop (vertical list), in flow on mobile */}
@@ -542,7 +635,11 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                         </p>
                         <p className="text-xs text-slate-400 mt-0.5">{inv.host_name}</p>
                       </div>
-                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => setAgreementModalCode(inv.invitation_code)}>
+                      <Button
+                        variant="primary"
+                        className="shrink-0 h-10 rounded-lg font-medium px-4"
+                        onClick={() => (inv.needs_dropbox_signature ? setPendingSignatureModalInvite(inv) : openAgreementModal(inv.invitation_code))}
+                      >
                         {inv.needs_dropbox_signature ? 'Complete signing' : 'Review & sign'}
                       </Button>
                     </li>
@@ -895,7 +992,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
         </div>
       )}
 
-      {/* Verify with QR code modal – opens /verify with token pre-filled */}
+      {/* Verify with QR code modal – opens #check with token pre-filled */}
       {showVerifyQRModal && verifyQRInviteId && (
         <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
           <div className="max-w-sm w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200 relative">
@@ -907,7 +1004,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
             <div className="flex justify-center mb-4">
               <div className="bg-slate-50 p-4 rounded-xl">
                 <img
-                  src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`)}`}
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#check?token=${encodeURIComponent(verifyQRInviteId)}`)}`}
                   alt="QR code for verify page"
                   className="w-40 h-40 rounded-lg"
                 />
@@ -918,7 +1015,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                 type="button"
                 variant="primary"
                 className="w-full"
-                onClick={() => window.open(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`, '_blank', 'noopener,noreferrer')}
+                onClick={() => window.open(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#check?token=${encodeURIComponent(verifyQRInviteId)}`, '_blank', 'noopener,noreferrer')}
               >
                 Open verify page
               </Button>
@@ -929,7 +1026,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                 onClick={async (e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  const url = `${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`;
+                  const url = `${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#check?token=${encodeURIComponent(verifyQRInviteId)}`;
                   const ok = await copyToClipboard(url);
                   setCopyToast(ok ? 'Verify link copied.' : 'Could not copy.');
                   setTimeout(() => setCopyToast(null), 3000);
@@ -1034,10 +1131,11 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
         <AgreementSignModal
           open={!!agreementModalCode}
           invitationCode={agreementModalCode}
-          guestEmail={guestEmail}
-          guestFullName={guestFullName}
+          guestEmail=""
+          guestFullName=""
           onClose={() => {
             setAgreementModalCode(null);
+            setPrefilledGuestInfoForModal(null);
             loadData();
           }}
           onSigned={handleAgreementSigned}
@@ -1047,6 +1145,9 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
             sessionStorage.setItem(DROPBOX_REDIRECT_SIGNATURE_ID, String(signatureId));
             window.location.href = signUrl;
           }}
+          inviteAcceptMode
+          onContinueToSign={() => {}}
+          prefilledGuestInfo={prefilledGuestInfoForModal}
         />
       )}
     </div>

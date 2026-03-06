@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Input, Button, ErrorModal } from '../../components/UI';
 import { HeroBackground } from '../../components/HeroBackground';
-import { authApi, invitationsApi } from '../../services/api';
+import { authApi, authApiGuest, invitationsApi } from '../../services/api';
+import AgreementSignModal, { type GuestInviteFormData } from '../../components/AgreementSignModal';
 
 const parseInviteCode = (raw: string): string => {
   const trimmed = raw.trim();
@@ -18,15 +19,19 @@ interface GuestLoginProps {
   setLoading: (l: boolean) => void;
   notify: (t: 'success' | 'error', m: string) => void;
   navigate: (v: string) => void;
+  setPendingVerification?: (data: { userId: string; type: 'email'; generatedAt: string }) => void;
+  onGuestLogin?: (user: any) => void;
 }
 
 const PENDING_INVITE_STORAGE_KEY = 'docustay_pending_invite_code';
 
-const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, onLogin, setLoading, notify, navigate }) => {
+const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, onLogin, setLoading, notify, navigate, setPendingVerification, onGuestLogin }) => {
   const [formData, setFormData] = useState({ email: '', password: '', invitation_link: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [errorModal, setErrorModal] = useState<{ open: boolean; message: string }>({ open: false, message: '' });
   const [inviteCheck, setInviteCheck] = useState<{ loading: boolean; valid: boolean; expired?: boolean; used?: boolean } | null>(null);
+  const [inviteAcceptModalOpen, setInviteAcceptModalOpen] = useState(false);
+  const [pendingInviteFormData, setPendingInviteFormData] = useState<GuestInviteFormData | null>(null);
 
   const inviteCode = inviteCodeFromUrl || parseInviteCode(formData.invitation_link);
   const showError = (message: string) => setErrorModal({ open: true, message });
@@ -181,7 +186,20 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
 
             <div className="mt-8 space-y-2 text-center text-gray-500 text-sm">
               <p>
-                {inviteCode && (
+                {inviteCode && inviteCheck?.valid === true && (
+                  <>
+                    First time?{' '}
+                    <button
+                      type="button"
+                      onClick={() => setInviteAcceptModalOpen(true)}
+                      className="text-blue-700 font-medium hover:text-blue-800 hover:underline underline-offset-2"
+                    >
+                      Create account & accept invitation
+                    </button>
+                    <span className="mx-1.5 text-gray-300">·</span>
+                  </>
+                )}
+                {inviteCode && (!inviteCheck || inviteCheck.valid !== true) && (
                   <>
                     First time?{' '}
                     <button type="button" onClick={() => navigate(`guest-signup/${inviteCode}`)} className="text-blue-700 font-medium hover:text-blue-800 hover:underline underline-offset-2">Create account</button>
@@ -197,6 +215,58 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
           </div>
         </div>
       </div>
+
+      {inviteCode && (
+        <AgreementSignModal
+          open={inviteAcceptModalOpen}
+          invitationCode={inviteCode}
+          guestEmail=""
+          guestFullName=""
+          onClose={() => {
+            setInviteAcceptModalOpen(false);
+            setPendingInviteFormData(null);
+          }}
+          onSigned={async (signatureId) => {
+            if (!pendingInviteFormData || !inviteCode) return;
+            const code = inviteCode.trim().toUpperCase();
+            setLoading(true);
+            try {
+              const result = await authApiGuest.register({
+                ...pendingInviteFormData,
+                invitation_id: code,
+                invitation_code: code,
+                agreement_signature_id: signatureId,
+                guest_status_acknowledged: true,
+                no_tenancy_acknowledged: true,
+                vacate_acknowledged: true,
+              });
+              setLoading(false);
+              setInviteAcceptModalOpen(false);
+              setPendingInviteFormData(null);
+              if (result.status === 'success' && result.data) {
+                const d = result.data as any;
+                if (d.verificationRequired && d.user_id && setPendingVerification) {
+                  notify('success', result.message || 'Check your email for the verification code.');
+                  setPendingVerification({ userId: d.user_id, type: 'email', generatedAt: new Date().toISOString() });
+                  navigate('verify');
+                  return;
+                }
+                notify('success', 'Registration successful!');
+                if (onGuestLogin) onGuestLogin(result.data);
+                navigate('guest-dashboard');
+              } else {
+                notify('error', result.message || 'Registration failed.');
+              }
+            } catch (err) {
+              setLoading(false);
+              notify('error', (err as Error)?.message || 'Registration failed.');
+            }
+          }}
+          notify={notify}
+          inviteAcceptMode
+          onContinueToSign={(formData) => setPendingInviteFormData(formData)}
+        />
+      )}
 
       <ErrorModal
         open={errorModal.open}

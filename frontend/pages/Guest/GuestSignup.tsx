@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Card, Input, Button, ErrorModal } from '../../components/UI';
 import { HeroBackground } from '../../components/HeroBackground';
 import { authApiGuest } from '../../services/api';
+import AgreementSignModal, { type GuestInviteFormData } from '../../components/AgreementSignModal';
 
 interface GuestSignupProps {
   initialInviteCode?: string;
@@ -22,6 +23,9 @@ const parseInviteCode = (raw: string): string => {
 };
 
 const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPendingVerification, navigate, setLoading, notify, onGuestLogin }) => {
+  const [inviteAcceptModalOpen, setInviteAcceptModalOpen] = useState(false);
+  const [inviteAcceptCode, setInviteAcceptCode] = useState('');
+  const [pendingInviteFormData, setPendingInviteFormData] = useState<GuestInviteFormData | null>(null);
   const [formData, setFormData] = useState({
     invitation_link: (initialInviteCode || '').trim(),
     full_name: '',
@@ -137,6 +141,24 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
                   onChange={e => setFormData({ ...formData, invitation_link: e.target.value })}
                   placeholder="Paste invitation link or code if you have one"
                 />
+                {(initialInviteCode || parseInviteCode(formData.invitation_link).length >= 5) && (
+                  <div className="mt-3">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full md:w-auto"
+                      onClick={() => {
+                        const code = initialInviteCode || parseInviteCode(formData.invitation_link);
+                        if (code) {
+                          setInviteAcceptCode(code);
+                          setInviteAcceptModalOpen(true);
+                        }
+                      }}
+                    >
+                      Accept this invitation (property address + your details + sign)
+                    </Button>
+                  </div>
+                )}
               </div>
               <div>
                 <h3 className="text-sm font-semibold text-gray-900 mb-4 flex items-center gap-2">
@@ -225,6 +247,60 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
             </form>
           </div>
         </div>
+
+      {inviteAcceptCode && (
+        <AgreementSignModal
+          open={inviteAcceptModalOpen}
+          invitationCode={inviteAcceptCode}
+          guestEmail=""
+          guestFullName=""
+          onClose={() => {
+            setInviteAcceptModalOpen(false);
+            setInviteAcceptCode('');
+            setPendingInviteFormData(null);
+          }}
+          onSigned={async (signatureId) => {
+            if (!pendingInviteFormData || !inviteAcceptCode) return;
+            const code = inviteAcceptCode.trim().toUpperCase();
+            setLoading(true);
+            try {
+              const result = await authApiGuest.register({
+                ...pendingInviteFormData,
+                invitation_id: code,
+                invitation_code: code,
+                agreement_signature_id: signatureId,
+                guest_status_acknowledged: true,
+                no_tenancy_acknowledged: true,
+                vacate_acknowledged: true,
+              });
+              setLoading(false);
+              setInviteAcceptModalOpen(false);
+              setInviteAcceptCode('');
+              setPendingInviteFormData(null);
+              if (result.status === 'success' && result.data) {
+                const d = result.data as any;
+                if (d.verificationRequired && d.user_id && setPendingVerification) {
+                  notify('success', result.message || 'Check your email for the verification code.');
+                  setPendingVerification({ userId: d.user_id, type: 'email', generatedAt: new Date().toISOString() });
+                  navigate('verify');
+                  return;
+                }
+                notify('success', 'Registration successful!');
+                if (onGuestLogin) onGuestLogin(result.data);
+                navigate('guest-dashboard');
+              } else {
+                notify('error', result.message || 'Registration failed.');
+              }
+            } catch (err) {
+              setLoading(false);
+              notify('error', (err as Error)?.message || 'Registration failed.');
+            }
+          }}
+          notify={notify}
+          inviteAcceptMode
+          onContinueToSign={(formData) => setPendingInviteFormData(formData)}
+        />
+      )}
 
       <ErrorModal
         open={errorModal.open}
