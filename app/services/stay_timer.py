@@ -1,6 +1,9 @@
 """Module G: Stay Timer & Legal Notification Engine + Dead Man's Switch."""
+import logging
 from datetime import date, timedelta, datetime, timezone
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger("uvicorn.error")
 from app.database import SessionLocal
 from app.models.stay import Stay
 from app.models.user import User
@@ -212,6 +215,8 @@ def _run_dead_mans_switch_job_test_mode(db: Session) -> None:
         )
         .all()
     )
+    dms_stays = [s for s in stays if dms_enabled(s)]
+    logger.info("DMS job (test mode): started, %d total stays, %d with DMS on", len(stays), len(dms_stays))
     for stay in stays:
         if not dms_enabled(stay):
             continue
@@ -350,12 +355,57 @@ def _run_dead_mans_switch_job_test_mode(db: Session) -> None:
                 pass
 
     # Shield activation (test mode): skip last-day Shield activation tied to real stay_end_date to avoid side effects
+    logger.info("DMS job (test mode): finished")
     return
+
+
+def run_dms_test_mode_catchup_job() -> None:
+    """DMS test mode only: find stays that checked in >2 min ago but still have DMS off, turn DMS on and run DMS job. Handles missed one-off job (e.g. server restart)."""
+    if not getattr(settings, "dms_test_mode", False):
+        logger.debug("DMS test-mode catchup job: skipped (dms_test_mode=False)")
+        return
+    logger.info("DMS test-mode catchup job: started")
+    db = SessionLocal()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=DMS_TEST_MODE_MINUTES_AFTER_CREATE)
+        stays = (
+            db.query(Stay)
+            .filter(
+                Stay.checked_in_at.isnot(None),
+                Stay.checked_in_at < cutoff,
+                Stay.checked_out_at.is_(None),
+                Stay.cancelled_at.is_(None),
+            )
+            .all()
+        )
+        to_turn_on = [s for s in stays if getattr(s, "dead_mans_switch_enabled", 0) == 0]
+        logger.info(
+            "DMS test-mode catchup job: found %d stay(s) checked in >2min ago, %d with DMS off",
+            len(stays),
+            len(to_turn_on),
+        )
+        changed = False
+        for stay in to_turn_on:
+            stay.dead_mans_switch_enabled = 1
+            db.add(stay)
+            changed = True
+        if changed:
+            db.commit()
+            logger.info("DMS test-mode catchup job: turned DMS on for %d stay(s), running run_dead_mans_switch_job", len(to_turn_on))
+            run_dead_mans_switch_job(db)
+        else:
+            logger.info("DMS test-mode catchup job: no stays needed DMS on, done")
+    except Exception as e:
+        logger.exception("DMS test-mode catchup job: failed: %s", e)
+    finally:
+        db.close()
+        logger.info("DMS test-mode catchup job: finished")
 
 
 def run_dead_mans_switch_job(db: Session) -> None:
     """Dead Man's Switch: 48h before alert, today alert, 48h after auto-execute. When DMS_TEST_MODE=true, uses 2 min after stay creation."""
     if settings.dms_test_mode:
+        logger.info("DMS job: running test-mode path (effective end = 2 min after check-in/create)")
         _run_dead_mans_switch_job_test_mode(db)
         return
 

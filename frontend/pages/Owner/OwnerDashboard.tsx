@@ -517,9 +517,6 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             <p className="text-slate-500 text-sm">
               Invitations you’ve sent. Pending invitations are labeled as expired after 12 hours if not accepted.
             </p>
-            <div className="flex gap-4 flex-wrap">
-              <Button variant="primary" onClick={openInviteModalOrNotify} disabled={!canInvite} title={!canInvite ? 'Pay your onboarding invoice in Billing first' : undefined}>Invite Guest</Button>
-            </div>
 
             {/* Pending (within 12h window) */}
             <Card className="overflow-hidden">
@@ -566,7 +563,25 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                             <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-amber-500/10 text-amber-700 border border-amber-200">Pending</span>
                           </td>
                           <td className="px-6 py-5">
-                            <Button variant="outline" size="sm" onClick={async () => { try { await dashboardApi.cancelInvitation(inv.id); notify('success', 'Invitation cancelled.'); loadData(); } catch (e) { notify('error', (e as Error)?.message ?? 'Failed to cancel.'); } }}>Cancel invite</Button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const url = `${typeof window !== 'undefined' ? window.location.origin : ''}${typeof window !== 'undefined' ? window.location.pathname : ''}#invite/${inv.invitation_code}`;
+                                  const ok = await copyToClipboard(url);
+                                  if (ok) notify('success', 'Invitation link copied to clipboard.');
+                                  else notify('error', 'Could not copy. Please copy the link manually.');
+                                }}
+                                title="Copy invitation link"
+                                className="p-2 rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-800 hover:border-slate-300 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:ring-offset-1"
+                                aria-label="Copy invitation link"
+                              >
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                                </svg>
+                              </button>
+                              <Button variant="outline" size="sm" onClick={async () => { try { await dashboardApi.cancelInvitation(inv.id); notify('success', 'Invitation cancelled.'); loadData(); } catch (e) { notify('error', (e as Error)?.message ?? 'Failed to cancel.'); } }}>Cancel invite</Button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -583,7 +598,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                 <p className="text-xs text-slate-500 mt-1">Pending invites whose 12-hour window was exceeded (not accepted in time)</p>
               </div>
               <div className="overflow-x-auto">
-                {invitations.filter((i) => i.status === 'pending' && i.is_expired).length === 0 ? (
+                {invitations.filter((i) => i.is_expired).length === 0 ? (
                   <p className="p-6 text-slate-500 text-sm">No expired invitations.</p>
                 ) : (
                   <table className="w-full text-left">
@@ -600,7 +615,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-200">
-                      {invitations.filter((i) => i.status === 'pending' && i.is_expired).map((inv) => (
+                      {invitations.filter((i) => i.is_expired).map((inv) => (
                         <tr key={inv.id} className="hover:bg-slate-50 transition-colors">
                           <td className="px-6 py-5">
                             <span className="text-sm font-medium text-slate-800">{inv.guest_name || inv.guest_email || '—'}</span>
@@ -620,9 +635,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                           <td className="px-6 py-5">
                             <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-slate-100 text-slate-600 border border-slate-200">Expired</span>
                           </td>
-                          <td className="px-6 py-5">
-                            <Button variant="outline" size="sm" onClick={async () => { try { await dashboardApi.cancelInvitation(inv.id); notify('success', 'Invitation cancelled.'); loadData(); } catch (e) { notify('error', (e as Error)?.message ?? 'Failed to cancel.'); } }}>Cancel invite</Button>
-                          </td>
+                          <td className="px-6 py-5 text-slate-400 text-sm">—</td>
                         </tr>
                       ))}
                     </tbody>

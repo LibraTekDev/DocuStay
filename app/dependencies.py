@@ -142,3 +142,10 @@ def require_guest(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role != UserRole.guest:
         raise HTTPException(status_code=403, detail="Guest role required")
     return current_user
+
+
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """Only users with role=admin can access admin routes. Returns 403 for non-admin."""
+    if current_user.role != UserRole.admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return current_user

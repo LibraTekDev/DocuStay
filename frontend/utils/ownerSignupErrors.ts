@@ -78,9 +78,9 @@ export function getOwnerSignupErrorFriendly(
       redirectTo: null,
     };
   }
-  if (raw.includes("verification code has expired") || (raw.includes("code") && raw.includes("expired"))) {
+  if (raw.includes("verification code has expired") || (raw.includes("code") && raw.includes("expired")) || raw.includes("please request a new one")) {
     return {
-      message: "This verification code has expired. Please click 'Resend now' to get a new code.",
+      message: "This verification code has expired. Please click 'Resend now' below to get a new code.",
       redirectTo: null,
     };
   }
@@ -94,6 +94,12 @@ export function getOwnerSignupErrorFriendly(
     return {
       message: "That code isn't correct or has expired. Please try again or request a new code.",
       redirectTo: null,
+    };
+  }
+  if (raw === "invalid request" || (raw.includes("invalid") && raw.includes("request"))) {
+    return {
+      message: "We couldn't find your verification. Please go back to sign-up and register again, or use the link from your latest verification email.",
+      redirectTo: "register",
     };
   }
 
@@ -160,6 +166,16 @@ export function getOwnerSignupErrorFriendly(
   }
 
   // --- POA / complete-signup ---
+  if (
+    raw.toLowerCase().includes("complete signing in dropbox") ||
+    (raw.toLowerCase().includes("dropbox") && raw.toLowerCase().includes("before completing signup"))
+  ) {
+    return {
+      message:
+        "You must sign the document we sent via email (from Dropbox Sign) before you can complete verification. Open the email, sign the document, then click Complete Verification again.",
+      redirectTo: null,
+    };
+  }
   if (raw.includes("master poa signature") && raw.includes("already used")) {
     return {
       message: "This Master POA signature was already used for another account. Please sign the document again to create a new signature.",
@@ -194,8 +210,18 @@ export function getOwnerSignupErrorFriendly(
     };
   }
 
-  // Default: show API message if it's short enough, otherwise generic
+  // Verification flow: friendly generic so we don't show technical backend text
+  if (raw.includes("verification") || raw.includes("verify") || raw.includes("code") || raw.includes("expired")) {
+    return {
+      message: "We couldn't verify your code. Please check the 6-digit code from your email and try again, or click 'Resend now' to get a new code.",
+      redirectTo: null,
+    };
+  }
+
+  // Default: show API message if it's short and readable, otherwise generic
   const fallback =
-    apiMessage && apiMessage.length <= 200 ? apiMessage : "Something went wrong. Please try again or contact support.";
+    apiMessage && apiMessage.length <= 200 && !apiMessage.startsWith("{")
+      ? apiMessage
+      : "Something went wrong. Please try again or contact support.";
   return { message: fallback, redirectTo: null };
 }

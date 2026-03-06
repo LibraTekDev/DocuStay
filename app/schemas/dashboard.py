@@ -29,6 +29,11 @@ class GuestPendingInviteView(BaseModel):
     stay_end_date: date
     host_name: str | None
     region_code: str
+    # When True, guest has sent agreement to Dropbox but not yet completed signing; stay cannot be confirmed until signed
+    needs_dropbox_signature: bool = False
+    pending_signature_id: int | None = None  # signature_id to poll for completion
+    # When set, signature is complete (e.g. just fetched from Dropbox) but invite not yet accepted; frontend can call acceptInvite to create stay
+    accept_now_signature_id: int | None = None
 
 
 class OwnerStayView(BaseModel):

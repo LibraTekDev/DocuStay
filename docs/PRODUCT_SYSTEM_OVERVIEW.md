@@ -118,6 +118,11 @@ Jurisdiction and legal content are stored in the database as the **source of tru
 - **Inputs:** Property, guest name, check-in date, check-out date; optional guest email. Purpose and relationship have defaults (e.g. travel, friend).
 - **Output:** An invitation is created with status **pending**, token_state **STAGED**, and a unique **invitation code**. Dead Man’s Switch is enabled for the resulting stay (alerts by email and dashboard). The owner receives a **link** they can share: `#invite/{invitation_code}`.
 
+### Invitation expiry (pending, not accepted in time)
+- **Normal mode:** Pending invitations that are not accepted within **12 hours** are marked **expired** (status=expired, token_state=EXPIRED) by a scheduled cleanup job that runs every hour.
+- **Test mode** (when `TEST_MODE=true` in .env): The same logic applies but the window is **5 minutes** instead of 12 hours, and the cleanup job runs **every minute** so expired invites are updated soon after the window.
+- The owner dashboard uses the same rule to show which pending invites are expired (5 min or 12 h depending on mode).
+
 ### How a guest can accept
 1. **New guest (signup with invite link)**  
    - Guest opens the invite link, goes to guest signup, and enters details (name, email, password, acknowledgments, etc.). They can optionally **sign the agreement** in the same flow if the invite code and agreement signature id are provided.  
@@ -135,10 +140,38 @@ Jurisdiction and legal content are stored in the database as the **source of tru
    - Guest has a pending invite (e.g. signed up with code but didn’t sign in that step). On the guest dashboard they see the pending invite, open the agreement, sign it, and submit.  
    - Backend creates the Stay, marks invitation accepted, token BURNED, and turns Shield off.
 
-### Agreement and stay
-- The **invitation agreement** is built from the jurisdiction source of truth (property zip → region → statutes, removal text, max stay). Guest must sign this agreement to accept the invitation. When they do, the signature is stored and linked to the user and invitation; the invitation token is **BURNED** and the Stay is created.
-- **Occupancy** is set to **OCCUPIED** only when the guest clicks **Check in** (on or after stay start date). Until then the property can still show as not yet occupied in owner views if desired.
-- **Dead Man’s Switch** for the new stay is **off** at stay creation; it is turned **on** 48 hours before the stay end date (or in test mode after a short delay from check-in).
+### Invitation and agreement signing flow (end-to-end)
+
+1. **Owner creates an invitation**  
+   Owner selects property, guest name, stay dates (and optionally email), and creates the invite. The system generates a unique **invitation code** and an **invite link** (`#invite/{code}`) the owner can share (e.g. by email or message).
+
+2. **Guest receives the link or code**  
+   - **New guest:** Clicks the invite link and is taken to **guest signup**. They create an account (name, email, password, acknowledgments). They can sign the agreement in that flow or leave it for later; if they don’t sign yet, the invite is added to their **pending invites** after signup.  
+   - **Existing guest:** Logs in and either uses the same invite link or, on the **guest dashboard**, pastes the invitation link/code in “Add invitation” and submits. The invite is added to their pending list.
+
+3. **Opening the agreement**  
+   On the guest dashboard, the guest sees **Future invites** (and, when applicable, **Pending actions**). They click **Review & sign** or **Complete signing** for an invite. The **Agreement modal** (“Guest Acknowledgment and Revocable License to Occupy”) opens and loads the agreement built from the jurisdiction SOT for that property (see §16). The guest can view the document and a **Preview/Download PDF** link (unsigned).
+
+4. **Signing with Dropbox Sign**  
+   The guest enters their full name and optional IP, checks the four acknowledgments, and clicks **Sign with Dropbox Sign**. The system sends the agreement to **Dropbox Sign** (e-signature provider) and either:  
+   - **Redirect:** Guest is sent to Dropbox’s signing page in the same tab (or opens it from the link we provide).  
+   - **New tab:** Dropbox’s signing page opens in a new tab.  
+   The **modal closes** as soon as the request is sent (email is sent to the guest from Dropbox). The dashboard **refetches** so the same invite appears under **Pending actions** with “Awaiting your signature in Dropbox” until signing is complete.
+
+5. **Completing the signature in Dropbox**  
+   The guest signs on Dropbox’s page. The system **does not** treat any in-app–generated PDF as the signed document; only the **PDF returned by Dropbox** after signing is stored and shown as the signed agreement (see §16).
+
+6. **Stay confirmed only after Dropbox signing**  
+   - Until the guest has **completed signing in Dropbox**, the invite remains in **Pending actions** and the **stay is not created**.  
+   - When the guest returns to the app (or refreshes), the system checks Dropbox for the signed document. If it is complete: the signed PDF is stored, the invite is **accepted** (Stay created, invitation token **BURNED**, Shield off for the property), and the stay appears under **Current or upcoming stays**.  
+   - If the guest closes the modal without signing, or leaves Dropbox without signing, the invite stays in Pending actions; they can open the agreement again and complete signing later.
+
+7. **Occupancy and DMS**  
+   **Occupancy** is set to **OCCUPIED** only when the guest clicks **Check in** (on or after stay start date). **Dead Man’s Switch** for the new stay is **off** at stay creation; it is turned **on** 48 hours before the stay end date (or in test mode after a short delay from check-in).
+
+### Agreement and stay (summary)
+- The **invitation agreement** is built from the jurisdiction source of truth (property zip → region → statutes, removal text, max stay). The guest must **complete signing in Dropbox** to accept the invitation. When that is done, the signature (and Dropbox-signed PDF) is stored, the invitation is accepted, the token is **BURNED**, and the Stay is created.
+- The guest can later **download the signed agreement PDF** for their stay from the dashboard; that PDF is always the one from Dropbox (never a pre-filled in-app copy).
 
 ---
 
@@ -377,7 +410,7 @@ Each invitation has **status** and **token_state**. The invitation code (invite 
 | **ongoing** | Used for display when a stay exists or invite is accepted (unit occupied). | Display logic; backend may keep status as pending even after accept; “ongoing” indicates active use. |
 | **accepted** | Guest accepted (stay created). | Set when stay is created from accept flow (optional depending on implementation). |
 | **cancelled** | Owner cancelled the invite. | Owner cancels a pending/ongoing invitation. |
-| **expired** | Invite not accepted in time. | Cleanup job: pending invitations older than 12 hours → status=expired, token_state=EXPIRED. |
+| **expired** | Invite not accepted in time. | Cleanup job: pending invitations older than the configured window (12 hours normally; 5 minutes when TEST_MODE=true) → status=expired, token_state=EXPIRED. |
 
 **2. Invitation token_state** (invite-as-token lifecycle)
 
@@ -410,14 +443,52 @@ Each invitation has **status** and **token_state**. The invitation code (invite 
 
 ## 16. Invitation Agreement and Signing
 
+### How templates are created and how they work (product level)
+
+The **Guest Acknowledgment** document is the agreement the guest must sign to accept an invitation. It is built from a **fixed structure** plus **jurisdiction-specific** wording. Templates are **not** stored in the database; they are defined in the application and assembled at runtime using data from the invitation, property, and jurisdiction source of truth (SOT). No external legal API is used—all text is either fixed or from internal data (UPL safeguard).
+
+**Template choice (which variant is used):**
+
+1. When an agreement is needed (e.g. guest opens invite link or signs), the system looks up the **invitation** and its **property** (address, zip, region).
+2. **Jurisdiction** is resolved from the **property’s zip code and region code** using the jurisdiction SOT (same lookup as the live page and JLE). That returns a region (e.g. CA, FL, NYC, TX, WA) and, when available, statute citations and state name.
+3. The system picks the **template variant** by region:
+   - **California (CA)** → California template: section 3 is “transient occupancy” (14 days in 6 months / 7 consecutive nights; Cal. Civ. Code § 1940).
+   - **Florida (FL)** → Florida template: section 3 is the four acknowledgments under F.S. § 82.036 (not tenant, not owner/family, temporary occupancy, removal by law enforcement).
+   - **New York (NYC / NY)** → New York template: section 3 is 29 consecutive days / 30-day tenancy reference under New York law.
+   - **Texas, Washington, or any other region** → **Generic** template: section 3 references “maximum permitted guest stay” under applicable state/local law, using the first statute citation from the jurisdiction SOT when available.
+
+**How the document is constructed:**
+
+- **Title:** “Guest Acknowledgment and Revocable License to Occupy” (same for all regions).
+- **Header block:** Property address, Guest (name or “[Guest Name]” until signed), Authorized Stay (check-in to check-out dates). All of these are **dynamically filled** from the invitation and property.
+- **Six numbered sections** (same order everywhere; only section 3 and the disclaimer wording vary by region):
+  1. **Acknowledgment of Authority** — Owner granted limited POA to DocuStay to maintain records of property status, including guest occupancy.
+  2. **Grant of Revocable License** — Revocable license, no tenancy; personal, non-assignable; no sublet.
+  3. **Jurisdiction-specific clause** — As above (CA / FL / NY / generic).
+  4. **No Right to Hold Over** — No right to remain after End Date; holding over may subject to legal action.
+  5. **Revocation** — License revocable at will; owner may terminate at any time, for any reason, without notice.
+  6. **Disclaimer** — “Not a lease; no tenant rights under [California law / Florida Residential Landlord and Tenant Act / New York Real Property Law / applicable state and local law]; DocuStay is not a law firm and does not provide legal advice.” The bracketed part is chosen by region.
+- **Signature block:** “Guest Signature” and “Date” with blank lines for the guest to fill at signing. Optional “IP Address” for audit. When the guest signs, the system fills these in the stored copy and in the PDF.
+- **Dynamic data sources (no AI):** Property address (from property), guest name (from input or placeholder), stay start/end (from invitation), statute citation and state name in disclaimer (from jurisdiction SOT). The same property and invitation always produce the same agreement text so the hash is deterministic for signing and verification.
+
+**Presentation (UI and PDF):**
+
+- The same **content string** is used for both the in-app view and the PDF. Labels and section headings are marked with a simple **bold** convention in the text (e.g. `**Property:**`). The **UI** (agreement modal) renders that as bold and preserves line breaks so the document is readable. The **PDF** generator interprets the same markers and renders those parts in bold and keeps the same layout. So the document looks consistent and presentable in both places.
+
+**Fallback:**
+
+- If jurisdiction cannot be resolved (e.g. unknown zip/region), the system still produces an agreement using the **generic** template with “applicable state and local law” and no specific statute. The guest can still sign; the document remains valid and deterministic.
+
 ### Building the agreement
 - The **invitation agreement** is built from the **jurisdiction source of truth**: property zip → region → jurisdiction + statutes (and removal text, max stay, etc.). So the same property always gets the same legal “wrap” for that region.
 - The document includes: property address, guest name placeholder, check-in/check-out dates, host name, applicable statutes and removal text. It is **deterministic** for hashing and signing (no AI).
 
-### Signing
-- The guest **must sign** this agreement to **accept** the invitation. Signing creates a **signature** record (with document id, hash, optional IP, etc.) tied to the invitation code and later to the user.
-- When the guest **accepts** (register-with-invite or accept-invite), the backend checks that the provided **agreement signature id** matches the invitation and has not already been used. Then: Stay created, invitation accepted, token BURNED, Shield off.
-- The guest can later download a **signed agreement PDF** for their stay (from the backend, using the stored signature and content).
+### Signing (Dropbox Sign)
+- The guest **must complete signing in Dropbox Sign** to **accept** the invitation. We use **Dropbox Sign** (e-signature provider) for the legal signature; we do **not** treat an in-app–generated PDF as the signed document.
+- **Flow:** When the guest clicks “Sign with Dropbox Sign,” we create a **signature** record (invitation code, guest email, document hash, IP, etc.), send the agreement PDF to Dropbox Sign, and give the guest a link to open Dropbox’s signing page (redirect or new tab). We **do not** store our own filled PDF as “signed”; we only store the **PDF returned by Dropbox** after the guest has signed there.
+- **Pending state:** Until Dropbox reports the document as signed, the invite appears in **Pending actions** on the guest dashboard (“Awaiting your signature in Dropbox”). The stay is **not** created and the invitation is **not** accepted until the signed PDF is available from Dropbox.
+- **Acceptance:** When the guest (or the system on refresh/return) calls **accept-invite** with the agreement signature id, the backend verifies that the signature has a **completed signed PDF from Dropbox** (fetches from Dropbox if not yet stored). Only then: Stay created, invitation accepted, token BURNED, Shield off.
+- **Download:** The guest can download the **signed agreement PDF** for their stay from the dashboard; that PDF is always the one from Dropbox (never a pre-filled in-app copy). The same rule applies to the guest stay signed-PDF endpoint: when a signature was sent to Dropbox, we always prefer (and store) the PDF from Dropbox.
 
 ---
 
@@ -484,6 +555,7 @@ Each invitation has **status** and **token_state**. The invitation code (invite 
 | **Jurisdiction SOT** | Stored in DB (regions, statutes, zip→region). Used for agreements, live page wrap, JLE. No AI. |
 | **Stripe Identity** | Required before POA and property add; Stripe hosted flow; confirm on return. |
 | **Guest invite** | Owner creates invite → link shared → guest signs agreement → accept (signup or login) → Stay created, token BURNED, Shield off. |
+| **Guest Acknowledgment templates** | Fixed 6-section structure; template variant by region (CA/FL/NY/generic); dynamic data from invitation + property + jurisdiction SOT; same content for UI and PDF with bold labels. See §16. |
 | **Onboarding fee** | First property add (single or bulk); tier by total units (e.g. 1–5 $299, 6–20 $49/unit, …); one-time invoice; idempotent. |
 | **Subscription** | Created after onboarding invoice paid; $1/unit + $10/Shield unit; quantities synced on property/Shield changes; Stripe prorates. |
 | **Live link / QR** | Per-property slug → public page with jurisdiction wrap and evidence; QR encodes same URL. |
@@ -496,5 +568,40 @@ Each invitation has **status** and **token_state**. The invitation code (invite 
 | **Invite ID states** | **Status:** pending, ongoing, accepted, cancelled, expired. **token_state:** STAGED, BURNED, EXPIRED, REVOKED. See §14. |
 | **Owner portfolio view** | Public page by owner slug (no login). Owner gets link in Settings. Shows owner name, contact (email, phone, state), list of properties (name, city, state, region, type, bedrooms). See §10. |
 | **Vacant monitoring** | Owner enables for a vacant unit; system prompts at defined intervals (e.g. every 7 days); owner responds via **Confirm still vacant**; no response by deadline → UNCONFIRMED + Shield on. See §2. |
+| **Admin** | Separate role (owner / guest / admin). Go to #admin for login/dashboard (not linked in main nav). Read-only: users, audit logs, properties, stays, invitations. First admin via script. See §22. |
 
 This document is intended to stay at a **product and logic** level; for implementation details, refer to the codebase and technical docs.
+
+---
+
+## 22. Admin (Internal)
+
+### What it is
+- **Admin** is a separate **user role** (alongside owner and guest). Admin users are intended for internal support and operations: viewing system-wide data, not for customer-facing actions.
+- Admins do **not** own properties or receive invitations; they use a dedicated **admin login** and **admin dashboard** to view users, audit logs, properties, stays, and invitations across the platform.
+
+### Access and security
+- **Login:** Admins go to **`/#admin`**. That URL shows the admin **login** form when not signed in, and the admin dashboard when signed in as an admin. This page is **not linked** from the main app navigation; access is by direct URL only (e.g. `http://yourapp.com/#admin`).
+- **Auth:** The same JWT/login flow is used, but the backend returns the user’s **role** (e.g. `user_type: ADMIN`). The frontend only allows entry to the admin dashboard if the logged-in user has role **admin**; otherwise it shows an error (e.g. “This account is not an admin”).
+- **API:** All admin API routes (e.g. `/api/admin/*`) require the current user to have **role = admin**. If a non-admin calls these endpoints, the API returns 403.
+
+### Creating the first admin
+- The **admin** value must exist on the `userrole` enum in the database. A one-time migration script does two things:
+  1. Adds the value **admin** to the `userrole` enum.
+  2. Optionally **creates an admin user** (or updates an existing one) when `ADMIN_EMAIL` and `ADMIN_PASSWORD` are set in the environment—or uses built-in defaults (e.g. `admin@docustay.com` / a default password).
+- The script sets **all verification flags** for the new admin (e.g. email verified, identity/POA treated as verified or waived) so the admin can log in without going through owner flows.
+- **Run from project root:** `python scripts/migrate_add_admin_role.py`. Override email/password via `.env` (`ADMIN_EMAIL`, `ADMIN_PASSWORD`) if desired.
+
+### What admins can do (read-only)
+The admin dashboard and API are **read-only**. No create/update/delete of users, properties, stays, or invitations is exposed to admins through this UI.
+
+| Area | What the admin sees / can filter |
+|------|----------------------------------|
+| **Users** | List all users with optional search (email, full name) and filter by role (owner, guest, admin). Columns: id, email, role, full name, created date. |
+| **Audit logs** | Global audit log with filters: date range (from/to), category, property id, actor user id, and search in title/message. Shows time, category, title, message, actor (email or user id), and optional property name. |
+| **Properties** | List all properties with optional search (name, street, city, state), filter by region code, and option to include soft-deleted properties. Shows id, owner email, name, address, region, occupancy status, deleted_at, created_at. |
+| **Stays** | List all stays with optional filters: property id, owner id, guest id. Shows id, property, guest/owner emails, dates, region, check-in/check-out/revoked/cancelled timestamps, created_at. |
+| **Invitations** | List all invitations with optional filters: property id, owner id, status. Shows id, invitation code, owner/property, guest name/email, stay dates, status, token state, created_at. |
+
+### Logout
+- From the admin dashboard, the admin can **Logout**. They are then sent back to `#admin` (the admin login form). They do not land on the main owner/guest login unless they use the “Back to main login” link on the admin login form.

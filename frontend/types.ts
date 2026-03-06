@@ -1,7 +1,8 @@
 
 export enum UserType {
   PROPERTY_OWNER = 'PROPERTY_OWNER',
-  GUEST = 'GUEST'
+  GUEST = 'GUEST',
+  ADMIN = 'ADMIN'
 }
 
 export enum AccountStatus {

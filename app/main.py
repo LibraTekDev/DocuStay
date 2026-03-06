@@ -21,7 +21,7 @@ from app.models import (  # noqa: F401
     AuditLog, OwnerPOASignature, PendingRegistration,
     PropertyUtilityProvider, PropertyAuthorityLetter,
 )
-from app.routers import auth, identity, owners, guests, stays, region_rules, jle, dashboard, notifications, agreements, billing_webhook, public
+from app.routers import auth, identity, owners, guests, stays, region_rules, jle, dashboard, notifications, agreements, billing_webhook, public, admin
 
 logger = logging.getLogger("app.startup")
 settings = get_settings()
@@ -62,7 +62,8 @@ app.include_router(notifications.router)
 app.include_router(agreements.router)
 app.include_router(billing_webhook.router)
 app.include_router(public.router)
-logger.info("[startup] Routers registered (auth, identity, owners, guests, stays, region_rules, jle, dashboard, notifications, agreements, billing_webhook, public)")
+app.include_router(admin.router)
+logger.info("[startup] Routers registered (auth, identity, owners, guests, stays, region_rules, jle, dashboard, notifications, agreements, billing_webhook, public, admin)")
 
 
 @app.on_event("startup")
@@ -102,16 +103,24 @@ def startup():
     except Exception as e:
         logger.warning("[startup] Database startup failed (tables/seed skipped). Check DATABASE_URL and network. Error: %s", e)
 
-    # Scheduler: only (1) invite-expire job every hour, (2) DMS 2-min-after-accept when DMS_TEST_MODE=true (scheduled from accept_invite)
-    logger.info("[startup] Step 3: Background scheduler (invitation expire only; DMS 2-min from accept_invite when test mode)")
+    # Scheduler: (1) invite-expire job (hourly, or every minute when TEST_MODE=true), (2) DMS 2-min-after-accept when DMS_TEST_MODE=true
+    logger.info("[startup] Step 3: Background scheduler (invitation expire; DMS 2-min from accept_invite when test mode)")
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         from app.services.invitation_cleanup import run_invitation_cleanup_job
 
         scheduler = BackgroundScheduler()
-        # Pending invites unaccepted after 12h -> status=expired, token_state=EXPIRED
-        scheduler.add_job(run_invitation_cleanup_job, "cron", minute=0)  # every hour at :00
-        logger.info("[startup] Scheduler: invitation expire job added (cron every hour at :00)")
+        # Pending invites unaccepted after 12h (or 5 min in test_mode) -> status=expired, token_state=EXPIRED
+        if getattr(settings, "test_mode", False):
+            scheduler.add_job(run_invitation_cleanup_job, "cron", minute="*")  # every minute when test_mode
+            logger.info("[startup] Scheduler: invitation expire job added (every minute, test_mode=5min expiry)")
+        else:
+            scheduler.add_job(run_invitation_cleanup_job, "cron", minute=0)  # every hour at :00
+            logger.info("[startup] Scheduler: invitation expire job added (cron every hour at :00)")
+        if getattr(settings, "dms_test_mode", False):
+            from app.services.stay_timer import run_dms_test_mode_catchup_job
+            scheduler.add_job(run_dms_test_mode_catchup_job, "cron", minute="*")  # every minute: turn DMS on for stays that checked in >2 min ago
+            logger.info("[startup] Scheduler: DMS test-mode catchup job added (every minute)")
         scheduler.start()
         app.state.scheduler = scheduler
         logger.info("[startup] Step 3 done: scheduler started")

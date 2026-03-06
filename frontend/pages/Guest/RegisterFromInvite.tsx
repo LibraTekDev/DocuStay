@@ -123,7 +123,12 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
       return;
     }
     invitationsApi.getDetails(normalizedCode)
-      .then(setInviteDetails)
+      .then((d) => {
+        setInviteDetails(d);
+        if (!d.valid && d.expired) notify('error', 'This invitation has expired and can’t be used.');
+        else if (!d.valid && d.used) notify('error', 'This invitation link has already been used.');
+        else if (!d.valid) notify('error', 'Invalid invitation code.');
+      })
       .catch(() => {
         setInviteDetails({ valid: false });
         notify('error', 'Invalid or expired invitation code.');
@@ -142,7 +147,13 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
     return (
       <div className="max-w-4xl mx-auto py-12">
         <Card className="p-8 text-center">
-          <p className="text-slate-600 mb-4">This invitation could not be loaded.</p>
+          <p className="text-slate-600 mb-4">
+            {inviteDetails.expired
+              ? 'This invitation has expired (it was not accepted in time). Please ask your host for a new invitation.'
+              : inviteDetails.used
+                ? 'This invitation link has already been used and cannot be used again.'
+                : 'This invitation could not be loaded.'}
+          </p>
           <button onClick={() => navigate('guest-signup')} className="text-blue-600 hover:underline font-medium">Enter a different code</button>
         </Card>
       </div>

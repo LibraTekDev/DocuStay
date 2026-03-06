@@ -112,7 +112,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 // --- Auth (match reference app expected shapes) ---
-export type UserType = "PROPERTY_OWNER" | "GUEST";
+export type UserType = "PROPERTY_OWNER" | "GUEST" | "ADMIN";
 export type AccountStatus = "PENDING_VERIFICATION" | "ACTIVE" | "FULLY_VERIFIED";
 
 export interface UserSession {
@@ -129,7 +129,7 @@ export interface UserSession {
 interface BackendUser {
   id: number;
   email: string;
-  role: "owner" | "guest";
+  role: "owner" | "guest" | "admin";
   full_name?: string | null;
   phone?: string | null;
   state?: string | null;
@@ -146,9 +146,11 @@ export interface TokenResponse {
 
 export function toUserSession(t: TokenResponse): UserSession {
   const u = t.user;
+  const user_type: UserType =
+    u.role === "owner" ? "PROPERTY_OWNER" : u.role === "admin" ? "ADMIN" : "GUEST";
   return {
     user_id: String(u.id),
-    user_type: u.role === "owner" ? "PROPERTY_OWNER" : "GUEST",
+    user_type,
     user_name: u.full_name || u.email,
     email: u.email,
     account_status: "ACTIVE",
@@ -162,7 +164,7 @@ export const authApi = {
   async login(
     email: string,
     password: string,
-    role?: "owner" | "guest",
+    role?: "owner" | "guest" | "admin",
   ): Promise<{ status: string; data: UserSession; message?: string }> {
     const body = await request<TokenResponse>("/auth/login", {
       method: "POST",
@@ -332,7 +334,7 @@ export const identityApi = {
     });
   },
   /** Confirm identity after return from Stripe (for existing owner user). */
-  async confirmIdentity(verificationSessionId: string): Promise<{ status: string; message?: string }> {
+  async confirmIdentity(verificationSessionId: string): Promise<{ status?: string; message?: string }> {
     return request<{ status?: string; message?: string }>("/auth/identity/confirm", {
       method: "POST",
       body: JSON.stringify({ verification_session_id: verificationSessionId }),
@@ -349,7 +351,7 @@ export const pendingOwnerApi = {
     });
   },
   /** Confirm identity after Stripe redirect (updates pending record). */
-  async confirmIdentity(verificationSessionId: string): Promise<{ status: string; message?: string }> {
+  async confirmIdentity(verificationSessionId: string): Promise<{ status?: string; message?: string }> {
     return request<{ status?: string; message?: string }>("/auth/pending-owner/confirm-identity", {
       method: "POST",
       body: JSON.stringify({ verification_session_id: verificationSessionId }),
@@ -467,6 +469,11 @@ export interface GuestPendingInviteView {
   stay_end_date: string;
   host_name: string | null;
   region_code: string;
+  /** True when guest sent agreement to Dropbox but has not yet completed signing; stay cannot be confirmed until signed. */
+  needs_dropbox_signature?: boolean;
+  pending_signature_id?: number | null;
+  /** When set, signature is complete but invite not yet accepted; frontend should call acceptInvite to create stay. */
+  accept_now_signature_id?: number | null;
 }
 
 export interface OwnerAuditLogEntry {
@@ -688,6 +695,143 @@ export const dashboardApi = {
         ),
       }
     ),
+};
+
+/** Admin API (requires role=admin). Read-only lists. */
+export interface AdminUserView {
+  id: number;
+  email: string;
+  role: string;
+  full_name: string | null;
+  created_at: string | null;
+}
+export interface AdminAuditLogEntry {
+  id: number;
+  property_id: number | null;
+  stay_id: number | null;
+  invitation_id: number | null;
+  category: string;
+  title: string;
+  message: string;
+  actor_user_id: number | null;
+  actor_email: string | null;
+  ip_address: string | null;
+  created_at: string;
+  property_name: string | null;
+}
+export interface AdminPropertyView {
+  id: number;
+  owner_profile_id: number;
+  owner_email: string | null;
+  name: string | null;
+  street: string;
+  city: string;
+  state: string;
+  zip_code: string | null;
+  region_code: string;
+  occupancy_status: string | null;
+  deleted_at: string | null;
+  created_at: string | null;
+}
+export interface AdminStayView {
+  id: number;
+  property_id: number;
+  guest_id: number;
+  owner_id: number;
+  guest_email: string | null;
+  owner_email: string | null;
+  property_name: string | null;
+  stay_start_date: string;
+  stay_end_date: string;
+  region_code: string;
+  checked_in_at: string | null;
+  checked_out_at: string | null;
+  cancelled_at: string | null;
+  revoked_at: string | null;
+  created_at: string | null;
+}
+export interface AdminInvitationView {
+  id: number;
+  invitation_code: string;
+  owner_id: number;
+  property_id: number;
+  owner_email: string | null;
+  property_name: string | null;
+  guest_name: string | null;
+  guest_email: string | null;
+  stay_start_date: string;
+  stay_end_date: string;
+  status: string;
+  token_state: string;
+  created_at: string | null;
+}
+
+export const adminApi = {
+  users: (params?: { search?: string; role?: string; limit?: number; offset?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.search) sp.set("search", params.search);
+    if (params?.role) sp.set("role", params.role);
+    if (params?.limit != null) sp.set("limit", String(params.limit));
+    if (params?.offset != null) sp.set("offset", String(params.offset));
+    const q = sp.toString();
+    return request<AdminUserView[]>(`/admin/users${q ? `?${q}` : ""}`);
+  },
+  auditLogs: (params?: {
+    from_ts?: string;
+    to_ts?: string;
+    category?: string;
+    property_id?: number;
+    actor_user_id?: number;
+    search?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const sp = new URLSearchParams();
+    if (params?.from_ts) sp.set("from_ts", params.from_ts);
+    if (params?.to_ts) sp.set("to_ts", params.to_ts);
+    if (params?.category) sp.set("category", params.category);
+    if (params?.property_id != null) sp.set("property_id", String(params.property_id));
+    if (params?.actor_user_id != null) sp.set("actor_user_id", String(params.actor_user_id));
+    if (params?.search) sp.set("search", params.search);
+    if (params?.limit != null) sp.set("limit", String(params.limit));
+    if (params?.offset != null) sp.set("offset", String(params.offset));
+    const q = sp.toString();
+    return request<AdminAuditLogEntry[]>(`/admin/audit-logs${q ? `?${q}` : ""}`);
+  },
+  /** Distinct property states for filter dropdowns */
+  filterStates: () => request<string[]>("/admin/filters/states"),
+  properties: (params?: { search?: string; region_code?: string; state?: string; include_deleted?: boolean; limit?: number; offset?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.search) sp.set("search", params.search);
+    if (params?.region_code) sp.set("region_code", params.region_code);
+    if (params?.state) sp.set("state", params.state);
+    if (params?.include_deleted) sp.set("include_deleted", "true");
+    if (params?.limit != null) sp.set("limit", String(params.limit));
+    if (params?.offset != null) sp.set("offset", String(params.offset));
+    const q = sp.toString();
+    return request<AdminPropertyView[]>(`/admin/properties${q ? `?${q}` : ""}`);
+  },
+  stays: (params?: { property_id?: number; owner_id?: number; guest_id?: number; state?: string; limit?: number; offset?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.property_id != null) sp.set("property_id", String(params.property_id));
+    if (params?.owner_id != null) sp.set("owner_id", String(params.owner_id));
+    if (params?.guest_id != null) sp.set("guest_id", String(params.guest_id));
+    if (params?.state) sp.set("state", params.state);
+    if (params?.limit != null) sp.set("limit", String(params.limit));
+    if (params?.offset != null) sp.set("offset", String(params.offset));
+    const q = sp.toString();
+    return request<AdminStayView[]>(`/admin/stays${q ? `?${q}` : ""}`);
+  },
+  invitations: (params?: { property_id?: number; owner_id?: number; status?: string; limit?: number; offset?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.property_id != null) sp.set("property_id", String(params.property_id));
+    if (params?.owner_id != null) sp.set("owner_id", String(params.owner_id));
+    if (params?.status) sp.set("status", params.status);
+    if (params?.limit != null) sp.set("limit", String(params.limit));
+    if (params?.offset != null) sp.set("offset", String(params.offset));
+    const q = sp.toString();
+    return request<AdminInvitationView[]>(`/admin/invitations${q ? `?${q}` : ""}`);
+  },
 };
 
 /** Public API (no auth). Live property page by slug – evidence view. */
@@ -965,6 +1109,10 @@ export const propertiesApi = {
 // --- Invitations ---
 export interface InvitationDetails {
   valid: boolean;
+  /** True when the invitation code exists but is expired (not accepted in time). */
+  expired?: boolean;
+  /** True when the invitation link was already used (guest accepted; one-time use). */
+  used?: boolean;
   property_name?: string | null;
   property_address?: string | null;
   stay_start_date?: string;
@@ -1021,10 +1169,13 @@ export interface AgreementDocResponse {
 }
 
 export const agreementsApi = {
-  getInvitationAgreement: (invitationCode: string, guestEmail?: string | null) => {
+  getInvitationAgreement: (invitationCode: string, guestEmail?: string | null, guestFullName?: string | null) => {
     const code = invitationCode.trim().toUpperCase();
-    const params = guestEmail ? `?guest_email=${encodeURIComponent(guestEmail.trim())}` : "";
-    return request<AgreementDocResponse>(`/agreements/invitation/${encodeURIComponent(code)}${params}`);
+    const params = new URLSearchParams();
+    if (guestEmail?.trim()) params.set("guest_email", guestEmail.trim());
+    if (guestFullName?.trim()) params.set("guest_full_name", guestFullName.trim());
+    const qs = params.toString();
+    return request<AgreementDocResponse>(`/agreements/invitation/${encodeURIComponent(code)}${qs ? `?${qs}` : ""}`);
   },
   signInvitationAgreement: (data: {
     invitation_code: string;
@@ -1045,11 +1196,15 @@ export const agreementsApi = {
     typed_signature: string;
     acks: { read: boolean; temporary: boolean; vacate: boolean; electronic: boolean };
     document_hash: string;
+    ip_address?: string | null;
   }) =>
-    request<{ signature_id: number }>("/agreements/sign-with-dropbox", {
+    request<{ signature_id: number; sign_url?: string | null }>("/agreements/sign-with-dropbox", {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  /** Check if agreement has been fully signed in Dropbox (signed PDF available). Used to poll until complete. */
+  getSignatureStatus: (signatureId: number) =>
+    request<{ completed: boolean }>(`/agreements/signature/${signatureId}/status`),
   /** Authority letter (provider sign flow, public link by token). */
   getAuthorityLetterByToken: (token: string) =>
     request<AuthorityLetterDocResponse>(`/agreements/authority-letter/${encodeURIComponent(token)}`),
@@ -1110,7 +1265,7 @@ export const ownerPoaApi = {
     acks: { read: boolean; temporary: boolean; vacate: boolean; electronic: boolean };
     document_hash: string;
   }) =>
-    request<{ signature_id: number }>("/agreements/owner-poa/sign-with-dropbox", {
+    request<{ signature_id: number; sign_url?: string | null }>("/agreements/owner-poa/sign-with-dropbox", {
       method: "POST",
       body: JSON.stringify(data),
     }),
@@ -1138,7 +1293,12 @@ export const authApiGuest = {
     no_tenancy_acknowledged: boolean;
     vacate_acknowledged: boolean;
     agreement_signature_id?: number | null;
-  }): Promise<{ status: string; data?: UserSession; message?: string; validation?: Record<string, { error?: string }> }> {
+  }): Promise<{
+    status: string;
+    data?: UserSession | { user_id: string; verificationRequired: true };
+    message?: string;
+    validation?: Record<string, { error?: string }>;
+  }> {
     try {
       const body = await request<TokenResponse & { user_id?: number; message?: string }>("/auth/register/guest", {
         method: "POST",
@@ -1147,7 +1307,7 @@ export const authApiGuest = {
       if (body.user_id != null && !body.access_token) {
         return {
           status: "success",
-          data: { user_id: String(body.user_id), verificationRequired: true as const },
+          data: { user_id: String(body.user_id), verificationRequired: true },
           message: body.message || "Check your email for the verification code.",
         };
       }

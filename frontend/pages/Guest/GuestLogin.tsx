@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Input, Button, ErrorModal } from '../../components/UI';
 import { HeroBackground } from '../../components/HeroBackground';
-import { authApi } from '../../services/api';
+import { authApi, invitationsApi } from '../../services/api';
 
 const parseInviteCode = (raw: string): string => {
   const trimmed = raw.trim();
@@ -26,9 +26,21 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
   const [formData, setFormData] = useState({ email: '', password: '', invitation_link: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [errorModal, setErrorModal] = useState<{ open: boolean; message: string }>({ open: false, message: '' });
+  const [inviteCheck, setInviteCheck] = useState<{ loading: boolean; valid: boolean; expired?: boolean; used?: boolean } | null>(null);
 
   const inviteCode = inviteCodeFromUrl || parseInviteCode(formData.invitation_link);
   const showError = (message: string) => setErrorModal({ open: true, message });
+
+  useEffect(() => {
+    if (!inviteCode || inviteCode.length < 5) {
+      if (!inviteCode) setInviteCheck(null);
+      return;
+    }
+    setInviteCheck((prev) => (prev?.valid === true && !prev?.expired ? prev : { loading: true, valid: true }));
+    invitationsApi.getDetails(inviteCode)
+      .then((d) => setInviteCheck({ loading: false, valid: d.valid, expired: d.expired, used: d.used }))
+      .catch(() => setInviteCheck({ loading: false, valid: false }));
+  }, [inviteCode]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -36,6 +48,14 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
     const password = formData.password;
     if (!email || !password) {
       showError('Please enter your email and password.');
+      return;
+    }
+    if (inviteCode && inviteCheck?.valid === false) {
+      showError(
+        inviteCheck?.expired ? 'This invitation has expired and cannot be used. Ask your host for a new invitation.'
+        : inviteCheck?.used ? 'This invitation link has already been used.'
+        : 'This invitation link is invalid.'
+      );
       return;
     }
     setLoading(true);
@@ -46,9 +66,11 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
         showError(result.message || 'Login failed. Please check your email and password.');
         return;
       }
-      if (inviteCode) {
+      if (inviteCode && inviteCheck?.valid !== false) {
         sessionStorage.setItem(PENDING_INVITE_STORAGE_KEY, inviteCode.trim().toUpperCase());
         notify('success', 'Signed in. You can sign the invitation agreement on your dashboard.');
+      } else if (inviteCode && inviteCheck?.valid === false) {
+        notify('error', inviteCheck?.expired ? 'This invitation has expired and cannot be used.' : inviteCheck?.used ? 'This invitation link has already been used.' : 'This invitation link is invalid.');
       } else {
         notify('success', 'Signed in successfully.');
       }
@@ -83,9 +105,21 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
               <span className="w-1.5 h-1.5 rounded-full bg-blue-600" /> Stay documentation
             </li>
           </ul>
-          {inviteCode && (
+          {inviteCode && inviteCheck && !inviteCheck.loading && !inviteCheck.valid && (
+            <div className="mt-8 p-4 rounded-lg bg-amber-50 border border-amber-300/80">
+              <p className="text-sm text-amber-800 font-medium">
+                {inviteCheck.expired ? 'This invitation has expired and can’t be used. Ask your host for a new invitation.' : inviteCheck.used ? 'This invitation link has already been used and cannot be used again.' : 'This invitation link is invalid.'}
+              </p>
+            </div>
+          )}
+          {inviteCode && inviteCheck?.valid === true && (
             <div className="mt-8 p-4 rounded-lg bg-white/70 border border-blue-300/80">
               <p className="text-sm text-gray-700">You have an invitation. Sign in and we’ll accept it.</p>
+            </div>
+          )}
+          {inviteCode && inviteCheck?.loading && (
+            <div className="mt-8 p-4 rounded-lg bg-white/70 border border-blue-300/80">
+              <p className="text-sm text-gray-600">Checking invitation…</p>
             </div>
           )}
         </div>

@@ -20,13 +20,14 @@ def send_signature_request(
     signer_name: str,
     subject: str = "DocuStay – Please sign the agreement",
     message: str = "Please sign this agreement to complete your stay authorization.",
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """
-    Send a signature request via Dropbox Sign. Returns signature_request_id on success, None on failure.
-    The signer receives an email with a link to sign.
+    Send a signature request via Dropbox Sign.
+    Returns (signature_request_id, signer_signature_id) on success, (None, None) on failure.
+    The signer receives an email; signer_signature_id is used to get the embedded sign URL.
     """
     if not settings.dropbox_sign_api_key:
-        return None
+        return (None, None)
     try:
         import httpx
 
@@ -42,10 +43,40 @@ def send_signature_request(
         with httpx.Client(timeout=30.0) as client:
             r = client.post(url, auth=_auth(), data=data, files=files)
         if r.status_code != 200:
-            return None
+            return (None, None)
         out = r.json()
         req = out.get("signature_request") or {}
-        return req.get("signature_request_id")
+        request_id = req.get("signature_request_id")
+        signatures = req.get("signatures") or []
+        signer_sig_id = signatures[0].get("signature_id") if signatures else None
+        if not signer_sig_id and request_id:
+            req_full = get_signature_request(request_id)
+            if req_full:
+                sigs = req_full.get("signatures") or []
+                signer_sig_id = sigs[0].get("signature_id") if sigs else None
+        return (request_id, signer_sig_id)
+    except Exception:
+        return (None, None)
+
+
+def get_embedded_sign_url(signer_signature_id: str) -> str | None:
+    """
+    Get the embedded sign URL for the given signer signature_id.
+    The URL can be opened in a new tab for the user to sign.
+    """
+    if not settings.dropbox_sign_api_key or not signer_signature_id:
+        return None
+    try:
+        import httpx
+
+        url = f"{BASE_URL}/embedded/sign_url/{signer_signature_id}"
+        with httpx.Client(timeout=15.0) as client:
+            r = client.get(url, auth=_auth())
+        if r.status_code != 200:
+            return None
+        out = r.json()
+        embedded = out.get("embedded") or {}
+        return embedded.get("sign_url")
     except Exception:
         return None
 

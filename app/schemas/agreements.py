@@ -36,6 +36,7 @@ class AgreementSignRequest(BaseModel):
     typed_signature: str = Field(..., min_length=1, max_length=255)
     acks: AgreementAcks
     document_hash: str = Field(..., min_length=16, max_length=128)
+    ip_address: str | None = Field(None, max_length=64)
 
     @model_validator(mode="after")
     def validate_acks(self):
@@ -44,8 +45,14 @@ class AgreementSignRequest(BaseModel):
         return self
 
 
+class SignatureStatusResponse(BaseModel):
+    """Whether the agreement has been fully signed in Dropbox (signed PDF available)."""
+    completed: bool
+
+
 class AgreementSignResponse(BaseModel):
     signature_id: int
+    sign_url: str | None = None
 
 
 # --- Owner Master POA ---

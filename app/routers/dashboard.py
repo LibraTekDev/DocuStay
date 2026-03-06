@@ -21,6 +21,7 @@ from app.schemas.dashboard import OwnerStayView, OwnerInvitationView, GuestStayV
 from app.services.jle import resolve_jurisdiction
 from app.services.jurisdiction_sot import get_jurisdiction_for_property
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_DEAD_MANS_SWITCH, CATEGORY_FAILED_ATTEMPT, CATEGORY_BILLING
+from app.services.invitation_cleanup import get_invitation_expire_cutoff
 from app.services.billing import sync_subscription_quantities
 from app.services.notifications import send_vacate_12h_notice, send_owner_guest_checkout_email, send_guest_checkout_confirmation_email, send_owner_guest_cancelled_stay_email, send_removal_notice_to_guest, send_removal_confirmation_to_owner
 from app.schemas.jle import JLEInput
@@ -44,6 +45,7 @@ def guest_pending_invites(
         .all()
     )
     out = []
+    guest_email = (current_user.email or "").strip().lower()
     for p in pendings:
         inv = db.query(Invitation).filter(Invitation.id == p.invitation_id, Invitation.status.in_(["pending", "ongoing"])).first()
         if not inv:
@@ -52,6 +54,32 @@ def guest_pending_invites(
         property_name = (prop.name if prop else None) or (f"{prop.city}, {prop.state}" if prop else None) or "Property"
         owner = db.query(User).filter(User.id == inv.owner_id).first()
         host_name = (owner.full_name if owner else None) or (owner.email if owner else "")
+        needs_dropbox = False
+        pending_sig_id = None
+        accept_now_sig_id = None
+        if guest_email:
+            sig = (
+                db.query(AgreementSignature)
+                .filter(
+                    AgreementSignature.invitation_code == inv.invitation_code,
+                    AgreementSignature.guest_email == guest_email,
+                    AgreementSignature.used_by_user_id.is_(None),
+                )
+                .order_by(AgreementSignature.signed_at.desc())
+                .first()
+            )
+            if sig and getattr(sig, "dropbox_sign_request_id", None):
+                if not getattr(sig, "signed_pdf_bytes", None):
+                    pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
+                    if pdf_bytes:
+                        sig.signed_pdf_bytes = pdf_bytes
+                        db.commit()
+                        db.refresh(sig)
+                if not getattr(sig, "signed_pdf_bytes", None):
+                    needs_dropbox = True
+                    pending_sig_id = sig.id
+                elif getattr(sig, "signed_pdf_bytes", None) and getattr(sig, "used_by_user_id", None) is None:
+                    accept_now_sig_id = sig.id
         out.append(
             GuestPendingInviteView(
                 invitation_code=inv.invitation_code,
@@ -60,6 +88,9 @@ def guest_pending_invites(
                 stay_end_date=inv.stay_end_date,
                 host_name=host_name,
                 region_code=inv.region_code,
+                needs_dropbox_signature=needs_dropbox,
+                pending_signature_id=pending_sig_id,
+                accept_now_signature_id=accept_now_sig_id,
             )
         )
     return out
@@ -76,7 +107,11 @@ def guest_add_pending_invite(
     code = (invitation_code or "").strip().upper()
     if not code:
         raise HTTPException(status_code=400, detail="invitation_code is required")
-    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
+    inv = db.query(Invitation).filter(
+        Invitation.invitation_code == code,
+        Invitation.status.in_(["pending", "ongoing"]),
+        Invitation.token_state != "BURNED",
+    ).first()
     if not inv:
         ip = request.client.host if request.client else None
         ua = (request.headers.get("user-agent") or "").strip() or None
@@ -128,6 +163,31 @@ def guest_add_pending_invite(
         property_name = (prop.name if prop else None) or (f"{prop.city}, {prop.state}" if prop else None) or "Property"
         owner = db.query(User).filter(User.id == inv.owner_id).first()
         host_name = (owner.full_name if owner else None) or (owner.email if owner else "")
+        needs_dropbox, pending_sig_id = False, None
+        accept_now_sig_id = None
+        guest_email = (current_user.email or "").strip().lower()
+        if guest_email:
+            sig = (
+                db.query(AgreementSignature)
+                .filter(
+                    AgreementSignature.invitation_code == inv.invitation_code,
+                    AgreementSignature.guest_email == guest_email,
+                    AgreementSignature.used_by_user_id.is_(None),
+                )
+                .order_by(AgreementSignature.signed_at.desc())
+                .first()
+            )
+            if sig and getattr(sig, "dropbox_sign_request_id", None):
+                if not getattr(sig, "signed_pdf_bytes", None):
+                    pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
+                    if pdf_bytes:
+                        sig.signed_pdf_bytes = pdf_bytes
+                        db.commit()
+                        db.refresh(sig)
+                if not getattr(sig, "signed_pdf_bytes", None):
+                    needs_dropbox, pending_sig_id = True, sig.id
+                elif getattr(sig, "signed_pdf_bytes", None):
+                    accept_now_sig_id = sig.id
         return GuestPendingInviteView(
             invitation_code=inv.invitation_code,
             property_name=property_name,
@@ -135,6 +195,9 @@ def guest_add_pending_invite(
             stay_end_date=inv.stay_end_date,
             host_name=host_name,
             region_code=inv.region_code,
+            needs_dropbox_signature=needs_dropbox,
+            pending_signature_id=pending_sig_id,
+            accept_now_signature_id=accept_now_sig_id,
         )
     pending = GuestPendingInvite(user_id=current_user.id, invitation_id=inv.id)
     db.add(pending)
@@ -150,10 +213,10 @@ def guest_add_pending_invite(
         stay_end_date=inv.stay_end_date,
         host_name=host_name,
         region_code=inv.region_code,
+        needs_dropbox_signature=False,
+        pending_signature_id=None,
+        accept_now_signature_id=None,
     )
-
-
-PENDING_INVITATION_EXPIRE_HOURS = 12
 
 
 @router.get("/owner/invitations", response_model=list[OwnerInvitationView])
@@ -161,9 +224,9 @@ def owner_invitations(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
 ):
-    """Owner view: all invitations (pending, accepted, cancelled) with property name. Pending invites older than 12h are marked is_expired. Status display: Ongoing when invite accepted or a stay exists, else Pending/Cancelled/Expired."""
+    """Owner view: all invitations (pending, accepted, cancelled) with property name. Pending invites older than the configured window (12h or 5m in test_mode) are marked is_expired."""
     invs = db.query(Invitation).filter(Invitation.owner_id == current_user.id).order_by(Invitation.created_at.desc()).all()
-    threshold = datetime.now(timezone.utc) - timedelta(hours=PENDING_INVITATION_EXPIRE_HOURS)
+    threshold = get_invitation_expire_cutoff()
     out = []
     for inv in invs:
         prop = db.query(Property).filter(Property.id == inv.property_id).first()
@@ -865,23 +928,30 @@ def guest_check_in(
                         inv = None
                         if getattr(_stay, "invitation_id", None):
                             inv = _db.query(Invitation).filter(Invitation.id == _stay.invitation_id).first()
-                        if not inv:
-                            logger.info(
-                                "DMS 2min-after-checkin job: stay_id=%s has no invitation, skipped (DMS not turned on)",
-                                sid,
-                            )
-                        elif not getattr(inv, "dead_mans_switch_enabled", 0):
-                            logger.info(
-                                "DMS 2min-after-checkin job: stay_id=%s invitation has DMS off, skipped",
-                                sid,
-                            )
+                        # In test mode always turn DMS on after 2 min so testing works. Otherwise only if invitation had DMS enabled.
+                        turn_on = getattr(_settings, "dms_test_mode", False) or (
+                            inv and getattr(inv, "dead_mans_switch_enabled", 0)
+                        )
+                        if not turn_on:
+                            if not inv:
+                                logger.info(
+                                    "DMS 2min-after-checkin job: stay_id=%s has no invitation, skipped (DMS not turned on)",
+                                    sid,
+                                )
+                            else:
+                                logger.info(
+                                    "DMS 2min-after-checkin job: stay_id=%s invitation has DMS off, skipped",
+                                    sid,
+                                )
                         else:
                             _stay.dead_mans_switch_enabled = 1
                             _db.add(_stay)
                             _db.commit()
                             logger.info(
-                                "DMS 2min-after-checkin job: turned DMS on for stay_id=%s (invitation had DMS enabled)",
+                                "DMS 2min-after-checkin job: turned DMS on for stay_id=%s (test_mode=%s, inv_dms=%s)",
                                 sid,
+                                getattr(_settings, "dms_test_mode", False),
+                                getattr(inv, "dead_mans_switch_enabled", 0) if inv else None,
                             )
                     if getattr(_settings, "dms_test_mode", False):
                         logger.info("DMS 2min-after-checkin job: running run_dead_mans_switch_job (test mode)")
@@ -948,13 +1018,8 @@ def guest_stay_signed_agreement_pdf(
     )
     if not sig:
         raise HTTPException(status_code=404, detail="No signed agreement found for this stay.")
-    if sig.signed_pdf_bytes:
-        return Response(
-            content=sig.signed_pdf_bytes,
-            media_type="application/pdf",
-            headers={"Content-Disposition": f'inline; filename="DocuStay-Signed-{sig.invitation_code}.pdf"'},
-        )
-    if sig.dropbox_sign_request_id:
+    # When this stay was signed via Dropbox, always prefer the PDF from Dropbox (overwrites any old self-generated bytes)
+    if getattr(sig, "dropbox_sign_request_id", None):
         pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
         if pdf_bytes:
             sig.signed_pdf_bytes = pdf_bytes
@@ -964,6 +1029,17 @@ def guest_stay_signed_agreement_pdf(
                 media_type="application/pdf",
                 headers={"Content-Disposition": f'inline; filename="DocuStay-Signed-{sig.invitation_code}.pdf"'},
             )
+        raise HTTPException(
+            status_code=404,
+            detail="Document not yet signed in Dropbox. Please complete signing in the link we sent you.",
+        )
+    if sig.signed_pdf_bytes:
+        return Response(
+            content=sig.signed_pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="DocuStay-Signed-{sig.invitation_code}.pdf"'},
+        )
+    # Legacy: stay signed in-app (no Dropbox); generate from stored content
     date_str = sig.signed_at.strftime("%Y-%m-%d") if sig.signed_at else ""
     content = fill_guest_signature_in_content(sig.document_content, sig.typed_signature, date_str, getattr(sig, "ip_address", None))
     pdf_bytes = agreement_content_to_pdf(sig.document_title, content)

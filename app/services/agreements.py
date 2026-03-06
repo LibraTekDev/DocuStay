@@ -18,15 +18,19 @@ def fill_guest_signature_in_content(
     content: str, guest_name: str, signed_date: str, ip_address: str | None = None
 ) -> str:
     """Replace the blank guest signature line with the signer's name, date, and optionally IP."""
-    # Patterns for guest/signature lines with blank underscores
-    patterns = [
+    result = content
+    # New template (guidance): **Guest Signature:** ___ and **Date:** ___ on same or next line
+    result = re.sub(r"\*\*Guest Signature:\*\*\s*_{10,}", f"**Guest Signature:** {guest_name}", result, count=1)
+    result = re.sub(r"\*\*Date:\*\*\s*_{10,}", f"**Date:** {signed_date}", result, count=1)
+    # Legacy patterns (Signed:/Guest:/ etc.)
+    legacy = [
+        (r"Guest Signature:\s*_{10,}\s+Date:\s*_{10,}", f"Guest Signature: {guest_name}   Date: {signed_date}"),
         (r"Signed:\s*_{10,}\s+Date:\s*_{10,}", f"Signed: {guest_name}   Date: {signed_date}"),
         (r"Licensee:\s*_{10,}\s+Date:\s*_{10,}", f"Licensee: {guest_name}   Date: {signed_date}"),
         (r"Occupant:\s*_{10,}\s+Date:\s*_{10,}", f"Occupant: {guest_name}   Date: {signed_date}"),
         (r"Guest:\s*_{10,}\s+Date:\s*_{10,}", f"Guest: {guest_name}   Date: {signed_date}"),
     ]
-    result = content
-    for pattern, replacement in patterns:
+    for pattern, replacement in legacy:
         result = re.sub(pattern, replacement, result, count=1)
     if ip_address is not None and "IP Address:" in result:
         result = re.sub(r"IP Address:\s*_{10,}", f"IP Address: {ip_address}", result, count=1)
@@ -68,36 +72,99 @@ def _normalize_region(region_code: str) -> str:
     return rc or "US"
 
 
-def _guest_acknowledgment_content(
+# --- Jurisdiction-aware Guest Acknowledgment (guidance: Guest Acknowledgment and Revocable License to Occupy) ---
+
+GUEST_ACK_TITLE = "Guest Acknowledgment and Revocable License to Occupy"
+
+# Shared sections 1, 2, 4, 5 (same for all jurisdictions)
+def _section1_authority() -> str:
+    return """**1. Acknowledgment of Authority:** You acknowledge that the Property Owner has granted a limited Power of Attorney to DocuStay, a third-party documentation platform, authorizing it to maintain records of property status, including your occupancy as a guest."""
+
+def _section2_revocable_license() -> str:
+    return """**2. Grant of Revocable License:** You acknowledge that your authorization to be on the property is a **revocable license** and does not create a tenancy or any other interest in the property. This license is personal to you and may not be assigned or transferred. You may not sublet any part of the property."""
+
+def _section4_no_hold_over() -> str:
+    return """**4. No Right to Hold Over:** You have no right to remain on the property after the "End Date" of your authorized stay. Holding over may subject you to legal action."""
+
+def _section5_revocation() -> str:
+    return """**5. Revocation:** You acknowledge that this license is revocable at the will of the Property Owner. The Owner may terminate your occupancy at any time, for any reason, without notice."""
+
+def _section3_california() -> str:
+    return """**3. Acknowledgment of Transient Occupancy (California):** You acknowledge that your occupancy is transient in nature. In accordance with California legal principles, you agree that your stay will not exceed fourteen (14) days within any six-month period or seven (7) consecutive nights. Any stay exceeding these limits requires a separate, written lease agreement with the Property Owner."""
+
+def _section3_florida() -> str:
+    return """**3. Acknowledgment of Status under Florida Law:** You hereby acknowledge and declare that:
+a. You are not a current or former tenant under any written or oral lease with the Property Owner.
+b. You are not an owner, co-owner, or immediate family member of the Property Owner.
+c. Your occupancy is temporary, and you have been directed to leave the property upon the expiration of your authorized stay.
+d. You understand that if you remain on the property without authorization after your license is revoked or expires, the Property Owner may seek your immediate removal by law enforcement pursuant to **Florida Statutes § 82.036**."""
+
+def _section3_new_york() -> str:
+    return """**3. Acknowledgment of Occupancy Limits (New York):** You acknowledge that your occupancy is temporary and will not exceed twenty-nine (29) consecutive days. Under New York law, occupancy of thirty (30) consecutive days or more can create a tenancy. You agree that any stay beyond 29 consecutive days requires a separate, written lease agreement with the Property Owner."""
+
+def _section3_generic(statute_citation: str) -> str:
+    return f"""**3. Acknowledgment of Guest Status:** You acknowledge that your stay does not exceed the maximum permitted guest stay under applicable state and local law. Under {statute_citation}, a written lease is required for tenancy. You agree that any stay beyond the permitted guest period requires a separate, written lease agreement with the Property Owner."""
+
+def _disclaimer_phrase(region_code: str, state_name: str) -> str:
+    """Return the state/law phrase for section 6 disclaimer."""
+    rc = (region_code or "").strip().upper()
+    if rc == "CA":
+        return "California law"
+    if rc == "FL":
+        return "the Florida Residential Landlord and Tenant Act"
+    if rc == "NYC" or rc == "NY":
+        return "New York Real Property Law"
+    return "applicable state and local law"
+
+def _build_guest_acknowledgment(
+    region_code: str,
+    jinfo: JurisdictionInfo,
     *,
     property_address: str | None,
     guest_name: str,
     checkin: str,
     checkout: str,
-    statute_citation: str,
 ) -> str:
-    """Build GUEST ACKNOWLEDGMENT body (facts only; no trespass/may result in/legal conclusions). Statute from jurisdiction lookup (zip → state → statute)."""
+    """Build full Guest Acknowledgment content with jurisdiction-specific section 3 and disclaimer. Uses ** for bold labels."""
     prop_display = (property_address or "[Address, Unit]").strip()
-    return f"""GUEST ACKNOWLEDGMENT
+    statute_citation = "applicable state and local law"
+    if jinfo.statutes:
+        statute_citation = jinfo.statutes[0].citation
+    state_name = jinfo.name or ""
 
-Property: {prop_display}
-Guest: {guest_name}
-Authorization Period: {checkin} to {checkout}
+    rc = (region_code or "").strip().upper()
+    if rc == "CA":
+        section3 = _section3_california()
+    elif rc == "FL":
+        section3 = _section3_florida()
+    elif rc in ("NYC", "NY"):
+        section3 = _section3_new_york()
+    else:
+        section3 = _section3_generic(statute_citation)
 
-By signing below, you acknowledge:
+    disclaimer_law = _disclaimer_phrase(rc, state_name)
+    section6 = f"""**6. Disclaimer:** This document is a record of your authorized occupancy as a guest under a revocable license. It is not a lease and does not grant you any rights of a tenant under {disclaimer_law}. DocuStay is not a law firm and does not provide legal advice."""
 
-1. You are authorized to occupy this property only during the period stated above.
-2. This authorization is personal to you. It does not include the right to sublet, assign, or transfer.
-3. During this period, you may:
-   - Receive mail at this address.
-   - Perform maintenance with owner consent.
-   - Pay utility bills on behalf of the owner (if applicable).
-4. None of the activities listed above create a tenancy or lease. Under {statute_citation}, a written lease is required for tenancy.
-5. The owner has granted DocuStay authority to document occupancy (Master POA on file).
+    return f"""**{GUEST_ACK_TITLE}**
 
-Your authorization expires automatically on {checkout}. Renewal requires a new acknowledgment.
+**Property:** {prop_display}
+**Guest:** {guest_name}
+**Authorized Stay:** {checkin} to {checkout}
 
-Signed: __________________________  Date: ________________
+{_section1_authority()}
+
+{_section2_revocable_license()}
+
+{section3}
+
+{_section4_no_hold_over()}
+
+{_section5_revocation()}
+
+{section6}
+
+**Guest Signature:** __________________________
+**Date:** __________________________
 IP Address: ______________________
 """
 
@@ -112,19 +179,52 @@ def _build_agreement_from_jurisdiction(
     checkout: str,
     property_address: str | None,
 ) -> tuple[str, str]:
-    """Build GUEST ACKNOWLEDGMENT title and content from JurisdictionInfo (SOT). Returns (title, content). Statute from jurisdiction lookup."""
-    title = "GUEST ACKNOWLEDGMENT"
-    statute_citation = "applicable state and local law"
-    if jinfo.statutes:
-        statute_citation = jinfo.statutes[0].citation
-    content = _guest_acknowledgment_content(
+    """Build Guest Acknowledgment title and content from JurisdictionInfo (SOT). Returns (title, content)."""
+    content = _build_guest_acknowledgment(
+        jinfo.region_code,
+        jinfo,
         property_address=property_address,
         guest_name=guest_name,
         checkin=checkin,
         checkout=checkout,
-        statute_citation=statute_citation,
     )
-    return (title, content)
+    return (GUEST_ACK_TITLE, content)
+
+
+def _build_guest_acknowledgment_fallback(
+    *,
+    property_address: str | None,
+    guest_name: str,
+    checkin: str,
+    checkout: str,
+) -> str:
+    """Fallback when no jurisdiction: generic Guest Acknowledgment with applicable state and local law."""
+    prop_display = (property_address or "[Address, Unit]").strip()
+    section3 = _section3_generic("applicable state and local law")
+    section6 = """**6. Disclaimer:** This document is a record of your authorized occupancy as a guest under a revocable license. It is not a lease and does not grant you any rights of a tenant under applicable state and local law. DocuStay is not a law firm and does not provide legal advice."""
+
+    return f"""**{GUEST_ACK_TITLE}**
+
+**Property:** {prop_display}
+**Guest:** {guest_name}
+**Authorized Stay:** {checkin} to {checkout}
+
+{_section1_authority()}
+
+{_section2_revocable_license()}
+
+{section3}
+
+{_section4_no_hold_over()}
+
+{_section5_revocation()}
+
+{section6}
+
+**Guest Signature:** __________________________
+**Date:** __________________________
+IP Address: ______________________
+"""
 
 
 def build_invitation_agreement(
@@ -136,7 +236,11 @@ def build_invitation_agreement(
     if not code:
         return None
 
-    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
+    inv = db.query(Invitation).filter(
+        Invitation.invitation_code == code,
+        Invitation.status.in_(["pending", "ongoing"]),
+        Invitation.token_state != "BURNED",
+    ).first()
     if not inv:
         return None
 
@@ -147,9 +251,8 @@ def build_invitation_agreement(
     host_name = (owner.full_name if owner else None) or (owner.email if owner else None)
     property_address = _format_address(prop)
 
-    # Keep the canonical agreement text stable for hashing/verification. We record
-    # the signer's identity separately in the signature record.
-    guest_name = "[Guest Name]"
+    # Use provided guest name when building for display/PDF; otherwise placeholder for hashing.
+    guest_name = (guest_full_name or "[Guest Name]").strip() or "[Guest Name]"
     owner_name = (host_name or "").strip() or "[Owner Name]"
     today = date.today().strftime("%B %d, %Y")
     checkin = str(inv.stay_start_date) if inv.stay_start_date else "[Check-in Date]"
@@ -181,27 +284,20 @@ def build_invitation_agreement(
             host_name=host_name,
         )
 
-    # Fallback: GUEST ACKNOWLEDGMENT with statute from region if available.
-    title = "GUEST ACKNOWLEDGMENT"
-    statute_citation = "applicable state and local law"
-    jinfo_fallback = get_jurisdiction_for_property(db, prop.zip_code if prop else None, region)
-    if jinfo_fallback and jinfo_fallback.statutes:
-        statute_citation = jinfo_fallback.statutes[0].citation
-    content = _guest_acknowledgment_content(
+    # Fallback: no jurisdiction found; use generic template.
+    content = _build_guest_acknowledgment_fallback(
         property_address=property_address,
         guest_name=guest_name,
         checkin=checkin,
         checkout=checkout,
-        statute_citation=statute_citation,
     )
-
     document_id = f"DSA-{code}-{region}"
     doc_hash = _sha256_hex(content)
 
     return AgreementDoc(
         document_id=document_id,
         region_code=region,
-        title=title,
+        title=GUEST_ACK_TITLE,
         content=content,
         document_hash=doc_hash,
         property_address=property_address,
@@ -216,33 +312,30 @@ def build_invitation_agreement(
 POA_DOCUMENT_ID = "DSA-Master-POA"
 POA_TITLE = "Master Power of Attorney (POA)"
 
-POA_CONTENT = """Master Power of Attorney (POA)
+POA_CONTENT = """**Master Power of Attorney (POA)**
 
-Overview
-The Master POA is a one-time, account-level legal document signed during initial onboarding that establishes DocuStay as the property owner's legal representative for all property protection activities.
+**Overview**
+This is a one-time authorization you sign when you set up your DocuStay account. It lets DocuStay act on your behalf for documentation and utility-related steps so the platform can help you manage your rental properties.
 
-1. Who Signs What?
-Property Owners ONLY sign the Master POA
-Guests DO NOT sign the Master POA
-Guests sign a completely different document called the "Guest Agreement" (covered separately)
+**1. Who Signs This?**
+Only property owners sign this Master POA when they join DocuStay.
+Guests do not sign this document; they sign a separate Guest Agreement for their stay.
 
-2. When Is It Signed?
-During initial account registration (onboarding)
-Before any properties can be added to the system
-This is a one-time signature - it covers ALL properties the owner adds, now and in the future
+**2. When Do You Sign?**
+You sign this once during account setup, before you can add properties.
+One signature applies to all properties you add to your account, now and later.
 
-3. What Does It Actually Do?
-The Master POA legally designates DocuStay as the owner's "Authorized Agent" to:
-- Issue utility authorization tokens (USAT)
-- Communicate with utility companies on owner's behalf
-- Generate legal evidence packages
-- Maintain forensic audit trails
-- Act as the "official record keeper" for property status
+**3. What Does DocuStay Do With This?**
+With your authorization, DocuStay can:
+- Create and send utility authorization tokens (e.g. USAT) so providers can verify occupancy
+- Contact utility companies when needed to confirm or update service for your properties
+- Put together documentation packages (e.g. occupancy, dates, guest info) for your records
+- Keep dated records of property status and actions for your reference
 
-4. Applicable Law (Jurisdiction)
-Jurisdiction-specific statutes, removal procedures, and guest-agreement language for each property are determined by that property's location (zip code and state/region) from DocuStay's jurisdiction database (single source of truth). The applicable law for each property is displayed on that property's live link page and is used when generating guest agreements and authority packages.
+**4. How Does Location Matter?**
+DocuStay uses each property’s address (zip code and state/region) to show relevant local information on that property’s page and to tailor guest agreements and any letters or forms to that location.
 
-SIGNATURE (ELECTRONIC)
+**SIGNATURE (ELECTRONIC)**
 Owner: ________________________   Date: __________
 """
 
@@ -252,6 +345,13 @@ def build_owner_poa_document() -> tuple[str, str, str, str]:
     content = POA_CONTENT.strip()
     doc_hash = _sha256_hex(content)
     return (POA_DOCUMENT_ID, POA_TITLE, content, doc_hash)
+
+
+def fill_owner_poa_signature_line(content: str, owner_name: str, signed_date: str) -> str:
+    """Fill Owner: ___ and Date: ___ in the POA signature block with actual name and date."""
+    result = re.sub(r"Owner:\s*_+", f"Owner: {owner_name}", content, count=1)
+    result = re.sub(r"Date:\s*_+", f"Date: {signed_date}", result, count=1)
+    return result
 
 
 def poa_content_with_signature(content: str, signer_name: str, signed_date: str) -> str:
@@ -268,8 +368,28 @@ def _escape_for_reportlab(s: str) -> str:
     )
 
 
+def _content_to_reportlab_paragraph(line: str, body_style) -> "Paragraph":
+    """Convert a line that may contain **bold** to a ReportLab Paragraph with bold segments."""
+    from reportlab.platypus import Paragraph
+
+    parts = re.split(r"\*\*(.+?)\*\*", line)
+    if len(parts) == 1:
+        return Paragraph(_escape_for_reportlab(line), body_style)
+    # parts alternate: [normal, bold, normal, bold, ...]
+    frags = []
+    for i, seg in enumerate(parts):
+        if not seg:
+            continue
+        escaped = _escape_for_reportlab(seg)
+        if i % 2 == 1:
+            frags.append(f"<b>{escaped}</b>")
+        else:
+            frags.append(escaped)
+    return Paragraph("".join(frags), body_style)
+
+
 def agreement_content_to_pdf(title: str, content: str) -> bytes:
-    """Generate a PDF from agreement title and content using reportlab. Content wraps to page width and is justified."""
+    """Generate a PDF from agreement title and content using reportlab. Content wraps to page width and is justified. Supports **bold** in content."""
     from io import BytesIO
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet
@@ -293,9 +413,9 @@ def agreement_content_to_pdf(title: str, content: str) -> bytes:
     story = [Paragraph(_escape_for_reportlab(title.replace("\n", " ")), title_style), Spacer(1, 0.2 * inch)]
 
     for line in content.splitlines():
-        line = line.strip()
-        if line:
-            story.append(Paragraph(_escape_for_reportlab(line), body_style))
+        line_stripped = line.strip()
+        if line_stripped:
+            story.append(_content_to_reportlab_paragraph(line_stripped, body_style))
         else:
             story.append(Spacer(1, 0.12 * inch))
 

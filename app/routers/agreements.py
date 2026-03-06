@@ -1,4 +1,5 @@
 """Agreement generation + signing endpoints for invite flows and owner Master POA."""
+from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -19,17 +20,19 @@ from app.schemas.agreements import (
     OwnerPOADocResponse,
     OwnerPOASignRequest,
     OwnerPOASignatureResponse,
+    SignatureStatusResponse,
 )
 from app.services.agreements import (
     build_invitation_agreement,
     build_owner_poa_document,
     fill_guest_signature_in_content,
-    agreement_content_to_pdf,
+    fill_owner_poa_signature_line,
     poa_content_with_signature,
+    agreement_content_to_pdf,
 )
 from app.services.audit_log import create_log, CATEGORY_GUEST_SIGNATURE, CATEGORY_STATUS_CHANGE, CATEGORY_FAILED_ATTEMPT
 from app.services.notifications import send_email
-from app.services.dropbox_sign import send_signature_request, get_signed_pdf
+from app.services.dropbox_sign import send_signature_request, get_signed_pdf, get_embedded_sign_url
 from app.dependencies import require_owner
 
 router = APIRouter(prefix="/agreements", tags=["agreements"])
@@ -69,7 +72,19 @@ def get_invitation_agreement(
             signed_at = sig.signed_at
             signed_by = sig.typed_signature
             signature_id = sig.id
-            has_dropbox_signed_pdf = bool(getattr(sig, "dropbox_sign_request_id", None) or getattr(sig, "signed_pdf_bytes", None))
+            # Only true when we have the actual signed PDF from Dropbox (not just "sent to Dropbox")
+            if sig.signed_pdf_bytes:
+                has_dropbox_signed_pdf = True
+            elif getattr(sig, "dropbox_sign_request_id", None):
+                pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
+                if pdf_bytes:
+                    sig.signed_pdf_bytes = pdf_bytes
+                    db.commit()
+                    has_dropbox_signed_pdf = True
+                else:
+                    has_dropbox_signed_pdf = False
+            else:
+                has_dropbox_signed_pdf = False
             date_str = sig.signed_at.strftime("%Y-%m-%d") if sig.signed_at else ""
             content = fill_guest_signature_in_content(doc.content, sig.typed_signature, date_str, getattr(sig, "ip_address", None))
 
@@ -131,7 +146,11 @@ def sign_invitation_agreement(
     db: Session = Depends(get_db),
 ):
     code = (data.invitation_code or "").strip().upper()
-    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
+    inv = db.query(Invitation).filter(
+        Invitation.invitation_code == code,
+        Invitation.status.in_(["pending", "ongoing"]),
+        Invitation.token_state != "BURNED",
+    ).first()
     if not inv:
         create_log(
             db,
@@ -167,7 +186,7 @@ def sign_invitation_agreement(
         db.commit()
         raise HTTPException(status_code=409, detail="Agreement has changed. Please reopen and sign again.")
 
-    ip = (req.client.host if req.client else None) or None
+    ip = (data.ip_address and data.ip_address.strip()[:64]) or (req.client.host if req.client else None) or None
     ua = (req.headers.get("user-agent") or "").strip() or None
 
     sig = AgreementSignature(
@@ -193,7 +212,7 @@ def sign_invitation_agreement(
     db.refresh(sig)
 
     date_str = sig.signed_at.strftime("%Y-%m-%d") if sig.signed_at else ""
-    content_with_sig = fill_guest_signature_in_content(doc.content, sig.typed_signature, date_str, getattr(sig, "ip_address", None))
+    content_with_sig = fill_guest_signature_in_content(doc.content, sig.typed_signature, date_str, sig.ip_address)
     sig.signed_pdf_bytes = agreement_content_to_pdf(doc.title, content_with_sig)
     db.commit()
 
@@ -255,7 +274,11 @@ def sign_invitation_agreement_with_dropbox(
 ):
     """Record signature and send the agreement to Dropbox Sign. Signer receives email to sign; signed PDF available once complete."""
     code = (data.invitation_code or "").strip().upper()
-    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
+    inv = db.query(Invitation).filter(
+        Invitation.invitation_code == code,
+        Invitation.status.in_(["pending", "ongoing"]),
+        Invitation.token_state != "BURNED",
+    ).first()
     if not inv:
         create_log(
             db,
@@ -291,7 +314,7 @@ def sign_invitation_agreement_with_dropbox(
         db.commit()
         raise HTTPException(status_code=409, detail="Agreement has changed. Please reopen and sign again.")
 
-    ip = (req.client.host if req.client else None) or None
+    ip = (data.ip_address and data.ip_address.strip()[:64]) or (req.client.host if req.client else None) or None
     ua = (req.headers.get("user-agent") or "").strip() or None
 
     sig = AgreementSignature(
@@ -316,11 +339,6 @@ def sign_invitation_agreement_with_dropbox(
     db.commit()
     db.refresh(sig)
 
-    date_str = sig.signed_at.strftime("%Y-%m-%d") if sig.signed_at else ""
-    content_with_sig = fill_guest_signature_in_content(doc.content, sig.typed_signature, date_str, getattr(sig, "ip_address", None))
-    sig.signed_pdf_bytes = agreement_content_to_pdf(doc.title, content_with_sig)
-    db.commit()
-
     create_log(
         db,
         CATEGORY_GUEST_SIGNATURE,
@@ -335,18 +353,27 @@ def sign_invitation_agreement_with_dropbox(
     )
     db.commit()
 
-    pdf_bytes = agreement_content_to_pdf(doc.title, doc.content)
-    request_id = send_signature_request(
+    # Build PDF from current templates at send time; include guest name, date, and IP
+    doc_send = build_invitation_agreement(db, invitation_code=code, guest_full_name=data.guest_full_name)
+    if not doc_send:
+        raise HTTPException(status_code=500, detail="Agreement could not be generated for sending")
+    date_str = sig.signed_at.strftime("%Y-%m-%d") if sig.signed_at else date.today().strftime("%Y-%m-%d")
+    content_with_ip = fill_guest_signature_in_content(doc_send.content, sig.guest_full_name, date_str, ip)
+    pdf_bytes = agreement_content_to_pdf(doc_send.title, content_with_ip)
+    request_id, signer_sig_id = send_signature_request(
         pdf_bytes,
-        title=doc.title,
+        title=doc_send.title,
         signer_email=sig.guest_email,
         signer_name=sig.guest_full_name,
     )
+    sign_url = None
     if request_id:
         sig.dropbox_sign_request_id = request_id
         db.commit()
+        if signer_sig_id:
+            sign_url = get_embedded_sign_url(signer_sig_id)
 
-    return AgreementSignResponse(signature_id=sig.id)
+    return AgreementSignResponse(signature_id=sig.id, sign_url=sign_url)
 
 
 @router.get("/signature/{signature_id}/signed-pdf")
@@ -354,7 +381,7 @@ def get_signed_agreement_pdf(
     signature_id: int,
     db: Session = Depends(get_db),
 ):
-    """Return the signed PDF: from DB if stored, else from Dropbox Sign if available, else generate and store."""
+    """Return the signed PDF: from DB if stored, else from Dropbox Sign once signing is complete. Never returns our generated PDF as signed."""
     sig = db.query(AgreementSignature).filter(AgreementSignature.id == signature_id).first()
     if not sig:
         raise HTTPException(status_code=404, detail="Signed PDF not available")
@@ -375,17 +402,36 @@ def get_signed_agreement_pdf(
                 media_type="application/pdf",
                 headers={"Content-Disposition": f'inline; filename="DocuStay-Signed-{sig.invitation_code}.pdf"'},
             )
+        raise HTTPException(
+            status_code=404,
+            detail="Document not yet signed in Dropbox. Please complete signing in the link we sent you, then try again.",
+        )
 
-    date_str = sig.signed_at.strftime("%Y-%m-%d") if sig.signed_at else ""
-    content = fill_guest_signature_in_content(sig.document_content, sig.typed_signature, date_str, getattr(sig, "ip_address", None))
-    pdf_bytes = agreement_content_to_pdf(sig.document_title, content)
-    sig.signed_pdf_bytes = pdf_bytes
-    db.commit()
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="DocuStay-Signed-{sig.invitation_code}.pdf"'},
+    raise HTTPException(
+        status_code=404,
+        detail="Signed PDF not available. Please complete signing in Dropbox.",
     )
+
+
+@router.get("/signature/{signature_id}/status", response_model=SignatureStatusResponse)
+def get_signature_status(
+    signature_id: int,
+    db: Session = Depends(get_db),
+):
+    """Return whether this agreement signature has been completed in Dropbox (signed PDF available). Used by frontend to poll until signing is done."""
+    sig = db.query(AgreementSignature).filter(AgreementSignature.id == signature_id).first()
+    if not sig:
+        raise HTTPException(status_code=404, detail="Signature not found")
+    if sig.signed_pdf_bytes:
+        return SignatureStatusResponse(completed=True)
+    if getattr(sig, "dropbox_sign_request_id", None):
+        pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
+        if pdf_bytes:
+            sig.signed_pdf_bytes = pdf_bytes
+            db.commit()
+            return SignatureStatusResponse(completed=True)
+        return SignatureStatusResponse(completed=False)
+    return SignatureStatusResponse(completed=False)
 
 
 # --- Owner Master POA (onboarding) ---
@@ -415,7 +461,14 @@ def get_owner_poa_document(
             signed_at = sig.signed_at
             signed_by = sig.typed_signature
             signature_id = sig.id
-            has_dropbox_signed_pdf = bool(getattr(sig, "dropbox_sign_request_id", None) or getattr(sig, "signed_pdf_bytes", None))
+            if getattr(sig, "signed_pdf_bytes", None):
+                has_dropbox_signed_pdf = True
+            elif getattr(sig, "dropbox_sign_request_id", None):
+                pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
+                if pdf_bytes:
+                    sig.signed_pdf_bytes = pdf_bytes
+                    db.commit()
+                    has_dropbox_signed_pdf = True
     return OwnerPOADocResponse(
         document_id=doc_id,
         title=title,
@@ -461,11 +514,6 @@ def sign_owner_poa_with_dropbox(
     db.commit()
     db.refresh(sig)
 
-    date_str = sig.signed_at.strftime("%Y-%m-%d") if sig.signed_at else ""
-    content_with_sig = poa_content_with_signature(content, sig.typed_signature, date_str)
-    sig.signed_pdf_bytes = agreement_content_to_pdf(title, content_with_sig)
-    db.commit()
-
     create_log(
         db,
         CATEGORY_STATUS_CHANGE,
@@ -477,19 +525,28 @@ def sign_owner_poa_with_dropbox(
         meta={"signature_id": sig.id, "document_id": doc_id},
     )
     db.commit()
-    pdf_bytes = agreement_content_to_pdf(title, content)
-    request_id = send_signature_request(
+
+    # Build PDF with Owner and Date lines filled, plus "Signed by" line
+    _doc_id, send_title, send_content, _ = build_owner_poa_document()
+    signed_date = sig.signed_at.strftime("%Y-%m-%d") if sig.signed_at else date.today().strftime("%Y-%m-%d")
+    content_filled = fill_owner_poa_signature_line(send_content, sig.owner_full_name, signed_date)
+    content_with_sig = poa_content_with_signature(content_filled, sig.owner_full_name, signed_date)
+    pdf_bytes = agreement_content_to_pdf(send_title, content_with_sig)
+    request_id, signer_sig_id = send_signature_request(
         pdf_bytes,
-        title=title,
+        title=send_title,
         signer_email=sig.owner_email,
         signer_name=sig.owner_full_name,
         subject="DocuStay – Please sign the Master Power of Attorney",
         message="Please sign the Master POA to complete your owner account registration.",
     )
+    sign_url = None
     if request_id:
         sig.dropbox_sign_request_id = request_id
         db.commit()
-    return AgreementSignResponse(signature_id=sig.id)
+        if signer_sig_id:
+            sign_url = get_embedded_sign_url(signer_sig_id)
+    return AgreementSignResponse(signature_id=sig.id, sign_url=sign_url)
 
 
 @router.get("/owner-poa/my-signature", response_model=OwnerPOASignatureResponse | None)
@@ -506,13 +563,20 @@ def get_my_owner_poa_signature(
     )
     if not sig:
         return None
+    has_dropbox_signed_pdf = bool(getattr(sig, "signed_pdf_bytes", None))
+    if not has_dropbox_signed_pdf and getattr(sig, "dropbox_sign_request_id", None):
+        pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
+        if pdf_bytes:
+            sig.signed_pdf_bytes = pdf_bytes
+            db.commit()
+            has_dropbox_signed_pdf = True
     return OwnerPOASignatureResponse(
         signature_id=sig.id,
         signed_at=sig.signed_at,
         signed_by=sig.typed_signature,
         document_title=sig.document_title,
         document_id=sig.document_id,
-        has_dropbox_signed_pdf=bool(getattr(sig, "dropbox_sign_request_id", None) or getattr(sig, "signed_pdf_bytes", None)),
+        has_dropbox_signed_pdf=has_dropbox_signed_pdf,
     )
 
 
@@ -522,7 +586,7 @@ def get_owner_poa_signed_pdf(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner),
 ):
-    """Return the signed Master POA PDF: from DB if stored, else Dropbox, else generate and store."""
+    """Return the signed Master POA PDF: from DB if stored, else from Dropbox once signing is complete. Never returns our generated PDF as signed."""
     sig = db.query(OwnerPOASignature).filter(OwnerPOASignature.id == signature_id).first()
     if not sig or sig.used_by_user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Signed PDF not available")
@@ -543,16 +607,14 @@ def get_owner_poa_signed_pdf(
                 media_type="application/pdf",
                 headers={"Content-Disposition": 'inline; filename="DocuStay-Master-POA-Signed.pdf"'},
             )
+        raise HTTPException(
+            status_code=404,
+            detail="Document not yet signed in Dropbox. Please complete signing in the link we sent you, then try again.",
+        )
 
-    date_str = sig.signed_at.strftime("%Y-%m-%d") if sig.signed_at else ""
-    content_with_sig = poa_content_with_signature(sig.document_content, sig.typed_signature, date_str)
-    pdf_bytes = agreement_content_to_pdf(sig.document_title, content_with_sig)
-    sig.signed_pdf_bytes = pdf_bytes
-    db.commit()
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": 'inline; filename="DocuStay-Master-POA-Signed.pdf"'},
+    raise HTTPException(
+        status_code=404,
+        detail="Signed PDF not available. Please complete signing in Dropbox.",
     )
 
 

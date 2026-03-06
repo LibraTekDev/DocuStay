@@ -15,11 +15,12 @@ interface Props {
 
 /** Sign Master POA: pending flow (complete-signup) or existing owner (link-poa). Then go to dashboard. */
 export default function OnboardingPOA({ user, onCompleteSignup, navigate, setLoading, notify }: Props) {
-  const [poaModalOpen, setPoaModalOpen] = useState(true);
+  const [poaModalOpen, setPoaModalOpen] = useState(false);
   const [linking, setLinking] = useState(false);
   const [pendingData, setPendingData] = useState<{ email: string; full_name: string } | null>(null);
   const [pendingFailed, setPendingFailed] = useState(false);
   const [poaError, setPoaError] = useState<string | null>(null);
+  const [lastSignatureId, setLastSignatureId] = useState<number | null>(null);
 
   useEffect(() => {
     if (user?.user_id === "0" || !user) {
@@ -30,8 +31,7 @@ export default function OnboardingPOA({ user, onCompleteSignup, navigate, setLoa
     }
   }, [user]);
 
-  const handleSigned = async (signatureId: number) => {
-    setPoaModalOpen(false);
+  const runCompleteSignup = async (signatureId: number) => {
     setLinking(true);
     setPoaError(null);
     try {
@@ -61,6 +61,11 @@ export default function OnboardingPOA({ user, onCompleteSignup, navigate, setLoa
     } finally {
       setLinking(false);
     }
+  };
+
+  const handleSigned = (signatureId: number) => {
+    setPoaModalOpen(false);
+    runCompleteSignup(signatureId);
   };
 
   const email = pendingData?.email ?? user?.email ?? "";
@@ -100,7 +105,16 @@ export default function OnboardingPOA({ user, onCompleteSignup, navigate, setLoa
           </div>
         )}
         <Button onClick={() => { setPoaError(null); setPoaModalOpen(true); }} disabled={linking} className="w-full">
-          {linking ? "Completing…" : "Sign authorization document"}
+          Sign authorization document
+        </Button>
+        <Button
+          onClick={() => lastSignatureId != null && runCompleteSignup(lastSignatureId)}
+          disabled={linking || lastSignatureId == null}
+          variant="outline"
+          className="w-full mt-3"
+          title={lastSignatureId == null ? "Sign the authorization document first, then click here" : undefined}
+        >
+          {linking ? "Completing…" : "Complete Verification"}
         </Button>
         <button type="button" onClick={() => navigate("onboarding/identity")} className="mt-3 text-sm text-slate-600 hover:text-slate-900 underline">
           Back to identity
@@ -114,6 +128,7 @@ export default function OnboardingPOA({ user, onCompleteSignup, navigate, setLoa
         onClose={() => setPoaModalOpen(false)}
         onSigned={handleSigned}
         notify={notify}
+        onSignatureIdKnown={(id) => setLastSignatureId(id)}
       />
     </div>
   );

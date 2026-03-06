@@ -26,6 +26,8 @@ import ProviderAuthorityLetter from './pages/Provider/ProviderAuthorityLetter';
 import Landing from './pages/Landing';
 import { LivePropertyPage } from './pages/LivePropertyPage';
 import { PortfolioPage } from './pages/PortfolioPage';
+import { AdminDashboard } from './pages/Admin/AdminDashboard';
+import AdminLogin from './pages/Admin/AdminLogin';
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>({
@@ -88,7 +90,9 @@ const App: React.FC = () => {
           if (!currentView || currentView === 'login' || currentView === 'register' || currentView === 'guest-login' || currentView === 'guest-signup') {
             const targetView = user.user_type === UserType.PROPERTY_OWNER
               ? (!user.identity_verified ? 'onboarding/identity' : !user.poa_linked ? 'onboarding/poa' : 'dashboard')
-              : 'guest-dashboard';
+              : user.user_type === UserType.ADMIN
+                ? 'admin'
+                : 'guest-dashboard';
             window.location.hash = targetView;
             setView(targetView);
           }
@@ -131,6 +135,11 @@ const App: React.FC = () => {
         if (viewName === 'guest-identity') {
           window.history.replaceState(null, '', window.location.pathname + window.location.search + '#guest-dashboard');
           setView('guest-dashboard');
+          return;
+        }
+        if (viewName === 'admin-login') {
+          window.history.replaceState(null, '', window.location.pathname + window.location.search + '#admin');
+          setView('admin');
           return;
         }
         setView(viewName);
@@ -364,19 +373,43 @@ const App: React.FC = () => {
         {view === 'guest-dashboard' && state.user?.user_type === UserType.GUEST && <GuestDashboard user={state.user} navigate={navigate} notify={showNotification} />}
         {view === 'sign-agreement' && state.user?.user_type === UserType.GUEST && <SignAgreement user={state.user} navigate={navigate} notify={showNotification} />}
 
+        {/* Admin: access only via #admin. Shows login when not signed in; dashboard when role=admin. #admin-login redirects to #admin. */}
+        {(view === 'admin' || view === 'admin-login' || view.startsWith('admin/')) && (() => {
+          if (!state.user) {
+            return (
+              <AdminLogin
+                onLogin={handleLogin}
+                setLoading={setLoading}
+                notify={showNotification}
+                navigate={navigate}
+              />
+            );
+          }
+          if (state.user.user_type !== 'ADMIN') {
+            return (
+              <div className="flex-grow flex items-center justify-center p-8">
+                <div className="text-center max-w-md">
+                  <h2 className="text-xl font-semibold text-slate-900 mb-2">Access denied</h2>
+                  <p className="text-slate-600 mb-4">This area is for administrators only.</p>
+                  <Button
+                    variant="primary"
+                    onClick={() => navigate(state.user?.user_type === 'PROPERTY_OWNER' ? 'dashboard' : 'guest-dashboard')}
+                  >
+                    Go to my dashboard
+                  </Button>
+                </div>
+              </div>
+            );
+          }
+          return <AdminDashboard user={state.user} navigate={navigate} notify={showNotification} />;
+        })()}
+
         {/* Home / Landing – also fallback when hash is a protected route but user not loaded (avoids blank page) */}
         {(view === '' || (view && !state.user && ['dashboard', 'add-property', 'settings', 'guest-dashboard', 'onboarding/identity'].some((v) => view === v || view.startsWith(v + '/')))) && (
           <Landing navigate={navigate} />
         )}
       </main>
 
-      {!['', 'login', 'register', 'verify'].includes(view) && !view.startsWith('guest-login') && !view.startsWith('guest-signup') && !view.startsWith('invite/') && !view.startsWith('onboarding/') && !view.startsWith('live/') && !view.startsWith('portfolio/') && (
-        <footer className="bg-white border-t border-gray-200 py-10">
-          <div className="max-w-7xl mx-auto px-4 text-center">
-            <p className="text-gray-500 text-sm">© 2024 DocuStay AI. Documentation platform—not a law firm.</p>
-          </div>
-        </footer>
-      )}
     </div>
   );
 };

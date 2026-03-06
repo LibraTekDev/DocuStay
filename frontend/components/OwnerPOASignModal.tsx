@@ -1,9 +1,78 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { Fragment, useEffect, useMemo, useState } from "react";
 import { Button, Input, Modal } from "./UI";
 import { ownerPoaApi, type OwnerPOADocResponse } from "../services/api";
 import { getOwnerSignupErrorFriendly } from "../utils/ownerSignupErrors";
 
 type AckKey = "read" | "temporary" | "vacate" | "electronic";
+
+/** Default/dummy POA content when API returns none (so layout and styling are visible). Same structure as backend. */
+const DUMMY_POA_CONTENT = `**Master Power of Attorney (POA)**
+
+**Overview**
+This is a one-time authorization you sign when you set up your DocuStay account. It lets DocuStay act on your behalf for documentation and utility-related steps so the platform can help you manage your rental properties.
+
+**1. Who Signs This?**
+Only property owners sign this Master POA when they join DocuStay.
+Guests do not sign this document; they sign a separate Guest Agreement for their stay.
+
+**2. When Do You Sign?**
+You sign this once during account setup, before you can add properties.
+One signature applies to all properties you add to your account, now and later.
+
+**3. What Does DocuStay Do With This?**
+With your authorization, DocuStay can:
+- Create and send utility authorization tokens (e.g. USAT) so providers can verify occupancy
+- Contact utility companies when needed to confirm or update service for your properties
+- Put together documentation packages (e.g. occupancy, dates, guest info) for your records
+- Keep dated records of property status and actions for your reference
+
+**4. How Does Location Matter?**
+DocuStay uses each property's address (zip code and state/region) to show relevant local information on that property's page and to tailor guest agreements and any letters or forms to that location.
+
+**SIGNATURE (ELECTRONIC)**
+Owner: ________________________   Date: __________`;
+
+/** Render one line: **bold** as <strong>, and entire-line **...** as heading. */
+function renderLine(line: string, lineIndex: number, isFirstLine: boolean) {
+  const trimmed = line.trim();
+  const wholeLineBold = /^\*\*(.+)\*\*\s*$/.exec(trimmed);
+  if (wholeLineBold) {
+    const inner = wholeLineBold[1];
+    return (
+      <div
+        key={lineIndex}
+        className={`font-semibold text-slate-900 ${isFirstLine ? "mt-0" : "mt-4"} text-base`}
+      >
+        {inner}
+      </div>
+    );
+  }
+  const parts = trimmed.split(/\*\*(.+?)\*\*/g);
+  if (parts.length === 1) return <Fragment key={lineIndex}>{trimmed || "\u00A0"}</Fragment>;
+  return (
+    <span key={lineIndex}>
+      {parts.map((seg, j) =>
+        j % 2 === 1 ? <strong key={j} className="font-semibold text-slate-900">{seg}</strong> : seg
+      )}
+    </span>
+  );
+}
+
+/** Render document content with headings and **bold**. Normalizes line endings. */
+function renderDocContent(content: string) {
+  const normalized = (content || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = normalized.split("\n");
+  return (
+    <div className="space-y-1">
+      {lines.map((line, i) => (
+        <Fragment key={i}>
+          {i > 0 && <br />}
+          {renderLine(line, i, i === 0)}
+        </Fragment>
+      ))}
+    </div>
+  );
+}
 
 export default function OwnerPOASignModal(props: {
   open: boolean;
@@ -12,8 +81,10 @@ export default function OwnerPOASignModal(props: {
   onClose: () => void;
   onSigned: (signatureId: number) => void;
   notify: (t: "success" | "error", m: string) => void;
+  /** When provided, called whenever we have a signature id (from doc load or after Sign with Dropbox) so parent can enable "Complete Verification". */
+  onSignatureIdKnown?: (signatureId: number) => void;
 }) {
-  const { open, ownerEmail, ownerFullName, onClose, onSigned, notify } = props;
+  const { open, ownerEmail, ownerFullName, onClose, onSigned, notify, onSignatureIdKnown } = props;
 
   const [doc, setDoc] = useState<OwnerPOADocResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -40,7 +111,11 @@ export default function OwnerPOASignModal(props: {
     setLoading(true);
     ownerPoaApi
       .getDocument(ownerEmail?.trim() || undefined)
-      .then((d) => { setDoc(d); setLoadError(null); })
+      .then((d) => {
+        setDoc(d);
+        setLoadError(null);
+        if (d?.signature_id != null) onSignatureIdKnown?.(d.signature_id);
+      })
       .catch((e) => {
         const friendly = getOwnerSignupErrorFriendly((e as Error)?.message ?? "Could not load Master POA document.");
         setLoadError(friendly.message);
@@ -81,8 +156,13 @@ export default function OwnerPOASignModal(props: {
         acks,
         document_hash: doc.document_hash,
       });
-      notify("success", "Master POA sent to Dropbox Sign. Check your email to complete signing; you can download the signed PDF in Settings after signing.");
-      onSigned(res.signature_id);
+      onSignatureIdKnown?.(res.signature_id);
+      if (res.sign_url) {
+        window.open(res.sign_url, "_blank", "noopener");
+        notify("success", "We've opened Dropbox Sign in a new tab. Complete signing there, then return here and click Complete Verification below.");
+      } else {
+        notify("success", "Master POA sent to Dropbox Sign. Check your email to complete signing, then return here and click Complete Verification below.");
+      }
       onClose();
     } catch (e) {
       const friendly = getOwnerSignupErrorFriendly((e as Error)?.message ?? "Could not sign Master POA.");
@@ -101,7 +181,7 @@ export default function OwnerPOASignModal(props: {
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div className="space-y-1">
             <p className="text-sm text-slate-600">
-              This one-time document designates DocuStay as your Authorized Agent for all properties you add.
+              One-time, account-level document signed during onboarding. Establishes DocuStay as your Authorized Agent for all property protection activities.
             </p>
             <p className="text-xs text-slate-500 italic">DocuStay is a documentation platform, not a law firm.</p>
           </div>
@@ -110,7 +190,7 @@ export default function OwnerPOASignModal(props: {
           ) : null}
         </div>
 
-        {doc?.already_signed && (
+        {doc?.already_signed && doc?.has_dropbox_signed_pdf && (
           <div className="rounded-xl bg-emerald-50 border border-emerald-200 px-4 py-3 flex flex-wrap items-center gap-3">
             <span className="text-emerald-700 font-bold">✓ Signed</span>
             <span className="text-slate-600 text-sm">
@@ -122,6 +202,14 @@ export default function OwnerPOASignModal(props: {
             >
               Use this signature and complete signup
             </Button>
+          </div>
+        )}
+        {doc?.already_signed && !doc?.has_dropbox_signed_pdf && (
+          <div className="rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 flex flex-wrap items-center gap-3">
+            <span className="text-amber-800 font-bold">Awaiting your signature in Dropbox</span>
+            <span className="text-slate-600 text-sm">
+              Complete signing in the link we sent you (email or the tab we opened). Then close this and click <strong>Complete Verification</strong> below.
+            </span>
           </div>
         )}
 
@@ -136,13 +224,20 @@ export default function OwnerPOASignModal(props: {
           </div>
         )}
         <div className="grid lg:grid-cols-5 gap-6">
+          {/* Document content – same layout as guest agreement */}
           <div className="lg:col-span-3">
-            <div className="border border-slate-200 rounded-xl bg-white overflow-hidden shadow-sm">
-              <div className="px-4 py-3 border-b border-slate-200">
-                <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Authorization document</p>
+            <div className="border border-slate-200 rounded-xl bg-white overflow-hidden shadow-sm flex flex-col max-h-[70vh]">
+              <div className="px-4 py-3 border-b border-slate-200 shrink-0">
+                <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Master Power of Attorney (POA)</p>
               </div>
-              <div className="p-4 max-h-[50vh] overflow-y-auto whitespace-pre-wrap text-sm text-slate-700 leading-relaxed">
-                {loading ? "Loading document…" : (doc?.content ?? "Document unavailable.")}
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <div className="px-6 py-5 max-w-prose mx-auto">
+                  <div className="text-base text-slate-800 leading-loose tracking-normal selection:bg-blue-100">
+                    {loading
+                      ? "Loading document…"
+                      : renderDocContent(doc?.content ?? DUMMY_POA_CONTENT)}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -172,8 +267,10 @@ export default function OwnerPOASignModal(props: {
 
             <div className="border border-slate-200 rounded-xl bg-white p-5 space-y-4 shadow-sm">
               <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Signature</p>
-              {doc?.already_signed ? (
-                <p className="text-sm text-slate-600">This document is already signed. You can close this window and continue registration.</p>
+              {doc?.already_signed && doc?.has_dropbox_signed_pdf ? (
+                <p className="text-sm text-slate-600">This document is signed. Use the button above to complete signup, or close and click Complete Verification below.</p>
+              ) : doc?.already_signed ? (
+                <p className="text-sm text-slate-600">Complete signing in Dropbox, then close this and click Complete Verification on the page.</p>
               ) : (
                 <>
                   <Input
@@ -192,7 +289,12 @@ export default function OwnerPOASignModal(props: {
                       <Button variant="outline" onClick={onClose} className="flex-1 py-3">
                         Cancel
                       </Button>
-                      <Button onClick={handleSign} disabled={signing || loading} className="flex-1 py-3">
+                      <Button
+                        onClick={handleSign}
+                        disabled={signing || loading || !allAcks}
+                        className="flex-1 py-3"
+                        title={!allAcks ? "Check all acknowledgments above to enable signing" : undefined}
+                      >
                         {signing ? "Sending…" : "Sign with Dropbox Sign"}
                       </Button>
                     </div>

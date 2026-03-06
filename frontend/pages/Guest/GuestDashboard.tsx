@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Button, Input } from '../../components/UI';
 import { UserSession } from '../../types';
-import { dashboardApi, authApi, APP_ORIGIN, type GuestStayView, type GuestPendingInviteView } from '../../services/api';
+import { dashboardApi, authApi, agreementsApi, APP_ORIGIN, type GuestStayView, type GuestPendingInviteView } from '../../services/api';
 import { copyToClipboard } from '../../utils/clipboard';
 import AgreementSignModal from '../../components/AgreementSignModal';
 import { PENDING_INVITE_STORAGE_KEY } from './GuestLogin';
+
+const DROPBOX_REDIRECT_INVITATION_CODE = 'docustay_dropbox_redirect_invitation_code';
+const DROPBOX_REDIRECT_SIGNATURE_ID = 'docustay_dropbox_redirect_signature_id';
 
 function parseInviteCode(raw: string): string {
   const trimmed = raw.trim();
@@ -123,6 +126,64 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // When backend reports signature complete but not yet accepted (e.g. just fetched from Dropbox), accept so stay appears
+  useEffect(() => {
+    if (!pendingInvites.length) return;
+    const toAccept = pendingInvites.filter(
+      (inv): inv is GuestPendingInviteView & { accept_now_signature_id: number } =>
+        typeof (inv as GuestPendingInviteView).accept_now_signature_id === 'number'
+    );
+    if (toAccept.length === 0) return;
+    Promise.all(
+      toAccept.map((inv) => authApi.acceptInvite(inv.invitation_code, inv.accept_now_signature_id))
+    ).then(() => {
+      loadData();
+      notify('success', 'Your stay is confirmed. It will appear in your current or upcoming stays.');
+    }).catch((e) => {
+      notify('error', (e as Error)?.message ?? 'Could not confirm your stay.');
+      loadData();
+    });
+  }, [pendingInvites, loadData, notify]);
+
+  // After redirect back from Dropbox: poll signature until completed, then accept invite so stay shows in current/upcoming
+  useEffect(() => {
+    const code = sessionStorage.getItem(DROPBOX_REDIRECT_INVITATION_CODE);
+    const sigIdStr = sessionStorage.getItem(DROPBOX_REDIRECT_SIGNATURE_ID);
+    if (!code || !sigIdStr) return;
+    const sigId = parseInt(sigIdStr, 10);
+    if (!Number.isFinite(sigId)) {
+      sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
+      sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
+      return;
+    }
+    const POLL_INTERVAL_MS = 3000;
+    const MAX_POLLS = 40; // ~2 min
+    let pollCount = 0;
+    const t = setInterval(() => {
+      pollCount += 1;
+      agreementsApi.getSignatureStatus(sigId).then((res) => {
+        if (res.completed) {
+          clearInterval(t);
+          sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
+          sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
+          authApi.acceptInvite(code, sigId).then(() => {
+            loadData();
+            notify('success', 'Your stay is confirmed. It will appear in your current or upcoming stays.');
+          }).catch((e) => {
+            notify('error', (e as Error)?.message ?? 'Could not confirm your stay.');
+          });
+        }
+      }).catch(() => {});
+
+      if (pollCount >= MAX_POLLS) {
+        clearInterval(t);
+        sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
+        sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
+      }
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(t);
+  }, [loadData, notify]);
 
   useEffect(() => {
     const code = sessionStorage.getItem(PENDING_INVITE_STORAGE_KEY);
@@ -333,6 +394,34 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
             </div>
         </section>
 
+        {/* Pending actions: agreement sent to Dropbox but not yet signed – stay not confirmed until signed */}
+        {pendingInvites.filter((inv) => inv.needs_dropbox_signature).length > 0 && (
+          <section className="order-2 mb-6 lg:mb-8">
+            <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-5 sm:p-6 shadow-sm">
+              <h2 className="text-base font-semibold text-slate-900 mb-1">Pending actions</h2>
+              <p className="text-sm text-slate-600 mb-4">Complete signing in Dropbox to confirm these stays. Your stay will not be confirmed until the agreement is signed.</p>
+              <ul className="space-y-3">
+                {pendingInvites
+                  .filter((inv) => inv.needs_dropbox_signature)
+                  .map((inv) => (
+                    <li key={inv.invitation_code} className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl border border-amber-100 bg-white">
+                      <div className="min-w-0 flex-1">
+                        <p className="font-semibold text-slate-900">{inv.property_name}</p>
+                        <p className="text-sm text-slate-500 mt-0.5">
+                          {formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}
+                        </p>
+                        <p className="text-xs text-amber-700 font-medium mt-1">Awaiting your signature in Dropbox</p>
+                      </div>
+                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => setAgreementModalCode(inv.invitation_code)}>
+                        Complete signing
+                      </Button>
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          </section>
+        )}
+
         {/* Stay cards - right margin on desktop (vertical list), in flow on mobile */}
         <aside className="order-3 w-full md:absolute md:left-full md:ml-8 md:top-6 md:w-64 md:max-h-[calc(100vh-8rem)] md:overflow-y-auto shrink-0">
           {stayFilter !== 'future_invites' && (
@@ -452,7 +541,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                         <p className="text-xs text-slate-400 mt-0.5">{inv.host_name}</p>
                       </div>
                       <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => setAgreementModalCode(inv.invitation_code)}>
-                        Review & sign
+                        {inv.needs_dropbox_signature ? 'Complete signing' : 'Review & sign'}
                       </Button>
                     </li>
                   ))}
@@ -468,7 +557,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
         const detailHasCheckedIn = !!(stay.checked_in_at != null && stay.checked_in_at !== '');
         return (
         <div className="w-full space-y-6 mb-6 lg:mb-8">
-      {/* Revoked: must vacate in 12 hours */}
+      {/* Revoked: Authorization Revoked per guidance */}
       {stay.revoked_at || stay.vacate_by ? (
         <div className="rounded-2xl border border-red-200 bg-red-50/80 p-5">
           <div className="flex items-start gap-4">
@@ -476,8 +565,11 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
               <svg className="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
             </div>
             <div className="min-w-0">
-              <h3 className="text-base font-semibold text-red-900">Stay authorization revoked</h3>
-              <p className="text-sm text-red-800 mt-1">You must vacate the property within <strong>12 hours</strong>.</p>
+              <h3 className="text-base font-semibold text-red-900">Authorization Revoked</h3>
+              {stay.revoked_at && (
+                <p className="text-xs text-red-700 mt-1 font-medium">Effective date: {new Date(stay.revoked_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</p>
+              )}
+              <p className="text-sm text-red-800 mt-2">The Property Owner has revoked your authorization to occupy the property. You are required to vacate the premises immediately.</p>
               {stay.vacate_by && (
                 <p className="text-sm text-red-700 mt-2 font-medium">Vacate by: {new Date(stay.vacate_by).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</p>
               )}
@@ -536,7 +628,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
               )}
             </div>
             <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight">
-              {stay.cancelled_at ? 'Stay cancelled' : stay.checked_out_at ? 'Stay completed' : stay.approved_stay_end_date < today ? 'Stay ended' : stay.approved_stay_start_date > today ? 'Upcoming stay' : `${dLeft} day${dLeft !== 1 ? 's' : ''} left`}
+              {stay.cancelled_at ? 'Stay cancelled' : stay.checked_out_at ? 'Stay completed' : stay.approved_stay_end_date < today ? 'Stay ended' : stay.approved_stay_start_date > today ? 'Upcoming stay' : 'Current stay'}
             </h1>
             <div className="flex gap-6 mt-4">
               <div>
@@ -600,7 +692,6 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
 
       {/* Countdown & calendar: time left in a pretty view (only when stay is current or upcoming and not ended) */}
       {stay && !stay.checked_out_at && !stay.cancelled_at && stay.approved_stay_end_date >= today && (() => {
-        const countdown = countdownLabel(stay.approved_stay_end_date, today);
         const allDays = dateRange(stay.approved_stay_start_date, stay.approved_stay_end_date);
         const total = allDays.length;
         const maxShow = 42; // ~6 weeks
@@ -619,9 +710,6 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                   <span className="text-sm font-semibold uppercase tracking-wider text-indigo-600 mt-1">
                     {dLeft === 0 ? 'day (check-out today)' : dLeft === 1 ? 'day left' : 'days left'}
                   </span>
-                  {countdown.sublabel && (
-                    <span className="text-xs text-slate-500 mt-0.5">{countdown.sublabel}</span>
-                  )}
                 </div>
               </div>
               {/* Calendar strip */}
@@ -884,9 +972,17 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
           invitationCode={agreementModalCode}
           guestEmail={guestEmail}
           guestFullName={guestFullName}
-          onClose={() => setAgreementModalCode(null)}
+          onClose={() => {
+            setAgreementModalCode(null);
+            loadData();
+          }}
           onSigned={handleAgreementSigned}
           notify={notify}
+          onRedirectToDropbox={(invitationCode, signatureId, signUrl) => {
+            sessionStorage.setItem(DROPBOX_REDIRECT_INVITATION_CODE, invitationCode);
+            sessionStorage.setItem(DROPBOX_REDIRECT_SIGNATURE_ID, String(signatureId));
+            window.location.href = signUrl;
+          }}
         />
       )}
     </div>

@@ -49,6 +49,7 @@ from app.services.auth import (
     create_password_reset_token,
     decode_token_with_error,
 )
+from app.services.dropbox_sign import get_signed_pdf
 from app.services.notifications import (
     send_verification_email,
     send_password_reset_email,
@@ -102,8 +103,14 @@ def _register_email_taken_message(existing_role: UserRole) -> str:
     return "This email is already registered as a guest. Please log in on the Guest Login page."
 
 
-def _validate_and_claim_owner_poa(db: Session, poa_signature_id: int, owner_email: str) -> None:
-    """Validate POA signature exists, email matches, not already used. Raises HTTPException on failure."""
+def _validate_and_claim_owner_poa(
+    db: Session,
+    poa_signature_id: int,
+    owner_email: str,
+    *,
+    dropbox_incomplete_message: str = "Please complete signing in Dropbox before continuing. Then try again.",
+) -> None:
+    """Validate POA signature exists, email matches, not already used, and (when sent to Dropbox) completed in Dropbox. Raises HTTPException on failure."""
     sig = db.query(OwnerPOASignature).filter(OwnerPOASignature.id == poa_signature_id).first()
     if not sig:
         raise HTTPException(status_code=400, detail="Invalid Master POA signature. Please sign the document again.")
@@ -111,6 +118,13 @@ def _validate_and_claim_owner_poa(db: Session, poa_signature_id: int, owner_emai
         raise HTTPException(status_code=400, detail="Master POA signature email does not match registration email.")
     if sig.used_by_user_id is not None:
         raise HTTPException(status_code=400, detail="This Master POA signature was already used for another account.")
+    if getattr(sig, "dropbox_sign_request_id", None) and not getattr(sig, "signed_pdf_bytes", None):
+        pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
+        if pdf_bytes:
+            sig.signed_pdf_bytes = pdf_bytes
+            db.commit()
+        else:
+            raise HTTPException(status_code=400, detail=dropbox_incomplete_message)
 
 
 def _owner_onboarding_complete(db: Session, user: User) -> bool:
@@ -145,7 +159,10 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
 
     # Owner: POA is linked after identity verification (separate step); do not require or claim here
     if data.role == UserRole.owner and data.poa_signature_id:
-        _validate_and_claim_owner_poa(db, data.poa_signature_id, data.email)
+        _validate_and_claim_owner_poa(
+            db, data.poa_signature_id, data.email,
+            dropbox_incomplete_message="Please complete signing in Dropbox before completing signup.",
+        )
 
     # Owner signup always requires email verification via Mailgun (no bypass).
     if data.role == UserRole.owner:
@@ -355,7 +372,11 @@ def _complete_pending_guest(
     code = (extra.get("invitation_code") or "").strip().upper()
     inv = None
     if code:
-        inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
+        inv = db.query(Invitation).filter(
+            Invitation.invitation_code == code,
+            Invitation.status.in_(["pending", "ongoing"]),
+            Invitation.token_state != "BURNED",
+        ).first()
     sig = None
     sig_id = extra.get("agreement_signature_id")
     if sig_id and code:
@@ -398,6 +419,7 @@ def _complete_pending_guest(
     db.add(profile)
     db.flush()
 
+    prop = None
     if code and inv and sig:
         duration = (inv.stay_end_date - inv.stay_start_date).days
         if duration <= 0:
@@ -447,9 +469,9 @@ def _complete_pending_guest(
     db.delete(pending)
     db.commit()
     db.refresh(user)
-    if _prop:
+    if prop:
         try:
-            profile = db.query(OwnerProfile).filter(OwnerProfile.id == _prop.owner_profile_id).first()
+            profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
             if profile:
                 sync_subscription_quantities(db, profile)
         except Exception:
@@ -923,7 +945,10 @@ def complete_owner_signup(
         print(f"[Auth] complete-signup 400: pending_id={pending.id} missing identity_verified_at in extra_data (keys={list(extra.keys())})")
         raise HTTPException(status_code=400, detail="Identity not verified. Please complete identity verification first.")
     try:
-        _validate_and_claim_owner_poa(db, data.poa_signature_id, pending.email)
+        _validate_and_claim_owner_poa(
+            db, data.poa_signature_id, pending.email,
+            dropbox_incomplete_message="Please complete signing in Dropbox before completing signup.",
+        )
     except HTTPException as e:
         print(f"[Auth] complete-signup 400: pending_id={pending.id} poa_signature_id={data.poa_signature_id} detail={e.detail}")
         raise
@@ -978,7 +1003,10 @@ def link_owner_poa(
             status_code=400,
             detail="As an Authorized Agent you must certify that you have authority under your management agreement to delegate documentation authority to DocuStay.",
         )
-    _validate_and_claim_owner_poa(db, data.poa_signature_id, current_user.email)
+    _validate_and_claim_owner_poa(
+        db, data.poa_signature_id, current_user.email,
+        dropbox_incomplete_message="Please complete signing in Dropbox before linking your Master POA.",
+    )
     poa = db.query(OwnerPOASignature).filter(OwnerPOASignature.id == data.poa_signature_id).first()
     if poa:
         poa.used_by_user_id = current_user.id
@@ -1052,7 +1080,11 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
     # No verification: create user immediately (e.g. Mailgun not configured). Validate invite if provided.
     inv = None
     if code:
-        inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
+        inv = db.query(Invitation).filter(
+            Invitation.invitation_code == code,
+            Invitation.status.in_(["pending", "ongoing"]),
+            Invitation.token_state != "BURNED",
+        ).first()
         if not inv:
             create_log(
                 db,
@@ -1198,7 +1230,11 @@ def accept_invite(
     code = (data.invitation_code or "").strip().upper()
     if not code:
         raise HTTPException(status_code=400, detail="Invitation code is required")
-    inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
+    inv = db.query(Invitation).filter(
+        Invitation.invitation_code == code,
+        Invitation.status.in_(["pending", "ongoing"]),
+        Invitation.token_state != "BURNED",
+    ).first()
     if not inv:
         create_log(
             db,
@@ -1280,6 +1316,31 @@ def accept_invite(
         )
         db.commit()
         raise HTTPException(status_code=400, detail="Agreement signature has already been used")
+    # If signature was sent to Dropbox, require the signed PDF before accepting (try fetch once)
+    if getattr(sig, "dropbox_sign_request_id", None) and not getattr(sig, "signed_pdf_bytes", None):
+        pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
+        if pdf_bytes:
+            sig.signed_pdf_bytes = pdf_bytes
+            db.commit()
+        else:
+            create_log(
+                db,
+                CATEGORY_FAILED_ATTEMPT,
+                "Accept invite: Dropbox signing not complete",
+                f"Accept-invite for {code}: signature {sig.id} sent to Dropbox but not yet signed.",
+                property_id=inv.property_id,
+                invitation_id=inv.id,
+                actor_user_id=current_user.id,
+                actor_email=current_user.email,
+                ip_address=request.client.host if request.client else None,
+                user_agent=(request.headers.get("user-agent") or "").strip() or None,
+                meta={"invitation_code": code, "signature_id": sig.id},
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail="Please complete signing in Dropbox before accepting the invitation.",
+            )
     if not (sig.acks_read and sig.acks_temporary and sig.acks_vacate and sig.acks_electronic):
         create_log(
             db,

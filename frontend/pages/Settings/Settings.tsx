@@ -203,12 +203,15 @@ const Settings: React.FC<{
           </Card>
         )}
 
-        {/* Master POA (owners only) */}
+        {/* Master POA (owners only) – same structure as guest agreement section */}
         {isOwner && (
           <Card className="p-8 md:p-10">
-            <h2 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-3 mb-6">Authorization (POA)</h2>
-            <p className="text-gray-600 text-sm mb-4">
-              The Master POA is the one-time document you signed during registration that designates DocuStay as your Authorized Agent for utility authorization and audit trails for all your properties.
+            <h2 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-3 mb-4">Master Power of Attorney (POA)</h2>
+            <p className="text-gray-600 text-sm mb-2">
+              The Master POA is a one-time, account-level legal document you signed during onboarding that establishes DocuStay as your legal representative for all property protection activities.
+            </p>
+            <p className="text-gray-500 text-xs mb-6">
+              It designates DocuStay as your Authorized Agent to issue utility authorization tokens, communicate with utility companies, generate legal evidence packages, and maintain audit trails for all properties you add.
             </p>
             {poaSignature === undefined ? (
               <p className="text-gray-500 text-sm">Loading…</p>

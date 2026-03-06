@@ -8,6 +8,7 @@ import enum
 class UserRole(str, enum.Enum):
     owner = "owner"
     guest = "guest"
+    admin = "admin"
 
 
 class OwnerType(str, enum.Enum):

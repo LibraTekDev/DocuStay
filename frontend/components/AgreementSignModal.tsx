@@ -1,8 +1,50 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, Modal } from "./UI";
 import { agreementsApi, API_URL, type AgreementDocResponse } from "../services/api";
 
 type AckKey = "read" | "temporary" | "vacate" | "electronic";
+
+/** Today's date in "Month DD, YYYY" for agreement display. */
+function todayDisplayDate(): string {
+  const d = new Date();
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+}
+
+/**
+ * Apply display-only placeholders: guest name, date, and optional IP.
+ * Does not change the underlying doc content used for hashing.
+ */
+function contentForDisplay(
+  content: string,
+  guestName: string,
+  ipAddress: string
+): string {
+  let out = content.replace(/\[Guest Name\]/g, guestName || "[Guest Name]");
+  // Fill Date line ( **Date:** ___________________ )
+  out = out.replace(
+    /\*\*Date:\*\*\s*_+\s*/g,
+    `**Date:** ${todayDisplayDate()}\n`
+  );
+  if (ipAddress.trim()) {
+    out = out.replace(
+      /IP Address:\s*_+\s*/g,
+      `IP Address: ${ipAddress.trim()}\n`
+    );
+  }
+  return out;
+}
+
+/** Render agreement content with **bold** segments as <strong>. Preserves newlines. */
+function renderAgreementContent(content: string) {
+  return content.split("\n").map((line, i) => (
+    <Fragment key={i}>
+      {i > 0 && <br />}
+      {line.split(/\*\*(.+?)\*\*/g).map((seg, j) =>
+        j % 2 === 1 ? <strong key={j}>{seg}</strong> : seg
+      )}
+    </Fragment>
+  ));
+}
 
 export default function AgreementSignModal(props: {
   open: boolean;
@@ -12,46 +54,112 @@ export default function AgreementSignModal(props: {
   onClose: () => void;
   onSigned: (signatureId: number) => void;
   notify: (t: "success" | "error", m: string) => void;
+  /** When provided and we get a sign_url, we call this and the parent redirects the user to Dropbox (same tab). */
+  onRedirectToDropbox?: (invitationCode: string, signatureId: number, signUrl: string) => void;
 }) {
-  const { open, invitationCode, guestEmail, guestFullName, onClose, onSigned, notify } = props;
+  const { open, invitationCode, guestEmail, guestFullName, onClose, onSigned, notify, onRedirectToDropbox } = props;
   const normalizedCode = invitationCode.trim().toUpperCase();
+
+  const notifyRef = useRef(notify);
+  const onSignedRef = useRef(onSigned);
+  notifyRef.current = notify;
+  onSignedRef.current = onSigned;
 
   const [doc, setDoc] = useState<AgreementDocResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [signing, setSigning] = useState(false);
   const [typedSignature, setTypedSignature] = useState(guestFullName || "");
+  const [ipAddress, setIpAddress] = useState("");
   const [acks, setAcks] = useState<Record<AckKey, boolean>>({
     read: false,
     temporary: false,
     vacate: false,
     electronic: false,
   });
+  const [signError, setSignError] = useState<string | null>(null);
+  /** After Sign with Dropbox: we wait for user to complete in Dropbox; modal stays open and we poll. */
+  const [pendingDropboxSignatureId, setPendingDropboxSignatureId] = useState<number | null>(null);
+  const [pendingSignUrl, setPendingSignUrl] = useState<string | null>(null);
 
   const allAcks = useMemo(() => Object.values(acks).every(Boolean), [acks]);
+
+  const signatureIdToPoll =
+    pendingDropboxSignatureId ??
+    (doc?.already_signed && doc?.signature_id != null && !doc?.has_dropbox_signed_pdf ? doc.signature_id ?? null : null);
+
+  useEffect(() => {
+    if (!open || signatureIdToPoll == null) return;
+    const id = signatureIdToPoll;
+    const t = setInterval(() => {
+      agreementsApi.getSignatureStatus(id).then((res) => {
+        if (res.completed) {
+          setPendingDropboxSignatureId(null);
+          setPendingSignUrl(null);
+          onSignedRef.current(id);
+          onClose();
+        }
+      }).catch(() => {});
+    }, 3000);
+    return () => clearInterval(t);
+  }, [open, signatureIdToPoll]);
 
   useEffect(() => {
     if (!open) return;
     setTypedSignature(guestFullName || "");
+    setIpAddress("");
     setAcks({ read: false, temporary: false, vacate: false, electronic: false });
+    setLoadError(null);
+    setSignError(null);
 
     if (!normalizedCode) return;
     setLoading(true);
+    setDoc(null);
+    setPendingDropboxSignatureId(null);
+    setPendingSignUrl(null);
     agreementsApi
-      .getInvitationAgreement(normalizedCode, guestEmail?.trim() || undefined)
+      .getInvitationAgreement(normalizedCode, guestEmail?.trim() || undefined, guestFullName?.trim() || undefined)
       .then((d) => {
         setDoc(d);
-        if (d?.already_signed && d?.signature_id != null) onSigned(d.signature_id);
+        setLoadError(null);
+        // Only treat as "signed" for accept when Dropbox PDF is available (stay confirmation)
+        if (d?.already_signed && d?.signature_id != null && d?.has_dropbox_signed_pdf) onSignedRef.current(d.signature_id);
       })
-      .catch((e) => notify("error", (e as Error)?.message || "Could not load agreement."))
+      .catch((e) => {
+        const msg = (e as Error)?.message ?? "";
+        const expiredOrInvalid = msg.toLowerCase().includes("expired") || msg.toLowerCase().includes("not found") || msg.toLowerCase().includes("not pending");
+        const userMsg = expiredOrInvalid ? "This invitation has expired or is invalid. You can’t use this link to sign." : msg || "Could not load agreement.";
+        setLoadError(userMsg);
+        setDoc(null);
+        notifyRef.current("error", userMsg);
+      })
       .finally(() => setLoading(false));
-  }, [open, normalizedCode, guestFullName, guestEmail, notify, onSigned]);
+  }, [open, normalizedCode, guestFullName, guestEmail]);
 
   const handleSign = async () => {
-    if (!normalizedCode) return notify("error", "Invitation code is missing.");
-    if (!guestEmail?.trim()) return notify("error", "Enter your email first.");
-    if (!typedSignature?.trim()) return notify("error", "Type your full name to sign.");
-    if (!doc) return notify("error", "Agreement is not loaded yet.");
-    if (!allAcks) return notify("error", "Please acknowledge all items to proceed.");
+    setSignError(null);
+    if (!normalizedCode) {
+      notify("error", "Invitation code is missing.");
+      return;
+    }
+    if (!guestEmail?.trim()) {
+      notify("error", "Enter your email first.");
+      return;
+    }
+    if (!typedSignature?.trim()) {
+      notify("error", "Type your full name to sign.");
+      return;
+    }
+    if (!doc) {
+      notify("error", "Agreement is not loaded yet.");
+      return;
+    }
+    if (!allAcks) {
+      const msg = "Please check all four acknowledgments above before signing.";
+      setSignError(msg);
+      notify("error", msg);
+      return;
+    }
 
     setSigning(true);
     try {
@@ -62,12 +170,23 @@ export default function AgreementSignModal(props: {
         typed_signature: typedSignature.trim(),
         acks,
         document_hash: doc.document_hash,
+        ip_address: ipAddress.trim() || undefined,
       });
-      notify("success", "Agreement sent to Dropbox Sign. Check your email to complete signing; you can download the signed PDF here after signing.");
-      onSigned(res.signature_id);
+      if (res.sign_url && onRedirectToDropbox) {
+        onRedirectToDropbox(normalizedCode, res.signature_id, res.sign_url);
+        return;
+      }
+      if (res.sign_url) {
+        window.open(res.sign_url, "_blank", "noopener");
+        notify("success", "Agreement sent to Dropbox Sign. Complete signing in the new tab. Your stay will confirm once you've signed.");
+      } else {
+        notify("success", "Agreement sent to Dropbox Sign. Check your email to complete signing.");
+      }
       onClose();
     } catch (e) {
-      notify("error", (e as Error)?.message || "Could not sign agreement.");
+      const msg = (e as Error)?.message || "Could not sign agreement.";
+      setSignError(msg);
+      notify("error", msg);
     } finally {
       setSigning(false);
     }
@@ -95,7 +214,13 @@ export default function AgreementSignModal(props: {
             ) : null}
             {doc && !loading && (
               <a
-                href={`${API_URL}/agreements/invitation/${encodeURIComponent(normalizedCode)}/pdf${guestEmail?.trim() ? `?guest_email=${encodeURIComponent(guestEmail.trim())}` : ""}`}
+                href={`${API_URL}/agreements/invitation/${encodeURIComponent(normalizedCode)}/pdf${(() => {
+                  const params = [
+                    guestEmail?.trim() && `guest_email=${encodeURIComponent(guestEmail.trim())}`,
+                    (guestFullName || typedSignature)?.trim() && `guest_full_name=${encodeURIComponent((guestFullName || typedSignature).trim())}`,
+                  ].filter(Boolean);
+                  return params.length ? `?${params.join("&")}` : "";
+                })()}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-sm font-semibold text-blue-600 hover:text-blue-700 underline underline-offset-2"
@@ -106,13 +231,13 @@ export default function AgreementSignModal(props: {
           </div>
         </div>
 
-        {doc?.already_signed && (
+        {doc?.already_signed && doc?.has_dropbox_signed_pdf && (
           <div className="rounded-xl bg-emerald-50 border border-emerald-200 px-4 py-3 flex flex-wrap items-center gap-3">
             <span className="text-emerald-700 font-bold">✓ Signed</span>
             <span className="text-slate-600 text-sm">
               {doc.signed_by} on {doc.signed_at ? new Date(doc.signed_at).toLocaleDateString() : ""}
             </span>
-            {doc.signature_id != null && doc.has_dropbox_signed_pdf && (
+            {doc.signature_id != null && (
               <a
                 href={`${API_URL}/agreements/signature/${doc.signature_id}/signed-pdf`}
                 target="_blank"
@@ -124,12 +249,20 @@ export default function AgreementSignModal(props: {
             )}
           </div>
         )}
+        {doc?.already_signed && !doc?.has_dropbox_signed_pdf && (
+          <div className="rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 flex flex-wrap items-center gap-3">
+            <span className="text-amber-800 font-bold">Awaiting your signature in Dropbox</span>
+            <span className="text-slate-600 text-sm">
+              Complete signing in the link we sent you by email, or use the button below when you open this from the same session.
+            </span>
+          </div>
+        )}
 
         <div className="grid lg:grid-cols-5 gap-6">
-          {/* Agreement content */}
+          {/* Agreement content – readable document area */}
           <div className="lg:col-span-3">
-            <div className="border border-slate-200 rounded-xl bg-white overflow-hidden shadow-sm">
-              <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-2">
+            <div className="border border-slate-200 rounded-xl bg-white overflow-hidden shadow-sm flex flex-col max-h-[70vh]">
+              <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-2 shrink-0">
                 <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Agreement</p>
                 {doc?.property_address ? (
                   <p className="text-xs text-slate-500 truncate max-w-[60%]" title={doc.property_address}>
@@ -137,8 +270,24 @@ export default function AgreementSignModal(props: {
                   </p>
                 ) : null}
               </div>
-              <div className="p-4 max-h-[50vh] overflow-y-auto whitespace-pre-wrap text-sm text-slate-700 leading-relaxed">
-                {loading ? "Loading agreement…" : (doc?.content || "Agreement unavailable.")}
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <div className="px-6 py-5 max-w-prose mx-auto">
+                  <div className="text-base text-slate-800 leading-loose tracking-normal selection:bg-blue-100">
+                    {loading
+                      ? "Loading agreement…"
+                      : loadError
+                        ? loadError
+                        : doc?.content
+                          ? renderAgreementContent(
+                              contentForDisplay(
+                                doc.content,
+                                guestFullName || typedSignature || "[Guest Name]",
+                                ipAddress
+                              )
+                            )
+                          : "Agreement unavailable."}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -159,7 +308,10 @@ export default function AgreementSignModal(props: {
                   <input
                     type="checkbox"
                     checked={acks[key]}
-                    onChange={(e) => setAcks((p) => ({ ...p, [key]: e.target.checked }))}
+                    onChange={(e) => {
+                      setAcks((p) => ({ ...p, [key]: e.target.checked }));
+                      setSignError(null);
+                    }}
                     className="mt-0.5 w-5 h-5 rounded border-slate-300 bg-white text-blue-600 focus:ring-blue-500 shrink-0"
                   />
                   <span className="text-sm text-slate-700">{label}</span>
@@ -169,8 +321,24 @@ export default function AgreementSignModal(props: {
 
             <div className="border border-slate-200 rounded-xl bg-white p-5 space-y-4 shadow-sm">
               <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Signature</p>
-              {doc?.already_signed ? (
+              {doc?.already_signed && doc?.has_dropbox_signed_pdf ? (
                 <p className="text-sm text-slate-600">This agreement is already signed. You can close this window.</p>
+              ) : signatureIdToPoll != null ? (
+                <div className="space-y-3">
+                  <p className="text-sm font-medium text-slate-700">
+                    Complete signing in Dropbox. This modal will close automatically when we detect your signature.
+                  </p>
+                  {pendingSignUrl && (
+                    <Button
+                      variant="outline"
+                      onClick={() => window.open(pendingSignUrl!, "_blank", "noopener")}
+                      className="w-full py-3"
+                    >
+                      Open Dropbox to sign
+                    </Button>
+                  )}
+                  <p className="text-xs text-slate-500">You can close this modal; your stay will stay in pending actions until signing is complete.</p>
+                </div>
               ) : (
                 <>
                   <Input
@@ -181,6 +349,18 @@ export default function AgreementSignModal(props: {
                     placeholder="First Last"
                     required
                   />
+                  <Input
+                    label="IP Address (optional)"
+                    name="ip_address"
+                    value={ipAddress}
+                    onChange={(e) => setIpAddress(e.target.value)}
+                    placeholder="e.g. 192.168.1.1"
+                  />
+                  {signError && (
+                    <p className="text-sm text-red-600 font-medium" role="alert">
+                      {signError}
+                    </p>
+                  )}
                   <p className="text-xs text-slate-500 uppercase tracking-wide font-semibold">
                     By signing, you agree to the terms of this agreement.
                   </p>
@@ -189,7 +369,12 @@ export default function AgreementSignModal(props: {
                       <Button variant="outline" onClick={onClose} className="flex-1 py-3">
                         Cancel
                       </Button>
-                      <Button onClick={handleSign} disabled={signing || loading} className="flex-1 py-3">
+                      <Button
+                        onClick={handleSign}
+                        disabled={signing || loading || !allAcks}
+                        className="flex-1 py-3"
+                        title={!allAcks ? "Check all acknowledgments above to enable signing" : undefined}
+                      >
                         {signing ? "Sending…" : "Sign with Dropbox Sign"}
                       </Button>
                     </div>
