@@ -66,6 +66,8 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
   const [renewEndDate, setRenewEndDate] = useState('');
   const [showLiveLinkQR, setShowLiveLinkQR] = useState(false);
   const [copyToast, setCopyToast] = useState<string | null>(null);
+  const [showVerifyQRModal, setShowVerifyQRModal] = useState(false);
+  const [verifyQRInviteId, setVerifyQRInviteId] = useState<string | null>(null);
   const [billing, setBilling] = useState<BillingResponse | null>(null);
   const id = Number(propertyId);
   const canInvite = billing?.can_invite !== false;
@@ -320,21 +322,31 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
           <div className="flex flex-wrap gap-3">
             <Button variant="outline" onClick={openEdit}>Edit Property</Button>
             {!isInactive && (
-              <Button
-                variant="primary"
-                onClick={() => {
-                  if (!canInvite) {
-                    notify('error', 'Pay your onboarding invoice before inviting guests. Go to Billing to view and pay.');
-                    navigate('dashboard/billing');
-                    return;
-                  }
-                  setShowInviteModal(true);
-                }}
-                disabled={!canInvite}
-                title={!canInvite ? 'Pay your onboarding invoice in Billing first' : undefined}
-              >
-                Invite Guest
-              </Button>
+              <span className={!canInvite ? 'group relative inline-block cursor-not-allowed' : undefined}>
+                {!canInvite && (
+                  <span
+                    className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-3 py-2 bg-gray-900 text-white text-xs rounded shadow-lg whitespace-nowrap opacity-0 pointer-events-none transition-opacity duration-150 z-[200] group-hover:opacity-100"
+                    role="tooltip"
+                  >
+                    Go to Billing and pay your onboarding fee to invite guests.
+                  </span>
+                )}
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    if (!canInvite) {
+                      notify('error', 'Pay your onboarding invoice before inviting guests. Go to Billing to view and pay.');
+                      navigate('dashboard/billing');
+                      return;
+                    }
+                    setShowInviteModal(true);
+                  }}
+                  disabled={!canInvite}
+                  className={!canInvite ? 'pointer-events-none' : undefined}
+                >
+                  Invite Guest
+                </Button>
+              </span>
             )}
             {isInactive ? (
               <Button
@@ -689,10 +701,13 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                           <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide border ${stateClass}`}>
                             {stateLabel}
                           </span>
+                          {stay.invitation_only && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">Pending sign-up</span>
+                          )}
                           {stay.invite_id && (
                             <span className="text-slate-500 text-sm font-mono">Invite ID: {stay.invite_id}</span>
                           )}
-                          {isActive && <span className="text-xs text-emerald-600 font-medium">Current stay</span>}
+                          {isActive && !stay.invitation_only && <span className="text-xs text-emerald-600 font-medium">Current stay</span>}
                         </div>
                         <dl className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
                           <div>
@@ -710,10 +725,15 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                           <div>
                             <dt className="text-slate-500">Status</dt>
                             <dd className="font-medium text-slate-800">
-                              {stay.cancelled_at ? 'Cancelled' : stay.checked_out_at ? 'Completed' : stay.revoked_at ? 'Revoked' : isOverstayed(stay.stay_end_date) ? 'Overstayed' : 'Active'}
+                              {stay.invitation_only ? 'Pending sign-up' : stay.cancelled_at ? 'Cancelled' : stay.checked_out_at ? 'Completed' : stay.revoked_at ? 'Revoked' : isOverstayed(stay.stay_end_date) ? 'Overstayed' : 'Active'}
                             </dd>
                           </div>
                         </dl>
+                        {stay.invite_id && (
+                          <div className="mt-3 pt-3 border-t border-slate-100">
+                            <Button variant="outline" className="text-sm" onClick={() => { setVerifyQRInviteId(stay.invite_id ?? null); setShowVerifyQRModal(true); }}>Verify with QR code</Button>
+                          </div>
+                        )}
                       </div>
                     );
                   })}
@@ -760,11 +780,16 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                         <td className="px-6 py-5 text-sm text-slate-600 font-mono">{stay.stay_start_date}</td>
                         <td className="px-6 py-5 text-sm text-slate-600 font-mono">{stay.stay_end_date}</td>
                         <td className="px-6 py-5">
-                          <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border ${overstay ? 'bg-red-50 text-red-600 border-red-200' : 'bg-green-50 text-green-600 border-green-200'}`}>
-                            {overstay ? 'Overstayed' : 'Active'}
+                          <span className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-widest border ${stay.invitation_only ? 'bg-amber-50 text-amber-600 border-amber-200' : overstay ? 'bg-red-50 text-red-600 border-red-200' : 'bg-green-50 text-green-600 border-green-200'}`}>
+                            {stay.invitation_only ? 'Pending sign-up' : overstay ? 'Overstayed' : 'Active'}
                           </span>
                         </td>
-                        <td className="px-6 py-5 text-right"><Button variant="ghost" className="text-xs">Revoke</Button></td>
+                        <td className="px-6 py-5 text-right flex justify-end gap-2">
+                          {stay.invite_id && (
+                            <Button variant="outline" className="text-xs" onClick={() => { setVerifyQRInviteId(stay.invite_id ?? null); setShowVerifyQRModal(true); }}>Verify QR</Button>
+                          )}
+                          {!stay.invitation_only && <Button variant="ghost" className="text-xs">Revoke</Button>}
+                        </td>
                       </tr>
                     );
                   })
@@ -1004,6 +1029,57 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                 </p>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Verify with QR code modal – opens /verify with token pre-filled */}
+      {showVerifyQRModal && verifyQRInviteId && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="max-w-sm w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200 relative">
+            <button type="button" onClick={() => { setShowVerifyQRModal(false); setVerifyQRInviteId(null); setCopyToast(null); }} className="absolute top-4 right-4 text-slate-400 hover:text-slate-700">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+            <h3 className="text-lg font-semibold text-slate-900 mb-1 text-center">Verify with QR code</h3>
+            <p className="text-slate-500 text-sm mb-4 text-center">Scan to open the Verify page with this stay&apos;s token pre-filled.</p>
+            <div className="flex justify-center mb-4">
+              <div className="bg-slate-50 p-4 rounded-xl">
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`)}`}
+                  alt="QR code for verify page"
+                  className="w-40 h-40 rounded-lg"
+                />
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <Button
+                type="button"
+                variant="primary"
+                className="w-full"
+                onClick={() => window.open(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`, '_blank', 'noopener,noreferrer')}
+              >
+                Open verify page
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={async () => {
+                  const url = `${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`;
+                  const ok = await copyToClipboard(url);
+                  setCopyToast(ok ? 'Verify link copied.' : 'Could not copy.');
+                  setTimeout(() => setCopyToast(null), 3000);
+                }}
+              >
+                Copy verify link
+              </Button>
+            </div>
+            {copyToast && copyToast.startsWith('Verify link') && (
+              <p className="text-sm text-center mt-2 text-emerald-600">{copyToast}</p>
+            )}
+            {copyToast && copyToast.startsWith('Could not') && (
+              <p className="text-sm text-center mt-2 text-amber-600">{copyToast}</p>
+            )}
           </div>
         </div>
       )}

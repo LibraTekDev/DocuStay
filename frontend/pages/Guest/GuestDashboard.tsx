@@ -103,6 +103,8 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
   const [agreementDownloading, setAgreementDownloading] = useState(false);
   const [showLiveLinkModal, setShowLiveLinkModal] = useState(false);
   const [liveLinkSlug, setLiveLinkSlug] = useState<string | null>(null);
+  const [showVerifyQRModal, setShowVerifyQRModal] = useState(false);
+  const [verifyQRInviteId, setVerifyQRInviteId] = useState<string | null>(null);
   const [copyToast, setCopyToast] = useState<string | null>(null);
   const [checkingInStay, setCheckingInStay] = useState<GuestStayView | null>(null);
 
@@ -656,6 +658,16 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                 Open live link
               </Button>
             )}
+            {stay.invite_id && (
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full h-11 rounded-lg font-medium"
+                onClick={() => { setVerifyQRInviteId(stay.invite_id ?? null); setShowVerifyQRModal(true); }}
+              >
+                Verify with QR code
+              </Button>
+            )}
             {!stay.checked_out_at && !stay.cancelled_at && stay.approved_stay_end_date >= today && stay.approved_stay_start_date <= today && !detailHasCheckedIn && (
               <button
                 type="button"
@@ -876,6 +888,58 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
             </div>
             {copyToast && (
               <p className={`text-sm text-center mt-2 ${copyToast.startsWith('Live link') ? 'text-emerald-600' : 'text-amber-600'}`}>
+                {copyToast}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Verify with QR code modal – opens /verify with token pre-filled */}
+      {showVerifyQRModal && verifyQRInviteId && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="max-w-sm w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200 relative">
+            <button type="button" onClick={() => { setShowVerifyQRModal(false); setVerifyQRInviteId(null); setCopyToast(null); }} className="absolute top-4 right-4 text-slate-400 hover:text-slate-700">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+            <h3 className="text-lg font-semibold text-slate-900 mb-1 text-center">Verify with QR code</h3>
+            <p className="text-slate-500 text-sm mb-4 text-center">Scan to open the Verify page with this stay&apos;s token pre-filled.</p>
+            <div className="flex justify-center mb-4">
+              <div className="bg-slate-50 p-4 rounded-xl">
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`)}`}
+                  alt="QR code for verify page"
+                  className="w-40 h-40 rounded-lg"
+                />
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <Button
+                type="button"
+                variant="primary"
+                className="w-full"
+                onClick={() => window.open(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`, '_blank', 'noopener,noreferrer')}
+              >
+                Open verify page
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={async (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const url = `${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`;
+                  const ok = await copyToClipboard(url);
+                  setCopyToast(ok ? 'Verify link copied.' : 'Could not copy.');
+                  setTimeout(() => setCopyToast(null), 3000);
+                }}
+              >
+                Copy verify link
+              </Button>
+            </div>
+            {copyToast && (
+              <p className={`text-sm text-center mt-2 ${copyToast.startsWith('Verify link') ? 'text-emerald-600' : 'text-amber-600'}`}>
                 {copyToast}
               </p>
             )}

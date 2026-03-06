@@ -1,9 +1,10 @@
-"""Public API (no auth): live property page by slug – evidence view."""
+"""Public API (no auth): live property page by slug – evidence view; verify portal."""
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.database import get_db
 from app.models.owner import Property, OwnerProfile
@@ -15,6 +16,7 @@ from app.models.invitation import Invitation
 from app.models.owner_poa_signature import OwnerPOASignature
 from app.services.agreements import agreement_content_to_pdf, poa_content_with_signature
 from app.services.dropbox_sign import get_signed_pdf
+from app.services.audit_log import create_log, CATEGORY_VERIFY_ATTEMPT, CATEGORY_FAILED_ATTEMPT
 from app.schemas.public import (
     LivePropertyPagePayload,
     LivePropertyInfo,
@@ -28,6 +30,8 @@ from app.schemas.public import (
     PortfolioPagePayload,
     PortfolioOwnerInfo,
     PortfolioPropertyItem,
+    VerifyRequest,
+    VerifyResponse,
 )
 
 router = APIRouter(prefix="/public", tags=["public"])
@@ -244,6 +248,309 @@ def get_live_property_page(slug: str, db: Session = Depends(get_db)):
         poa_signed_at=poa_signed_at,
         poa_signature_id=poa_signature_id,
         jurisdiction_wrap=jurisdiction_wrap,
+    )
+
+
+def _normalize_address(s: str) -> str:
+    """Collapse whitespace and lowercase for address comparison."""
+    if not s:
+        return ""
+    return " ".join(s.lower().strip().split())
+
+
+@router.post("/verify", response_model=VerifyResponse)
+def post_verify(
+    body: VerifyRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Public verify: check if token (Invitation ID) has an active authorization. Property address is optional;
+    when provided it must match the property associated with the token. No auth. Every attempt is logged.
+    """
+    now = datetime.now(timezone.utc)
+    token_id = (body.token_id or "").strip()
+    property_address = (body.property_address or "").strip() if body.property_address else ""
+    ip_address = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+
+    if not token_id:
+        create_log(
+            db,
+            CATEGORY_FAILED_ATTEMPT,
+            "Verify attempt – missing token",
+            "token_id empty",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"result": "invalid", "reason": "missing_input"},
+        )
+        db.commit()
+        return VerifyResponse(
+            valid=False,
+            reason="Token ID is required.",
+            generated_at=now,
+        )
+
+    # 1. Look up invitation by token_id (invitation_code), case-insensitive
+    inv = (
+        db.query(Invitation)
+        .filter(func.lower(Invitation.invitation_code) == token_id.lower())
+        .first()
+    )
+    if not inv:
+        create_log(
+            db,
+            CATEGORY_FAILED_ATTEMPT,
+            "Verify attempt – no match",
+            f"Token not found: {token_id[:20]}…",
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"result": "invalid", "reason": "token_not_found", "token_id_prefix": token_id[:32]},
+        )
+        db.commit()
+        return VerifyResponse(
+            valid=False,
+            reason="Token not found.",
+            generated_at=now,
+        )
+
+    # 2. Resolve property
+    prop = db.query(Property).filter(Property.id == inv.property_id, Property.deleted_at.is_(None)).first()
+    if not prop:
+        create_log(
+            db,
+            CATEGORY_FAILED_ATTEMPT,
+            "Verify attempt – property not found",
+            f"Property missing for invitation {inv.id}",
+            property_id=inv.property_id,
+            invitation_id=inv.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"result": "invalid", "reason": "property_not_found"},
+        )
+        db.commit()
+        return VerifyResponse(
+            valid=False,
+            reason="Property not found.",
+            generated_at=now,
+        )
+
+    # 3. Match address when provided (normalized)
+    prop_parts = [prop.street, prop.city, prop.state, (prop.zip_code or "").strip()]
+    prop_full = ", ".join(p for p in prop_parts if p)
+    if property_address:
+        norm_prop = _normalize_address(prop_full)
+        norm_submitted = _normalize_address(property_address)
+        if norm_prop != norm_submitted:
+            # Allow submitted to contain property address (e.g. extra lines) or vice versa
+            if norm_prop not in norm_submitted and norm_submitted not in norm_prop:
+                create_log(
+                    db,
+                    CATEGORY_FAILED_ATTEMPT,
+                    "Identity Conflict",
+                    "Address does not match property for this token.",
+                    property_id=prop.id,
+                    invitation_id=inv.id,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    meta={
+                        "result": "invalid",
+                        "reason": "address_mismatch",
+                        "token_id_prefix": token_id[:32],
+                    },
+                )
+                db.commit()
+                return VerifyResponse(
+                    valid=False,
+                    reason="Address does not match the property for this token.",
+                    generated_at=now,
+                )
+
+    # 4. Validity: invitation token_state BURNED, stay exists and active
+    token_state = getattr(inv, "token_state", None) or "STAGED"
+    if token_state != "BURNED":
+        create_log(
+            db,
+            CATEGORY_VERIFY_ATTEMPT,
+            "Verify attempt – token not active",
+            f"Invitation token_state={token_state}, expected BURNED",
+            property_id=prop.id,
+            invitation_id=inv.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"result": "invalid", "reason": "token_not_burned", "token_state": token_state},
+        )
+        db.commit()
+        return VerifyResponse(
+            valid=False,
+            reason="Authorization is not active for this token.",
+            generated_at=now,
+        )
+
+    stay = db.query(Stay).filter(Stay.invitation_id == inv.id).first()
+    today = date.today()
+    if not stay:
+        create_log(
+            db,
+            CATEGORY_VERIFY_ATTEMPT,
+            "Verify attempt – no stay",
+            "No stay linked to this invitation",
+            property_id=prop.id,
+            invitation_id=inv.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"result": "invalid", "reason": "no_stay"},
+        )
+        db.commit()
+        return VerifyResponse(
+            valid=False,
+            reason="No active authorization found.",
+            generated_at=now,
+        )
+    if getattr(stay, "revoked_at", None) is not None:
+        create_log(
+            db,
+            CATEGORY_VERIFY_ATTEMPT,
+            "Verify attempt – stay revoked",
+            "Stay has been revoked",
+            property_id=prop.id,
+            stay_id=stay.id,
+            invitation_id=inv.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"result": "invalid", "reason": "stay_revoked"},
+        )
+        db.commit()
+        return VerifyResponse(
+            valid=False,
+            reason="Authorization has been revoked.",
+            generated_at=now,
+        )
+    if getattr(stay, "checked_out_at", None) is not None:
+        create_log(
+            db,
+            CATEGORY_VERIFY_ATTEMPT,
+            "Verify attempt – guest checked out",
+            "Guest has checked out",
+            property_id=prop.id,
+            stay_id=stay.id,
+            invitation_id=inv.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"result": "invalid", "reason": "stay_checked_out"},
+        )
+        db.commit()
+        return VerifyResponse(
+            valid=False,
+            reason="Authorization ended (guest checked out).",
+            generated_at=now,
+        )
+    if getattr(stay, "cancelled_at", None) is not None:
+        create_log(
+            db,
+            CATEGORY_VERIFY_ATTEMPT,
+            "Verify attempt – stay cancelled",
+            "Stay was cancelled",
+            property_id=prop.id,
+            stay_id=stay.id,
+            invitation_id=inv.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"result": "invalid", "reason": "stay_cancelled"},
+        )
+        db.commit()
+        return VerifyResponse(
+            valid=False,
+            reason="Authorization was cancelled.",
+            generated_at=now,
+        )
+    if stay.stay_end_date < today:
+        create_log(
+            db,
+            CATEGORY_VERIFY_ATTEMPT,
+            "Verify attempt – stay ended",
+            "Stay end date has passed",
+            property_id=prop.id,
+            stay_id=stay.id,
+            invitation_id=inv.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            meta={"result": "invalid", "reason": "stay_ended"},
+        )
+        db.commit()
+        return VerifyResponse(
+            valid=False,
+            reason="Authorization has ended.",
+            generated_at=now,
+        )
+
+    # 5. Valid: log success and build response
+    create_log(
+        db,
+        CATEGORY_VERIFY_ATTEMPT,
+        "Verify attempt – valid",
+        "Token and address match; active authorization confirmed.",
+        property_id=prop.id,
+        stay_id=stay.id,
+        invitation_id=inv.id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        meta={"result": "valid", "reason": "valid"},
+    )
+    db.commit()
+
+    # Guest name
+    guest = db.query(User).filter(User.id == stay.guest_id).first()
+    guest_profile = db.query(GuestProfile).filter(GuestProfile.user_id == stay.guest_id).first()
+    guest_name = (guest_profile.full_legal_name if guest_profile else None) or (guest.full_name if guest else None) or (guest.email if guest else "Guest")
+
+    # POA signed date for authority reference
+    profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+    poa_signed_at = None
+    if profile and profile.user_id:
+        poa_sig = (
+            db.query(OwnerPOASignature)
+            .filter(OwnerPOASignature.used_by_user_id == profile.user_id)
+            .first()
+        )
+        if poa_sig:
+            poa_signed_at = poa_sig.signed_at
+
+    # Recent audit entries for this property (last 20)
+    log_rows = (
+        db.query(AuditLog)
+        .filter(AuditLog.property_id == prop.id)
+        .order_by(AuditLog.created_at.desc())
+        .limit(20)
+    ).all()
+    audit_entries = [
+        LiveLogEntry(
+            category=r.category or "—",
+            title=r.title or "—",
+            message=r.message or "—",
+            created_at=r.created_at if r.created_at is not None else now,
+        )
+        for r in log_rows
+    ]
+
+    # For verify display: if property is still "unknown" but we have an active stay, show "occupied"
+    # so the verifier sees that the unit has an active guest authorization (occupancy is set in DB when guest checks in).
+    occ = getattr(prop, "occupancy_status", None) or "unknown"
+    if (occ or "").lower() == "unknown":
+        occ = "occupied"
+
+    return VerifyResponse(
+        valid=True,
+        property_name=prop.name,
+        property_address=prop_full,
+        occupancy_status=occ,
+        token_state=token_state,
+        stay_end_date=stay.stay_end_date,
+        guest_name=guest_name,
+        poa_signed_at=poa_signed_at,
+        live_slug=prop.live_slug,
+        generated_at=now,
+        audit_entries=audit_entries,
     )
 
 

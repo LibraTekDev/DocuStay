@@ -357,7 +357,16 @@ def owner_stays(
     current_user: User = Depends(require_owner_onboarding_complete),
 ):
     """Owner view: guest name, stay dates, region, legal classification, max stay, risk, applicable laws."""
-    stays = db.query(Stay).filter(Stay.owner_id == current_user.id).all()
+    # Load stays by owner_id and also by invitation ownership (covers all stays for this owner's invitations)
+    stays_by_owner = db.query(Stay).filter(Stay.owner_id == current_user.id).all()
+    inv_ids = [r[0] for r in db.query(Invitation.id).filter(Invitation.owner_id == current_user.id).all()]
+    stays_by_inv = db.query(Stay).filter(Stay.invitation_id.in_(inv_ids)).all() if inv_ids else []
+    seen_ids = {s.id for s in stays_by_owner}
+    stays = list(stays_by_owner)
+    for s in stays_by_inv:
+        if s.id not in seen_ids:
+            seen_ids.add(s.id)
+            stays.append(s)
     out = []
     for s in stays:
         guest = db.query(User).filter(User.id == s.guest_id).first()
@@ -423,6 +432,7 @@ def owner_stays(
                 property_id=s.property_id,
                 invite_id=invite_id_val,
                 token_state=token_state_val,
+                invitation_only=False,
                 guest_name=guest_name,
                 property_name=property_name,
                 stay_start_date=s.stay_start_date,
@@ -444,6 +454,76 @@ def owner_stays(
                 occupancy_confirmation_response=conf_resp,
             )
         )
+
+    # Include BURNED and EXPIRED invitations that have no Stay so they show in Stays section (CSV tenants, or invites where Stay was never created)
+    invitation_ids_with_stay = {s.invitation_id for s in stays if getattr(s, "invitation_id", None) is not None}
+    q = db.query(Invitation).filter(
+        Invitation.owner_id == current_user.id,
+        Invitation.token_state.in_(["BURNED", "EXPIRED"]),
+    )
+    if invitation_ids_with_stay:
+        q = q.filter(~Invitation.id.in_(invitation_ids_with_stay))
+    invs_no_stay = q.all()
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    for inv in invs_no_stay:
+        prop = db.query(Property).filter(Property.id == inv.property_id).first()
+        if prop is None or getattr(prop, "deleted_at", None) is not None:
+            continue  # skip if property missing or soft-deleted
+        if profile is None or prop.owner_profile_id != profile.id:
+            continue  # ensure property belongs to this owner
+        property_name = (prop.name or "").strip() or (f"{getattr(prop, 'city', '')}, {getattr(prop, 'state', '')}".strip(", ")) or "Property"
+        region = (getattr(inv, "region_code", None) or "").strip() or (getattr(prop, "region_code", None) or "") or "US"
+        start = inv.stay_start_date
+        end = inv.stay_end_date
+        duration_days = (end - start).days if start and end else 0
+        rule = db.query(RegionRule).filter(RegionRule.region_code == region).first()
+        jle = resolve_jurisdiction(
+            db,
+            JLEInput(
+                region_code=region,
+                stay_duration_days=duration_days,
+                owner_occupied=True,
+                property_type=None,
+                guest_has_permanent_address=True,
+            ),
+        )
+        max_days = rule.max_stay_days if rule else 0
+        classification = (jle.legal_classification if jle else None) or (rule.stay_classification_label if rule else None) or StayClassification.guest
+        risk = (jle.risk_level if jle else None) or (rule.risk_level if rule else None) or RiskLevel.low
+        statutes = (jle.applicable_statutes if jle else []) or ([rule.statute_reference] if rule and rule.statute_reference else [])
+        token_state = (getattr(inv, "token_state", None) or "BURNED").upper()
+        is_expired = token_state == "EXPIRED"
+        # For EXPIRED (no Stay row), show as completed so past stays appear
+        checked_out_dt = datetime.combine(end, dt_time.min, tzinfo=timezone.utc) if is_expired and end else None
+        out.append(
+            OwnerStayView(
+                stay_id=-inv.id,
+                property_id=inv.property_id,
+                invite_id=inv.invitation_code,
+                token_state=token_state,
+                invitation_only=True,
+                guest_name=(inv.guest_name or "").strip() or "Tenant (pending sign-up)",
+                property_name=property_name,
+                stay_start_date=start,
+                stay_end_date=end,
+                region_code=region,
+                legal_classification=classification,
+                max_stay_allowed_days=max_days,
+                risk_indicator=risk,
+                applicable_laws=statutes,
+                revoked_at=None,
+                checked_in_at=None,
+                checked_out_at=checked_out_dt,
+                cancelled_at=None,
+                usat_token_released_at=None,
+                dead_mans_switch_enabled=bool(getattr(inv, "dead_mans_switch_enabled", 0)),
+                needs_occupancy_confirmation=False,
+                show_occupancy_confirmation_ui=False,
+                confirmation_deadline_at=None,
+                occupancy_confirmation_response=None,
+            )
+        )
+
     return out
 
 

@@ -132,6 +132,22 @@ export const LivePropertyPage: React.FC<{ slug: string }> = ({ slug }) => {
   const jurisdictionName = jurisdiction_wrap?.state_name ?? '—';
   const statuteLines = jurisdiction_wrap?.applicable_statutes?.map((s) => (s.plain_english ? `• ${s.citation}: ${s.plain_english}` : `• ${s.citation}`)) ?? [];
   const poaDateFormatted = poa_signed_at ? formatDate(poa_signed_at) : null;
+  const poaTimestampFormatted = poa_signed_at ? formatDateTime(poa_signed_at) : null;
+
+  // Condensed Audit Timeline (Part B): POA signed, property onboarded, status changes, token burn/expire/revoke
+  const oldestLog = logs.length > 0 ? logs[logs.length - 1] : null;
+  const propertyOnboardedAt = oldestLog ? formatDateTime(oldestLog.created_at) : null;
+  const statusChangeLogs = logs.filter(
+    (e) =>
+      e.category === 'status_change' ||
+      /status|vacant|occupancy|confirmed|vacated|check.?in|checkout/i.test(e.title || '') ||
+      /status|vacant|occupancy|confirmed|vacated/i.test(e.message || '')
+  );
+  const tokenEventLogs = logs.filter(
+    (e) =>
+      /invitation|invite|stay|token|burn|expire|revoke|signed|agreement|checkout|check.?in/i.test(e.category || '') ||
+      /invitation|invite|stay|token|burn|expire|revoke|signed|agreement|checkout|check.?in/i.test(e.title || '')
+  );
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50/70 via-white to-slate-100/60 print:bg-white print:min-h-0">
@@ -155,43 +171,55 @@ export const LivePropertyPage: React.FC<{ slug: string }> = ({ slug }) => {
           </button>
         </div>
 
-        {/* Hero: page title, address, status at a glance */}
+        {/* Top Section – Quick Decision Layer (rapid field clarity) */}
         <header className="bg-white rounded-2xl shadow-md border border-slate-200 overflow-hidden print:rounded print:shadow-none print:border border-l-4 border-l-indigo-500">
+          <div className="px-6 py-3.5 sm:px-8 bg-gradient-to-r from-indigo-50 to-slate-50 border-b border-indigo-100/80 print:bg-slate-50">
+            <h2 className="text-sm font-bold uppercase tracking-wider text-indigo-800">Quick Decision Layer</h2>
+          </div>
           <div className="p-6 sm:p-8">
-            <p className="text-xs font-semibold uppercase tracking-wider text-indigo-600 mb-1">Live property record</p>
-            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 mb-4">{address || '—'}</h1>
-            <div className="flex flex-wrap gap-2 mb-4">
-              <span
-                className={`inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-semibold uppercase ${
-                  statusLabel === 'OCCUPIED'
-                    ? 'bg-emerald-100 text-emerald-800'
-                    : statusLabel === 'VACANT'
-                      ? 'bg-sky-100 text-sky-800'
-                      : 'bg-slate-100 text-slate-700'
-                }`}
-              >
-                {statusLabel}
-              </span>
-              <span
-                className={`inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-semibold uppercase ${
-                  authLabel === 'ACTIVE'
-                    ? 'bg-emerald-100 text-emerald-800'
-                    : authLabel === 'REVOKED'
-                      ? 'bg-red-100 text-red-800'
-                      : authLabel === 'EXPIRED'
-                        ? 'bg-amber-100 text-amber-800'
-                        : 'bg-slate-100 text-slate-700'
-                }`}
-              >
-                {authLabel}
-              </span>
-              <span className="inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-semibold uppercase bg-slate-100 text-slate-700">
-                {tokenLabel}
-              </span>
-            </div>
-            <p className="text-sm text-slate-600">
-              <span className="font-medium text-slate-700">Verified owner</span> · {owner.full_name ?? '—'}
+            <p className="text-xs font-semibold uppercase tracking-wider text-indigo-600 mb-1">Property address</p>
+            <h1 className="text-xl sm:text-2xl font-bold text-slate-900 mb-3">{address || '—'}</h1>
+            <p className="text-sm text-slate-600 mb-4">
+              <span className="font-medium text-slate-700">Verified owner entity</span> · {owner.full_name ?? '—'}
             </p>
+            <div className="flex flex-wrap gap-4 sm:gap-6 mb-4">
+              <div>
+                <p className="text-xs font-medium text-slate-500 mb-0.5">Current property status</p>
+                <span
+                  className={`inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-semibold uppercase ${
+                    statusLabel === 'OCCUPIED'
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : statusLabel === 'VACANT'
+                        ? 'bg-sky-100 text-sky-800'
+                        : 'bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  {statusLabel}
+                </span>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-slate-500 mb-0.5">Authorization state</p>
+                <span
+                  className={`inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-semibold uppercase ${
+                    authLabel === 'ACTIVE'
+                      ? 'bg-emerald-100 text-emerald-800'
+                      : authLabel === 'REVOKED'
+                        ? 'bg-red-100 text-red-800'
+                        : authLabel === 'EXPIRED'
+                          ? 'bg-amber-100 text-amber-800'
+                          : 'bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  {authLabel}
+                </span>
+              </div>
+              <div>
+                <p className="text-xs font-medium text-slate-500 mb-0.5">Token</p>
+                <span className="inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-semibold uppercase bg-slate-100 text-slate-700">
+                  {tokenLabel}
+                </span>
+              </div>
+            </div>
             {has_current_guest && current_guest && (
               <div className="mt-4 pt-4 border-t border-slate-200 bg-emerald-50/60 -mx-6 sm:-mx-8 px-6 sm:px-8 py-4 rounded-lg border border-emerald-100">
                 <p className="text-xs font-semibold uppercase tracking-wider text-emerald-700 mb-0.5">Current guest</p>
@@ -265,6 +293,31 @@ export const LivePropertyPage: React.FC<{ slug: string }> = ({ slug }) => {
                 )}
               </div>
             )}
+          </div>
+        </section>
+
+        {/* Third Section – Condensed Audit Timeline (Part B) */}
+        <section className="bg-white rounded-2xl shadow-md border border-slate-200 overflow-hidden print:rounded print:shadow-none print:border">
+          <div className="px-6 py-3.5 bg-gradient-to-r from-violet-50 to-slate-50 border-b border-violet-100/80 print:bg-slate-50">
+            <h2 className="text-sm font-bold uppercase tracking-wider text-violet-800">Condensed Audit Timeline</h2>
+          </div>
+          <div className="p-6 sm:p-8">
+            <ul className="space-y-2 text-sm text-slate-700">
+              <li><span className="font-medium text-slate-900">POA signed</span> – {poaTimestampFormatted ?? '—'}</li>
+              <li><span className="font-medium text-slate-900">Property onboarded</span> – {propertyOnboardedAt ?? '—'}</li>
+              <li>
+                <span className="font-medium text-slate-900">Status changes</span> –
+                {statusChangeLogs.length > 0
+                  ? ` ${statusChangeLogs.slice(0, 5).map((e) => formatDateTime(e.created_at)).join(', ')}${statusChangeLogs.length > 5 ? ' …' : ''}`
+                  : ' —'}
+              </li>
+              <li>
+                <span className="font-medium text-slate-900">Token burn / expire / revoke</span> –
+                {tokenEventLogs.length > 0
+                  ? ` ${tokenEventLogs.slice(0, 5).map((e) => formatDateTime(e.created_at)).join(', ')}${tokenEventLogs.length > 5 ? ' …' : ''}`
+                  : ' —'}
+              </li>
+            </ul>
           </div>
         </section>
 

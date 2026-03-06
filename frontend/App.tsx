@@ -26,6 +26,7 @@ import ProviderAuthorityLetter from './pages/Provider/ProviderAuthorityLetter';
 import Landing from './pages/Landing';
 import { LivePropertyPage } from './pages/LivePropertyPage';
 import { PortfolioPage } from './pages/PortfolioPage';
+import { VerifyPage } from './pages/Verify/VerifyPage';
 import { AdminDashboard } from './pages/Admin/AdminDashboard';
 import AdminLogin from './pages/Admin/AdminLogin';
 
@@ -216,6 +217,7 @@ const App: React.FC = () => {
             </div>
             
             <div className="flex items-center gap-6">
+              <button onClick={() => navigate('verify')} className="text-gray-600 hover:text-gray-900 font-medium text-sm transition-colors">Verify</button>
               {state.user ? (
                 <>
                   <NotificationCenter />
@@ -360,6 +362,9 @@ const App: React.FC = () => {
         {view.startsWith('portfolio/') && (
           <PortfolioPage slug={view.replace(/^portfolio\/?/, '').split('/')[0] || ''} />
         )}
+
+        {/* Public verify portal (no auth; token + address verification, all attempts logged) */}
+        {view === 'verify' && <VerifyPage />}
 
         {/* Provider authority letter (public link from email) */}
         {view.startsWith('provider/authority/') && (

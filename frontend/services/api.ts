@@ -392,6 +392,8 @@ export interface OwnerStayView {
   invite_id?: string | null;
   /** Token state: STAGED | BURNED | EXPIRED | REVOKED */
   token_state?: string | null;
+  /** True when from CSV BURNED invite with no Stay (tenant has not signed up yet). */
+  invitation_only?: boolean;
   guest_name: string;
   property_name: string;
   stay_start_date: string;
@@ -616,6 +618,30 @@ export interface PortfolioOwnerInfo {
 export interface PortfolioPagePayload {
   owner: PortfolioOwnerInfo;
   properties: PortfolioPropertyItem[];
+}
+
+/** Request for POST /public/verify (token = Invitation ID; property address optional). */
+export interface VerifyRequest {
+  token_id: string;
+  property_address?: string | null;
+  name?: string | null;
+  phone?: string | null;
+}
+
+/** Response from POST /public/verify. Read-only, live state. */
+export interface VerifyResponse {
+  valid: boolean;
+  reason?: string | null;
+  property_name?: string | null;
+  property_address?: string | null;
+  occupancy_status?: string | null;
+  token_state?: string | null;
+  stay_end_date?: string | null;
+  guest_name?: string | null;
+  poa_signed_at?: string | null;
+  live_slug?: string | null;
+  generated_at?: string | null;
+  audit_entries: LiveLogEntry[];
 }
 
 export interface BillingResponse {
@@ -854,6 +880,21 @@ export const publicApi = {
     });
     if (res.status === 404) throw new Error("Portfolio not found.");
     if (!res.ok) throw new Error(await res.text().catch(() => "Failed to load."));
+    return res.json();
+  },
+  /** Public verify: check token (Invitation ID) + property address for active authorization. No auth; every attempt logged. */
+  verify: async (body: VerifyRequest): Promise<VerifyResponse> => {
+    const res = await fetch(`${API_URL}/public/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        token_id: (body.token_id ?? "").trim(),
+        property_address: body.property_address != null ? String(body.property_address).trim() || null : null,
+        name: body.name != null ? String(body.name).trim() || null : null,
+        phone: body.phone != null ? String(body.phone).trim() || null : null,
+      }),
+    });
+    if (!res.ok) throw new Error(await res.text().catch(() => "Verification failed."));
     return res.json();
   },
 };

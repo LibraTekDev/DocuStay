@@ -85,6 +85,9 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
   const [billingLoading, setBillingLoading] = useState(false);
   const [paymentReturnMessage, setPaymentReturnMessage] = useState<string | null>(null);
   const [showVoidInvoiceDialog, setShowVoidInvoiceDialog] = useState(false);
+  const [showVerifyQRModal, setShowVerifyQRModal] = useState(false);
+  const [verifyQRInviteId, setVerifyQRInviteId] = useState<string | null>(null);
+  const [verifyQRCopyToast, setVerifyQRCopyToast] = useState<string | null>(null);
 
   const setLoadingWrapper = (x: boolean) => { setLoadingState(x); setLoading(x); };
 
@@ -326,10 +329,20 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             </div>
             <div className="flex gap-4 flex-wrap items-center">
               {activeTab !== 'properties' && (
-                <Button variant="outline" onClick={openInviteModalOrNotify} className="px-6 flex items-center gap-2" disabled={!canInvite} title={!canInvite ? 'Pay your onboarding invoice in Billing first' : undefined}>
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
-                  Invite Guest
-                </Button>
+                <span className={!canInvite ? 'group relative inline-block cursor-not-allowed' : undefined}>
+                  {!canInvite && (
+                    <span
+                      className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-3 py-2 bg-gray-900 text-white text-xs rounded shadow-lg whitespace-nowrap opacity-0 pointer-events-none transition-opacity duration-150 z-[200] group-hover:opacity-100"
+                      role="tooltip"
+                    >
+                      Go to Billing and pay your onboarding fee to invite guests.
+                    </span>
+                  )}
+                  <Button variant="outline" onClick={openInviteModalOrNotify} className={`px-6 flex items-center gap-2${!canInvite ? ' pointer-events-none' : ''}`} disabled={!canInvite}>
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                    Invite Guest
+                  </Button>
+                </span>
               )}
               {activeTab === 'properties' && (
                 <div className="flex items-center gap-1.5">
@@ -479,13 +492,18 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                             </td>
                             <td className="px-6 py-5">
                               <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest ${
-                                completed ? 'bg-slate-100 text-slate-600 border border-slate-200' : cancelled ? 'bg-slate-100 text-slate-500 border border-slate-200' : revoked ? 'bg-amber-50 text-amber-700 border border-amber-500/20' : overstay ? 'bg-red-50 text-red-600 border border-red-500/20' : 'bg-green-50 text-green-700 border border-green-200'
+                                stay.invitation_only ? 'bg-amber-50 text-amber-700 border border-amber-200' : completed ? 'bg-slate-100 text-slate-600 border border-slate-200' : cancelled ? 'bg-slate-100 text-slate-500 border border-slate-200' : revoked ? 'bg-amber-50 text-amber-700 border border-amber-500/20' : overstay ? 'bg-red-50 text-red-600 border border-red-500/20' : 'bg-green-50 text-green-700 border border-green-200'
                               }`}>
-                                {completed ? 'Completed' : cancelled ? 'Cancelled' : revoked ? 'Revoked' : overstay ? 'Overstayed' : 'Active'}
+                                {stay.invitation_only ? 'Pending sign-up' : completed ? 'Completed' : cancelled ? 'Cancelled' : revoked ? 'Revoked' : overstay ? 'Overstayed' : 'Active'}
                               </span>
                             </td>
                             <td className="px-6 py-5 text-right space-x-2">
-                              {completed || cancelled ? (
+                              {stay.invite_id && (
+                                <Button variant="outline" onClick={() => { setVerifyQRInviteId(stay.invite_id ?? null); setShowVerifyQRModal(true); }} className="text-xs py-2">Verify QR</Button>
+                              )}
+                              {stay.invitation_only ? (
+                                <span className="text-xs text-slate-500"></span>
+                              ) : completed || cancelled ? (
                                 <span className="text-xs text-slate-500">—</span>
                               ) : revoked ? (
                                 <span className="text-xs text-slate-500">Revoked</span>
@@ -507,7 +525,17 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             {stays.length === 0 && invitations.filter((i) => i.status === 'pending').length === 0 && (
               <Card className="p-12 text-center">
                 <p className="text-slate-600 mb-6">No guests or pending invites yet. Invite someone to get started.</p>
-                <Button variant="primary" onClick={openInviteModalOrNotify} disabled={!canInvite} title={!canInvite ? 'Pay your onboarding invoice in Billing first' : undefined}>Invite Guest</Button>
+                <span className={!canInvite ? 'group relative inline-block cursor-not-allowed' : undefined}>
+                  {!canInvite && (
+                    <span
+                      className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-3 py-2 bg-gray-900 text-white text-xs rounded shadow-lg whitespace-nowrap opacity-0 pointer-events-none transition-opacity duration-150 z-[200] group-hover:opacity-100"
+                      role="tooltip"
+                    >
+                      Go to Billing and pay your onboarding fee to invite guests.
+                    </span>
+                  )}
+                  <Button variant="primary" onClick={openInviteModalOrNotify} className={!canInvite ? 'pointer-events-none' : undefined} disabled={!canInvite}>Invite Guest</Button>
+                </span>
               </Card>
             )}
           </div>
@@ -564,6 +592,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                           </td>
                           <td className="px-6 py-5">
                             <div className="flex items-center gap-2">
+                              <Button variant="outline" size="sm" onClick={() => { setVerifyQRInviteId(inv.invitation_code); setShowVerifyQRModal(true); }}>Verify QR</Button>
                               <button
                                 type="button"
                                 onClick={async () => {
@@ -697,9 +726,12 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                               </span>
                             </td>
                             <td className="px-6 py-5">
-                              {(inv.status === 'ongoing' || inv.status === 'accepted') && (
-                                <Button variant="outline" size="sm" onClick={async () => { try { await dashboardApi.cancelInvitation(inv.id); notify('success', 'Invitation cancelled.'); loadData(); } catch (e) { notify('error', (e as Error)?.message ?? 'Failed to cancel.'); } }}>Cancel invite</Button>
-                              )}
+                              <div className="flex items-center gap-2">
+                                <Button variant="outline" size="sm" onClick={() => { setVerifyQRInviteId(inv.invitation_code); setShowVerifyQRModal(true); }}>Verify QR</Button>
+                                {(inv.status === 'ongoing' || inv.status === 'accepted') && (
+                                  <Button variant="outline" size="sm" onClick={async () => { try { await dashboardApi.cancelInvitation(inv.id); notify('success', 'Invitation cancelled.'); loadData(); } catch (e) { notify('error', (e as Error)?.message ?? 'Failed to cancel.'); } }}>Cancel invite</Button>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         );
@@ -1713,6 +1745,56 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             </Card>
           </div>
         </>
+      )}
+
+      {/* Verify with QR code modal – opens /verify with token pre-filled */}
+      {showVerifyQRModal && verifyQRInviteId && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="max-w-sm w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200 relative">
+            <button type="button" onClick={() => { setShowVerifyQRModal(false); setVerifyQRInviteId(null); setVerifyQRCopyToast(null); }} className="absolute top-4 right-4 text-slate-400 hover:text-slate-700">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+            <h3 className="text-lg font-semibold text-slate-900 mb-1 text-center">Verify with QR code</h3>
+            <p className="text-slate-500 text-sm mb-4 text-center">Scan to open the Verify page with this invite&apos;s token pre-filled.</p>
+            <div className="flex justify-center mb-4">
+              <div className="bg-slate-50 p-4 rounded-xl">
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(`${typeof window !== 'undefined' ? window.location.origin : ''}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`)}`}
+                  alt="QR code for verify page"
+                  className="w-40 h-40 rounded-lg"
+                />
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <Button
+                type="button"
+                variant="primary"
+                className="w-full"
+                onClick={() => window.open(`${typeof window !== 'undefined' ? window.location.origin : ''}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`, '_blank', 'noopener,noreferrer')}
+              >
+                Open verify page
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={async () => {
+                  const url = `${typeof window !== 'undefined' ? window.location.origin : ''}/#verify?token=${encodeURIComponent(verifyQRInviteId)}`;
+                  const ok = await copyToClipboard(url);
+                  setVerifyQRCopyToast(ok ? 'Verify link copied.' : 'Could not copy.');
+                  setTimeout(() => setVerifyQRCopyToast(null), 3000);
+                }}
+              >
+                Copy verify link
+              </Button>
+            </div>
+            {verifyQRCopyToast && (
+              <p className={`text-sm text-center mt-2 ${verifyQRCopyToast.startsWith('Verify link') ? 'text-emerald-600' : 'text-amber-600'}`}>
+                {verifyQRCopyToast}
+              </p>
+            )}
+          </div>
+        </div>
       )}
 
       <InviteGuestModal

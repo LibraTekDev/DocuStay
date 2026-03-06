@@ -91,11 +91,19 @@ Jurisdiction and legal content are stored in the database as the **source of tru
 
 ---
 
-## 4. Stripe Identity Verification (Owner Onboarding)
+## 4. Owner Signup and Stripe Identity Verification
 
-### Who and when
+### Owner signup flow (product level)
+1. **Register:** Owner signs up with email, password, and any required profile fields. The account is created in a **pending** state until onboarding is complete.
+2. **Verify email:** The owner must verify their email (link or code sent to the email address). Until verified, they cannot proceed to the next steps.
+3. **Identity verification (Stripe Identity):** After email verification, the owner must complete **identity verification** before signing the Master POA or adding properties. See below.
+4. **Sign Master POA:** Once identity is verified, the owner is shown the Master POA and must sign it to complete onboarding. The signature is stored and linked to the owner.
+5. **Onboarding fee (first properties):** When the owner adds their first property or properties (single add or CSV bulk upload), the system creates the **onboarding invoice** (see §7). The owner must pay this invoice (or have a payment method charged) before they can **invite guests**. Until the onboarding invoice is paid, the "Invite Guest" action is disabled (e.g. with a tooltip directing them to Billing).
+6. **Full access:** After POA is signed and (when an onboarding fee was charged) the onboarding invoice is paid, the owner has full dashboard access: add or edit properties, create invitations, view stays and audit logs, manage billing.
+
+### Stripe Identity Verification (who and when)
 - **Who:** Owners (and authorized agents), not guests.
-- **When:** During **pending owner** signup, after email verification and before the owner can sign the Master POA and add properties. The flow is: sign up → verify email → **identity verification** → sign POA → complete signup → dashboard.
+- **When:** During **pending owner** signup, after email verification and before the owner can sign the Master POA and add properties.
 
 ### What happens
 - The system creates a **Stripe Identity Verification Session** (document type: government ID + optional selfie/liveness as configured).
@@ -266,6 +274,13 @@ No manual override: all quantity and proration behavior is driven by actual unit
 ### Use
 - The live link is the **property-level authority link** that owners/agents can share or post. The QR code is a convenient way to open that same link (e.g. at the property).
 
+### Verify portal
+- A **public, no-login** **Verify** page (`/#verify`) lets anyone check whether a **token (Invitation ID)** has an **active authorization** (guest stay) right now. The page is linked from the main app navigation (e.g. "Verify") so verifiers (e.g. utility providers, partners) can reach it without an account.
+- **Input:** Required: **Token ID** (the invitation code, e.g. INV-XXXX). Optional: property address (if provided, must match the property for this token), name and phone—submitted and logged only; not used for validity.
+- **Validity:** The token is the **Invitation ID**. A result is **valid** only if: the invitation exists, its token_state is **BURNED**, a linked stay exists and is active (not revoked, not checked out, not cancelled), and the stay end date has not passed. If a property address is submitted, it must match the property for this token.
+- Every verify attempt is **logged** in the audit log (valid or invalid). Failed or mismatched attempts (e.g. wrong address, token not found, authorization ended) are recorded with a title such as **Identity Conflict** or **Verify attempt – no match** . No owner notification or escalation is triggered by verify attempts.
+- **Valid result:** The response shows a verified authority summary: property name, address, occupancy status (or "occupied" when there is an active authorization even if the property record has not yet been updated), authorization state, guest name when active, Record ID, timestamp, and a **live link for re-verification**. The verifier can open the **full evidence page** (`/#live/{live_slug}`) from the result. The page is read-only and printable.
+- **Invalid result:** The response shows “No active authorization found” (or similar), timestamp, and a short reason (e.g. Token not found, Address does not match, Authorization ended). Internal details are not exposed.
 ---
 
 ## 10. Owner Portfolio View
@@ -315,7 +330,7 @@ No manual override: all quantity and proration behavior is driven by actual unit
 - **Address:** Required; Unit No is appended to address if provided.
 - **Occupied:**
   - **NO:** Property occupancy status = **VACANT**. USAT token state = **STAGED**. No stay or invitation created for that row.
-  - **YES:** Property occupancy status = **OCCUPIED**. USAT token state = **RELEASED**. If tenant name and lease start/end are provided, the system may create or update an **invitation** (and link a stay) for that tenant and those dates; the invitation can be created in a BURNED state so the “tenant” is already recorded.
+  - **YES:** Property occupancy status = **OCCUPIED**. USAT token state = **RELEASED**. The system creates an **invitation** with token_state **BURNED** for the tenant name and lease start/end dates. No **Stay** or guest account exists until the tenant uses the invite link to sign up and sign the agreement. Until then, that invitation appears in the **Invitations** list and also in the **Stays** section of the property (and in the owner's stays list) as a documented occupancy, shown as **Pending sign-up**. Dead Man's Switch is enabled for the resulting stay once the tenant signs; the owner can cancel the invitation from the Invitations tab if needed.
 - **Shield Mode:** If YES, the property is created or updated with Shield on (independent of Occupied). Shield can also be toggled anytime in the dashboard.
 - **Tax ID / APN:** Stored when provided.
 
@@ -417,7 +432,7 @@ Each invitation has **status** and **token_state**. The invitation code (invite 
 | Value | Meaning | When it’s set |
 |-------|--------|----------------|
 | **STAGED** | Invite created; link can be used to sign and accept. | Owner creates invitation (manual flow). |
-| **BURNED** | Guest signed agreement and accepted; stay created. One-time use consumed. | Guest accepts (signup-with-invite or accept-invite with valid signature). Also when owner confirms “Lease Renewed” (stays BURNED). |
+| **BURNED** | Guest signed agreement and accepted; stay created. One-time use consumed. Or (CSV) invitation created for documented tenant who has not yet signed up. | Guest accepts (signup-with-invite or accept-invite with valid signature). Also when owner confirms “Lease Renewed” (stays BURNED). **CSV bulk upload:** When Occupied=YES with tenant name and dates, the system creates an invitation in BURNED state so the tenant is documented; no Stay or guest account until the tenant uses the invite link. |
 | **EXPIRED** | Stay ended normally (checkout or owner confirmed vacated). | Owner confirms “Unit Vacated”; or guest checks out (guest-end stay). |
 | **REVOKED** | Invite or stay cancelled/revoked. | Owner cancels invitation; or owner revokes stay (Kill Switch); or guest cancels future stay. |
 
@@ -559,7 +574,8 @@ The **Guest Acknowledgment** document is the agreement the guest must sign to ac
 | **Onboarding fee** | First property add (single or bulk); tier by total units (e.g. 1–5 $299, 6–20 $49/unit, …); one-time invoice; idempotent. |
 | **Subscription** | Created after onboarding invoice paid; $1/unit + $10/Shield unit; quantities synced on property/Shield changes; Stripe prorates. |
 | **Live link / QR** | Per-property slug → public page with jurisdiction wrap and evidence; QR encodes same URL. |
-| **CSV upload** | Required: Address, City, State, Zip, Occupied; if Occupied=YES: Tenant, Lease Start/End. Optional: Unit No, Shield, Tax ID, APN. Creates/updates properties; billing as for single add. |
+| **Verify portal** | Public no-login page (nav "Verify"). Token = Invitation ID; valid if BURNED + active stay; optional address match. All attempts logged. Valid result: authority summary, live link; invalid: reason only. See §9. |
+| **CSV upload** | Required: Address, City, State, Zip, Occupied; if Occupied=YES: Tenant, Lease Start/End. Creates/updates properties; for Occupied=YES creates BURNED invitation (no Stay until tenant signs up); invitation appears in Invitations and Stays as "Pending sign-up." Billing as for single add. See §11. |
 | **Property edit** | Owner can update name, address, city, state, zip, region, owner_occupied, property_type, bedrooms, Shield, vacant_monitoring_enabled (vacant only), tax_id, apn. |
 | **USAT token** | Per property; STAGED vs RELEASED; released when occupied (e.g. bulk YES); revoked on vacated/checkout/removal/DMS. |
 | **Occupancy confirm** | Owner chooses Vacated / Renewed / Holdover after lease end; no response → DMS runs → UNCONFIRMED. |

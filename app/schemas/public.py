@@ -123,3 +123,30 @@ class LivePropertyPagePayload(BaseModel):
     poa_signature_id: int | None = None  # for View POA link
     # Jurisdictional wrap: applicable law for this property (by zip)
     jurisdiction_wrap: JurisdictionWrap | None = None
+
+
+# --- Verify portal (token = Invitation ID, no auth) ---
+
+
+class VerifyRequest(BaseModel):
+    """Request for POST /public/verify. Token ID = invitation code (Invite ID)."""
+    token_id: str  # Invitation code (e.g. INV-XXXX)
+    property_address: str | None = None  # Optional; when provided, must match property for this token
+    name: str | None = None  # Optional; logged only
+    phone: str | None = None  # Optional; logged only
+
+
+class VerifyResponse(BaseModel):
+    """Response for POST /public/verify. Read-only, live state."""
+    valid: bool
+    reason: str | None = None  # Short reason when invalid
+    property_name: str | None = None
+    property_address: str | None = None
+    occupancy_status: str | None = None
+    token_state: str | None = None
+    stay_end_date: date | None = None
+    guest_name: str | None = None
+    poa_signed_at: datetime | None = None
+    live_slug: str | None = None
+    generated_at: datetime | None = None
+    audit_entries: list[LiveLogEntry] = []

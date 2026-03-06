@@ -15,6 +15,7 @@ CATEGORY_FAILED_ATTEMPT = "failed_attempt"
 CATEGORY_SHIELD_MODE = "shield_mode"
 CATEGORY_DEAD_MANS_SWITCH = "dead_mans_switch"
 CATEGORY_BILLING = "billing"
+CATEGORY_VERIFY_ATTEMPT = "verify_attempt"
 
 # Column limits (match model)
 _CATEGORY_LEN = 32

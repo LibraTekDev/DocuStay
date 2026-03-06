@@ -38,10 +38,11 @@ class GuestPendingInviteView(BaseModel):
 
 class OwnerStayView(BaseModel):
     """Owner view: guest name, dates, region, classification, max stay, risk, applicable laws."""
-    stay_id: int
+    stay_id: int  # Real stay PK, or negative invitation id for invitation_only rows (CSV BURNED with no stay)
     property_id: int
     invite_id: str | None = None  # Invitation code (Invite ID) for this stay
     token_state: str | None = None  # STAGED | BURNED | EXPIRED | REVOKED (from linked invitation)
+    invitation_only: bool = False  # True when from CSV BURNED invite with no Stay (tenant has not signed up yet)
     guest_name: str
     property_name: str
     stay_start_date: date
