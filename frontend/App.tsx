@@ -5,6 +5,8 @@ import { Card, Button, LoadingOverlay, ErrorModal } from './components/UI';
 import { authApi, setToken, toUserSession, type TokenResponse } from './services/api';
 import Login from './pages/Auth/Login';
 import RegisterOwner from './pages/Auth/RegisterOwner';
+import RegisterManager from './pages/Auth/RegisterManager';
+import RegisterManagerLanding from './pages/Auth/RegisterManagerLanding';
 import VerifyContact from './pages/Auth/VerifyContact';
 import ForgotPassword from './pages/Auth/ForgotPassword';
 import ResetPassword from './pages/Auth/ResetPassword';
@@ -18,6 +20,7 @@ import Settings from './pages/Settings/Settings';
 import HelpCenter from './pages/Support/HelpCenter';
 import GuestSignup from './pages/Guest/GuestSignup';
 import GuestLogin from './pages/Guest/GuestLogin';
+import InviteLanding from './pages/Guest/InviteLanding';
 import OnboardingIdentity from './pages/Onboarding/OnboardingIdentity';
 import OnboardingIdentityComplete from './pages/Onboarding/OnboardingIdentityComplete';
 import OnboardingPOA from './pages/Onboarding/OnboardingPOA';
@@ -28,6 +31,26 @@ import { PortfolioPage } from './pages/PortfolioPage';
 import { VerifyPage } from './pages/Verify/VerifyPage';
 import { AdminDashboard } from './pages/Admin/AdminDashboard';
 import AdminLogin from './pages/Admin/AdminLogin';
+import ManagerDashboard from './pages/Manager/ManagerDashboard';
+import ManagerPropertyDetail from './pages/Manager/ManagerPropertyDetail';
+import TenantDashboard from './pages/Tenant/TenantDashboard';
+
+const PENDING_VERIFICATION_KEY = 'docustay_pending_verification';
+/** Persist how we got to identity verification so identity-complete can send manager to manager-dashboard and owner to POA. */
+const IDENTITY_FLOW_KEY = 'docustay_identity_flow';
+
+const setPendingVerificationPersistent = (setState: React.Dispatch<React.SetStateAction<AppState>>) => (data: { userId: string; type: 'email' | 'phone'; expectedCode?: string; generatedAt: string }) => {
+  if (typeof window !== 'undefined' && data) {
+    try { sessionStorage.setItem(PENDING_VERIFICATION_KEY, JSON.stringify(data)); } catch { /* ignore */ }
+  }
+  setState(prev => ({ ...prev, pendingVerification: data }));
+};
+
+const clearPendingVerificationStorage = () => {
+  if (typeof window !== 'undefined') {
+    try { sessionStorage.removeItem(PENDING_VERIFICATION_KEY); } catch { /* ignore */ }
+  }
+};
 
 const App: React.FC = () => {
   const [state, setState] = useState<AppState>({
@@ -51,6 +74,11 @@ const App: React.FC = () => {
     if (hasSessionIdInUrl()) return 'onboarding/identity-complete';
     const hash = window.location.hash;
     if (hash) return hashToView(hash);
+    if (window.location.pathname === '/onboarding/identity-complete' && !hash) {
+      // No session_id: POA return only when no Bearer token (owner). Manager with token stays on identity-complete to avoid POA mounting and pending-owner/me 401.
+      if (!authApi.getToken()) return 'onboarding/poa';
+      return 'onboarding/identity-complete';
+    }
     if (window.location.pathname === '/onboarding/identity-complete') return 'onboarding/identity-complete';
     return '';
   });
@@ -58,16 +86,19 @@ const App: React.FC = () => {
   const [sessionRestoring, setSessionRestoring] = useState(true); // Track if we're restoring session
   const [notification, setNotification] = useState<{ type: 'success'; message: string } | null>(null);
   const [errorModal, setErrorModal] = useState<{ open: boolean; message: string }>({ open: false, message: '' });
+  /** Set when identity-complete calls onIdentityVerified; skip one redirect to onboarding/identity so manager-dashboard doesn't loop. */
+  const identityJustVerifiedRef = useRef(false);
 
   // Restore session from localStorage token on page load
   useEffect(() => {
     const SESSION_RESTORE_TIMEOUT_MS = 15000;
 
     const restoreSession = async () => {
-      // Skip session restore on onboarding pages (they use pending-owner tokens, not full user tokens)
+      // Skip session restore on onboarding pages (they use pending-owner tokens) and on manager invite signup (no token yet; avoid 401 → #login).
       const currentView = hashToView(window.location.hash || '');
       const isOnboardingPage = currentView.startsWith('onboarding/') || currentView === 'verify' || currentView === 'check';
-      if (isOnboardingPage) {
+      const isManagerInviteSignup = currentView === 'register/manager' || currentView.startsWith('register/manager/');
+      if (isOnboardingPage || isManagerInviteSignup) {
         setSessionRestoring(false);
         return;
       }
@@ -87,12 +118,16 @@ const App: React.FC = () => {
         if (user) {
           setState(prev => ({ ...prev, user }));
           // If user is on login/register page but has valid session, redirect to dashboard
-          if (!currentView || currentView === 'login' || currentView === 'register' || currentView === 'guest-login' || currentView === 'guest-signup') {
+          if (!currentView || currentView === 'login' || currentView.startsWith('login/') || currentView === 'register' || currentView.startsWith('guest-login') || currentView.startsWith('guest-signup')) {
             const targetView = user.user_type === UserType.PROPERTY_OWNER
               ? (!user.identity_verified ? 'onboarding/identity' : !user.poa_linked ? 'onboarding/poa' : 'dashboard')
-              : user.user_type === UserType.ADMIN
-                ? 'admin'
-                : 'guest-dashboard';
+              : user.user_type === UserType.PROPERTY_MANAGER
+                ? (user.identity_verified ? 'manager-dashboard' : 'onboarding/identity')
+                : user.user_type === UserType.TENANT
+                  ? 'tenant-dashboard'
+                  : user.user_type === UserType.ADMIN
+                    ? 'admin'
+                    : 'guest-dashboard';
             window.location.hash = targetView;
             setView(targetView);
           }
@@ -108,6 +143,32 @@ const App: React.FC = () => {
 
     restoreSession();
   }, []);
+
+  // Restore pending verification from sessionStorage when on verify page after refresh
+  useEffect(() => {
+    const v = hashToView(window.location.hash || '');
+    if (v === 'verify' && !state.pendingVerification && typeof window !== 'undefined') {
+      try {
+        const stored = sessionStorage.getItem(PENDING_VERIFICATION_KEY);
+        if (stored) {
+          const data = JSON.parse(stored);
+          if (data?.userId && data?.type) setState(prev => ({ ...prev, pendingVerification: data }));
+        }
+      } catch { /* ignore */ }
+    }
+  }, [view, state.pendingVerification]);
+
+  // Persist identity flow when we show onboarding/identity so identity-complete knows manager vs owner (survives Stripe redirect).
+  useEffect(() => {
+    if (view !== 'onboarding/identity') return;
+    try {
+      if (state.user?.user_type === UserType.PROPERTY_MANAGER) {
+        sessionStorage.setItem(IDENTITY_FLOW_KEY, 'manager');
+      } else {
+        sessionStorage.setItem(IDENTITY_FLOW_KEY, 'owner');
+      }
+    } catch { /* ignore */ }
+  }, [view, state.user?.user_type]);
 
   // Clear global loading when view changes so a previous page's setLoading(true) doesn't leave overlay stuck
   const prevViewRef = useRef<string | null>(null);
@@ -146,6 +207,13 @@ const App: React.FC = () => {
         return;
       }
       if (window.location.pathname === '/onboarding/identity-complete') {
+        // No hash and no session_id: usually Dropbox Sign return (POA flow). But if user has Bearer token (manager returning from Stripe with lost session_id), stay on identity-complete to avoid rendering POA and calling pending-owner/me (401 loop).
+        if (!window.location.hash && !hasSessionIdInUrl() && !authApi.getToken()) {
+          const q = window.location.search ? window.location.search : '';
+          window.history.replaceState(null, '', window.location.pathname + q + '#onboarding/poa');
+          setView('onboarding/poa');
+          return;
+        }
         setView('onboarding/identity-complete');
         if (!window.location.hash) {
           const q = window.location.search ? window.location.search : '';
@@ -169,8 +237,24 @@ const App: React.FC = () => {
   // Redirect owner to onboarding step if they try to open dashboard/property before completing onboarding
   useEffect(() => {
     if (state.user?.user_type === UserType.PROPERTY_OWNER && (view.startsWith('dashboard') || view.startsWith('add-property') || view.startsWith('property/'))) {
-      if (!state.user.identity_verified) navigate('onboarding/identity');
+          if (!state.user.identity_verified) navigate('onboarding/identity');
       else if (!state.user.poa_linked) navigate('onboarding/poa');
+    }
+    if (state.user?.user_type === UserType.PROPERTY_MANAGER) {
+      if ((view === 'dashboard' || view.startsWith('dashboard/'))) {
+        navigate('manager-dashboard');
+      } else if ((view === 'manager-dashboard' || view.startsWith('manager-dashboard/')) && !state.user.identity_verified) {
+        if (identityJustVerifiedRef.current) {
+          identityJustVerifiedRef.current = false;
+        } else if (typeof window !== 'undefined' && sessionStorage.getItem(IDENTITY_FLOW_KEY) === 'manager') {
+          // Came from manager identity flow; don't redirect back to identity. Key cleared in OnboardingIdentityComplete on success.
+        } else {
+          navigate('onboarding/identity');
+        }
+      }
+    }
+    if (state.user?.user_type === UserType.TENANT && (view === 'dashboard' || view.startsWith('dashboard/'))) {
+      navigate('tenant-dashboard');
     }
   }, [state.user, view]);
 
@@ -180,6 +264,13 @@ const App: React.FC = () => {
       if (!userData.identity_verified) navigate('onboarding/identity');
       else if (!userData.poa_linked) navigate('onboarding/poa');
       else navigate('dashboard');
+    } else if (userData.user_type === UserType.PROPERTY_MANAGER) {
+      if (!userData.identity_verified) navigate('onboarding/identity');
+      else navigate('manager-dashboard');
+    } else if (userData.user_type === UserType.TENANT) {
+      navigate('tenant-dashboard');
+    } else if (userData.user_type === UserType.ADMIN) {
+      navigate('admin');
     } else {
       navigate('guest-dashboard');
     }
@@ -188,7 +279,7 @@ const App: React.FC = () => {
   const handleLogout = () => {
     authApi.logout();
     setState({ user: null });
-    navigate('login');
+    navigate('');
   };
 
   const showNotification = (type: 'success' | 'error', message: string) => {
@@ -228,10 +319,7 @@ const App: React.FC = () => {
                   <Button variant="outline" onClick={handleLogout} className="px-5 py-2">Logout</Button>
                 </>
               ) : (
-                <>
-                  <button onClick={() => navigate('login')} className="text-gray-600 hover:text-gray-900 font-medium text-sm transition-colors">Login</button>
-                  <Button variant="primary" onClick={() => navigate('register')} className="px-6 py-2.5 bg-blue-700 hover:bg-blue-800 focus:ring-blue-600">Get Started</Button>
-                </>
+                <Button variant="primary" onClick={() => navigate('')} className="px-6 py-2.5 bg-blue-700 hover:bg-blue-800 focus:ring-blue-600">Get Started</Button>
               )}
             </div>
           </div>
@@ -257,7 +345,15 @@ const App: React.FC = () => {
 
       {/* Main Content */}
       <main className="flex-grow flex flex-col">
-        {view === 'login' && <Login onLogin={handleLogin} setLoading={setLoading} notify={showNotification} navigate={navigate} />}
+        {(view === 'login' || view === 'login/property_manager' || view === 'login/tenant') && (
+          <Login
+            onLogin={handleLogin}
+            setLoading={setLoading}
+            notify={showNotification}
+            navigate={navigate}
+            initialRole={view === 'login/property_manager' ? 'property_manager' : view === 'login/tenant' ? 'tenant' : 'owner'}
+          />
+        )}
         {(view === 'forgot-password/owner' || view === 'forgot-password/guest') && (
           <ForgotPassword
             role={view === 'forgot-password/owner' ? 'owner' : 'guest'}
@@ -269,26 +365,61 @@ const App: React.FC = () => {
         {view === 'reset-password' && (
           <ResetPassword setLoading={setLoading} notify={showNotification} navigate={navigate} />
         )}
-        {(view === 'guest-login' || view.startsWith('guest-login/') || view.startsWith('invite/')) && (
+        {view.startsWith('invite/') && (
+          <InviteLanding
+            invitationCode={view.split('/')[1] || ''}
+            navigate={navigate}
+            setLoading={setLoading}
+            notify={showNotification}
+            setPendingVerification={setPendingVerificationPersistent(setState)}
+            onLogin={handleLogin}
+            onGuestLogin={(user) => { setState(prev => ({ ...prev, user })); navigate('guest-dashboard'); }}
+            onTenantLogin={(user) => { setState(prev => ({ ...prev, user })); navigate('tenant-dashboard'); }}
+          />
+        )}
+        {(view === 'guest-login' || view.startsWith('guest-login/')) && (
           <GuestLogin
-            inviteCode={view.startsWith('guest-login/') ? view.split('/')[1] : view.startsWith('invite/') ? view.split('/')[1] : undefined}
+            inviteCode={view.startsWith('guest-login/') ? view.split('/')[1] : undefined}
             onLogin={handleLogin}
             setLoading={setLoading}
             notify={showNotification}
             navigate={navigate}
-            setPendingVerification={(data) => setState(prev => ({ ...prev, pendingVerification: data }))}
+            setPendingVerification={setPendingVerificationPersistent(setState)}
             onGuestLogin={(user) => { setState(prev => ({ ...prev, user })); navigate('guest-dashboard'); }}
           />
         )}
-        {view === 'register' && <RegisterOwner setPendingVerification={(data) => setState(prev => ({ ...prev, pendingVerification: data }))} onLogin={handleLogin} navigate={navigate} setLoading={setLoading} notify={showNotification} />}
+        {view.startsWith('register-from-invite/') && (
+          <RegisterFromInvite
+            invitationId={view.split('/')[1] || ''}
+            navigate={navigate}
+            setLoading={setLoading}
+            notify={showNotification}
+            setPendingVerification={setPendingVerificationPersistent(setState)}
+            onGuestLogin={(user) => { setState(prev => ({ ...prev, user })); navigate('guest-dashboard'); }}
+            onTenantLogin={(user) => { setState(prev => ({ ...prev, user })); navigate('tenant-dashboard'); }}
+          />
+        )}
+        {view === 'register' && <RegisterOwner setPendingVerification={setPendingVerificationPersistent(setState)} onLogin={handleLogin} navigate={navigate} setLoading={setLoading} notify={showNotification} />}
+        {view === 'register/manager' && <RegisterManagerLanding navigate={navigate} />}
+        {view.startsWith('register/manager/') && (
+          <RegisterManager
+            inviteToken={view.split('/')[2] || ''}
+            onLogin={handleLogin}
+            navigate={navigate}
+            setLoading={setLoading}
+            notify={showNotification}
+          />
+        )}
         {(view === 'guest-signup' || view.startsWith('guest-signup/')) && (
           <GuestSignup
-            initialInviteCode={view.startsWith('guest-signup/') ? view.split('/')[1] : undefined}
-            setPendingVerification={(data) => setState(prev => ({ ...prev, pendingVerification: data }))}
+            initialRole={view === 'guest-signup/tenant' ? 'tenant' : undefined}
+            initialInviteCode={view.startsWith('guest-signup/') && view !== 'guest-signup/tenant' ? view.split('/')[1] : undefined}
+            setPendingVerification={setPendingVerificationPersistent(setState)}
             navigate={navigate}
             setLoading={setLoading}
             notify={showNotification}
             onGuestLogin={(user) => { setState(prev => ({ ...prev, user })); navigate('guest-dashboard'); }}
+            onTenantLogin={(user) => { setState(prev => ({ ...prev, user })); navigate('tenant-dashboard'); }}
           />
         )}
         {view === 'verify' && state.pendingVerification && (
@@ -298,24 +429,33 @@ const App: React.FC = () => {
             setLoading={setLoading}
             notify={showNotification}
             onVerified={(user) => {
+              clearPendingVerificationStorage();
               setState(prev => ({ ...prev, user }));
               // Defer navigate so state is committed before we show onboarding/identity (avoids wrong isPendingOwner + duplicate calls).
               const next = user.user_type === UserType.PROPERTY_OWNER
                 ? (!user.identity_verified ? 'onboarding/identity' : !user.poa_linked ? 'onboarding/poa' : 'dashboard')
-                : 'guest-dashboard';
+                : user.user_type === UserType.TENANT ? 'tenant-dashboard' : 'guest-dashboard';
               setTimeout(() => navigate(next), 0);
             }}
           />
         )}
 
         {/* Owner onboarding: verify email first (register → verify), then Stripe identity, then POA. Show identity only with token or owner user so we don't call authApi.me() here. */}
-        {view === 'onboarding/identity' && (state.user?.user_type === UserType.PROPERTY_OWNER || state.user?.user_id === '0' || authApi.getToken()) && (
+        {view === 'onboarding/identity' && (state.user?.user_type === UserType.PROPERTY_OWNER || state.user?.user_type === UserType.PROPERTY_MANAGER || state.user?.user_id === '0' || authApi.getToken()) && (
           <OnboardingIdentity isPendingOwner={!state.user || state.user?.user_id === '0'} navigate={navigate} setLoading={setLoading} notify={showNotification} />
         )}
         {view === 'onboarding/identity-complete' && (
-          <OnboardingIdentityComplete navigate={navigate} setLoading={setLoading} notify={showNotification} />
+          <OnboardingIdentityComplete
+            navigate={navigate}
+            setLoading={setLoading}
+            notify={showNotification}
+            onIdentityVerified={(user) => {
+              identityJustVerifiedRef.current = true;
+              setState((prev) => ({ ...prev, user }));
+            }}
+          />
         )}
-        {view === 'onboarding/poa' && (state.user != null || authApi.getToken()) && (
+        {view === 'onboarding/poa' && (
           <OnboardingPOA
             user={state.user}
             onCompleteSignup={(data: TokenResponse) => {
@@ -352,6 +492,19 @@ const App: React.FC = () => {
         {view === 'settings' && state.user?.user_type !== UserType.PROPERTY_OWNER && <Settings user={state.user} navigate={navigate} />}
         {view === 'help' && state.user?.user_type !== UserType.PROPERTY_OWNER && <HelpCenter navigate={navigate} />}
         {view.startsWith('property/') && state.user?.user_type === UserType.PROPERTY_OWNER && <PropertyDetail propertyId={view.split('/')[1]} user={state.user} navigate={navigate} setLoading={setLoading} notify={showNotification} />}
+
+        {/* Property Manager Dashboard */}
+        {view.startsWith('manager-dashboard/property/') && state.user?.user_type === UserType.PROPERTY_MANAGER && (
+          <ManagerPropertyDetail propertyId={view.split('/')[2] || ''} user={state.user} navigate={navigate} setLoading={setLoading} notify={showNotification} />
+        )}
+        {(view === 'manager-dashboard' || (view.startsWith('manager-dashboard/') && !view.startsWith('manager-dashboard/property/'))) && state.user?.user_type === UserType.PROPERTY_MANAGER && (
+          <ManagerDashboard user={state.user} navigate={navigate} setLoading={setLoading} notify={showNotification} />
+        )}
+
+        {/* Tenant Dashboard */}
+        {(view === 'tenant-dashboard' || view.startsWith('tenant-dashboard/')) && state.user?.user_type === UserType.TENANT && (
+          <TenantDashboard user={state.user} navigate={navigate} setLoading={setLoading} notify={showNotification} />
+        )}
 
         {/* Public live property page (no auth; URL uses slug, not property id) */}
         {view.startsWith('live/') && (
@@ -391,6 +544,10 @@ const App: React.FC = () => {
             );
           }
           if (state.user.user_type !== 'ADMIN') {
+            const targetView = state.user?.user_type === 'PROPERTY_OWNER' ? 'dashboard'
+              : state.user?.user_type === 'PROPERTY_MANAGER' ? 'manager-dashboard'
+              : state.user?.user_type === 'TENANT' ? 'tenant-dashboard'
+              : 'guest-dashboard';
             return (
               <div className="flex-grow flex items-center justify-center p-8">
                 <div className="text-center max-w-md">
@@ -398,7 +555,7 @@ const App: React.FC = () => {
                   <p className="text-slate-600 mb-4">This area is for administrators only.</p>
                   <Button
                     variant="primary"
-                    onClick={() => navigate(state.user?.user_type === 'PROPERTY_OWNER' ? 'dashboard' : 'guest-dashboard')}
+                    onClick={() => navigate(targetView)}
                   >
                     Go to my dashboard
                   </Button>

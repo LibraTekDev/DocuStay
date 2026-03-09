@@ -2,16 +2,18 @@
 import csv
 import io
 import secrets
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.owner import OwnerProfile, Property, PropertyType, USAT_TOKEN_STAGED, USAT_TOKEN_RELEASED, OccupancyStatus
 from app.models.invitation import Invitation
 from app.models.guest import PurposeOfStay, RelationshipToOwner
+from app.models.manager_invitation import ManagerInvitation, MANAGER_INVITE_EXPIRE_DAYS
+from app.models.property_manager_assignment import PropertyManagerAssignment
 from app.schemas.owner import (
     AuthorityLetterResponse,
     BulkUploadResult,
@@ -29,10 +31,28 @@ from app.schemas.owner import (
     VerifyAddressAndUtilitiesResponse,
     VerifyAddressRequest,
 )
-from app.dependencies import get_current_user, require_owner, require_owner_onboarding_complete
+from app.dependencies import get_current_user, require_owner, require_owner_onboarding_complete, get_context_mode
 from app.models.stay import Stay
+from app.models.unit import Unit
 from app.models.guest import GuestProfile
+from app.models.resident_mode import ResidentMode, ResidentModeType
+from app.models.resident_presence import ResidentPresence
+from app.models.tenant_assignment import TenantAssignment
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_SHIELD_MODE
+from app.services.event_ledger import (
+    create_ledger_event,
+    ACTION_PROPERTY_CREATED,
+    ACTION_MANAGER_INVITED,
+    ACTION_PROPERTY_UPDATED,
+    ACTION_PROPERTY_DELETED,
+    ACTION_PROPERTY_REACTIVATED,
+    ACTION_SHIELD_MODE_ON,
+    ACTION_SHIELD_MODE_OFF,
+    ACTION_GUEST_INVITE_CREATED,
+    ACTION_INVITATION_CREATED_CSV,
+    ACTION_OWNERSHIP_PROOF_UPLOADED,
+    ACTION_TENANT_INVITED,
+)
 from app.services.smarty import verify_address
 from app.services.utility_lookup import lookup_utility_providers, generate_authority_letters, _provider_to_raw
 from app.services.utility_lookup import UtilityProvider
@@ -44,8 +64,15 @@ from app.utility_providers.pending_provider_verification_job import run_pending_
 from app.utility_providers.sqlite_cache import add_pending_provider, get_pending_providers_for_property
 from app.config import get_settings
 from app.services.authority_letter_email import send_authority_letter_to_provider
+from app.services.notifications import send_manager_invite_email
 from app.services.dropbox_sign import get_signed_pdf
 from app.services.billing import on_onboarding_properties_completed, ensure_subscription, sync_subscription_quantities
+from app.services.permissions import can_perform_action, can_assign_property_manager, Action
+from app.services.occupancy import (
+    get_unit_display_occupancy_status,
+    get_property_display_occupancy_status,
+    get_units_occupancy_display,
+)
 
 router = APIRouter(prefix="/owners", tags=["owners"])
 
@@ -56,6 +83,8 @@ _REL_MAP = {"friend": RelationshipToOwner.friend, "family": RelationshipToOwner.
 class InvitationCreate(BaseModel):
     owner_id: str | None = None
     property_id: int | None = None
+    unit_id: int | None = None  # Required for tenant/manager; optional for owner (inferred for single-unit)
+    invited_by_user_id: int | None = None  # Set by backend from current_user
     guest_name: str = ""
     guest_email: str = ""
     guest_phone: str = ""
@@ -71,6 +100,13 @@ class InvitationCreate(BaseModel):
     dead_mans_switch_alert_dashboard: bool = True
     dead_mans_switch_alert_phone: bool = False
     # When only guest_name + property_id are sent, checkin/checkout default to today + 14 days
+
+
+class InviteTenantRequest(BaseModel):
+    tenant_name: str
+    tenant_email: str = ""
+    lease_start_date: str
+    lease_end_date: str
 
 
 def _ensure_property_usat_token(prop: Property, db: Session) -> None:
@@ -242,6 +278,14 @@ def add_property(
         prop.tax_id = data.tax_id.strip() or None
     if data.apn is not None:
         prop.apn = data.apn.strip() or None
+    unit_count = data.unit_count if data.unit_count is not None else None
+    primary_unit_label = getattr(data, "primary_residence_unit", None)
+    if unit_count is not None and unit_count > 1:
+        prop.is_multi_unit = True
+    if primary_unit_label is not None and primary_unit_label >= 1:
+        owner_occ = True
+        prop.owner_occupied = True
+        prop.occupancy_status = OccupancyStatus.occupied.value
     db.add(prop)
     db.flush()
     # Unique live_slug for public property page URL (#live/<slug>), no DB id in URL
@@ -262,6 +306,18 @@ def add_property(
         prop.usat_token = _generate_usat_token() + "-" + str(prop.id)
         prop.usat_token_state = USAT_TOKEN_STAGED
 
+    primary_unit_label = data.primary_residence_unit
+    if unit_count is not None and unit_count > 1:
+        for i in range(1, unit_count + 1):
+            is_primary = primary_unit_label is not None and primary_unit_label == i
+            u = Unit(
+                property_id=prop.id,
+                unit_label=str(i),
+                occupancy_status=OccupancyStatus.occupied.value if is_primary else OccupancyStatus.unknown.value,
+                is_primary_residence=1 if is_primary else 0,
+            )
+            db.add(u)
+
     _apply_smarty_address(prop, street, data.city, data.state, data.zip_code)
     # Utility providers are set by the frontend via POST /properties/{id}/utilities after owner selects from dropdowns
 
@@ -277,6 +333,17 @@ def add_property(
         ip_address=request.client.host if request.client else None,
         user_agent=(request.headers.get("user-agent") or "").strip() or None,
         meta={"property_id": prop.id, "street": street, "city": data.city, "state": data.state, "region_code": region, "occupancy_status_new": prop.occupancy_status},
+    )
+    create_ledger_event(
+        db,
+        ACTION_PROPERTY_CREATED,
+        target_object_type="Property",
+        target_object_id=prop.id,
+        property_id=prop.id,
+        actor_user_id=current_user.id,
+        meta={"property_id": prop.id, "street": street, "city": data.city, "state": data.state, "region_code": region, "occupancy_status_new": prop.occupancy_status},
+        ip_address=request.client.host if request.client else None,
+        user_agent=(request.headers.get("user-agent") or "").strip() or None,
     )
     db.commit()
     db.refresh(prop)
@@ -468,6 +535,12 @@ def bulk_upload_properties(
         primary_residence_raw = _get_cell(row, "is_primary_residence", "owner_occupied", "primary_residence")
         tax_id_raw = _get_cell(row, "tax_id", "tax_id")
         apn_raw = _get_cell(row, "apn", "parcel", "apn")
+        property_name_raw = _get_cell(row, "property_name", "name")
+        property_type_raw = _get_cell(row, "property_type", "type")
+        bedrooms_raw = _get_cell(row, "bedrooms")
+        units_raw = _get_cell(row, "units", "unit_count", "number_of_units")
+        occupied_unit_raw = _get_cell(row, "occupied_unit", "unit_label")
+        primary_residence_unit_raw = _get_cell(row, "primary_residence_unit", "primary_unit")
 
         street = (address or "").strip()
         if unit_no:
@@ -505,8 +578,30 @@ def bulk_upload_properties(
         shield_mode = _parse_bool_cell(shield_mode_raw)
         primary_residence = _parse_bool_cell(primary_residence_raw)
         region_code = (state_upper).upper()[:20]
-        # Name = property address (street, city, state) for CSV upload
+        # Name: use property_name from CSV if provided, else address
         address_as_name = f"{street.strip()}, {city.strip()}, {state_upper}".strip(", ")
+        prop_name = (property_name_raw or "").strip() or address_as_name
+        # Property type–based fields: house/condo/townhouse → bedrooms; apartment/duplex/triplex/quadplex → units
+        multi_unit_types = ("apartment", "duplex", "triplex", "quadplex")
+        pt_lower = (property_type_raw or "").strip().lower() if property_type_raw else ""
+        is_multi_type = pt_lower in multi_unit_types
+        unit_count_val: int | None = None
+        if is_multi_type and units_raw:
+            try:
+                uc = int(str(units_raw).strip())
+                unit_count_val = uc if uc > 0 else None
+            except ValueError:
+                pass
+        bedrooms_val = (bedrooms_raw or "").strip() or None
+        if not is_multi_type and bedrooms_val:
+            bedrooms_val = bedrooms_val[:10] if bedrooms_val else None
+        primary_unit_val: int | None = None
+        if is_multi_type and primary_residence_unit_raw:
+            try:
+                pu = int(str(primary_residence_unit_raw).strip())
+                primary_unit_val = pu if pu >= 1 else None
+            except ValueError:
+                pass
 
         if occupied:
             if not (tenant_name or "").strip():
@@ -527,6 +622,10 @@ def bulk_upload_properties(
                 failed_from_row = row_num
                 failure_reason = "Lease End must be after Lease Start."
                 break
+            if lease_start < date.today():
+                failed_from_row = row_num
+                failure_reason = "Lease start cannot be in the past."
+                break
 
         state_norm = _normalize_addr(state)
         existing_match = None
@@ -536,12 +635,12 @@ def bulk_upload_properties(
                 break
 
         if existing_match is None:
-            # Primary residence (owner-occupied) implies unit is occupied; same as tenant Occupied=YES
-            owner_occ = primary_residence
+            # Primary residence: from primary_residence column, or when primary_unit_val is set for multi-unit
+            owner_occ = primary_residence or (primary_unit_val is not None and primary_unit_val >= 1)
             occ_status = OccupancyStatus.occupied.value if (occupied or owner_occ) else OccupancyStatus.vacant.value
             prop = Property(
                 owner_profile_id=profile.id,
-                name=address_as_name,
+                name=prop_name,
                 street=street.strip(),
                 city=city.strip(),
                 state=state_upper,
@@ -549,10 +648,11 @@ def bulk_upload_properties(
                 region_code=region_code,
                 owner_occupied=owner_occ,
                 property_type=None,
-                property_type_label=None,
-                bedrooms=None,
+                property_type_label=pt_lower if pt_lower else None,
+                bedrooms=bedrooms_val if not is_multi_type else None,
                 occupancy_status=occ_status,
                 shield_mode_enabled=1 if shield_mode else 0,
+                is_multi_unit=bool(unit_count_val and unit_count_val > 1),
             )
             prop.tax_id = (tax_id_raw or "").strip() or None
             prop.apn = (apn_raw or "").strip() or None
@@ -567,6 +667,17 @@ def bulk_upload_properties(
             else:
                 prop.usat_token = "USAT-" + secrets.token_hex(8).upper() + "-" + str(prop.id)
             prop.usat_token_state = USAT_TOKEN_RELEASED if occupied else USAT_TOKEN_STAGED
+            # Create Unit rows for multi-unit properties
+            if unit_count_val is not None and unit_count_val > 1:
+                for i in range(1, unit_count_val + 1):
+                    is_primary = primary_unit_val is not None and primary_unit_val == i
+                    u = Unit(
+                        property_id=prop.id,
+                        unit_label=str(i),
+                        occupancy_status=OccupancyStatus.occupied.value if is_primary else OccupancyStatus.unknown.value,
+                        is_primary_residence=1 if is_primary else 0,
+                    )
+                    db.add(u)
             # Address normalization and utility lookup shelved for now.
             # _apply_smarty_address(prop, street.strip(), city.strip(), state_upper, zip_code)
             # try:
@@ -587,12 +698,30 @@ def bulk_upload_properties(
                 user_agent=(request.headers.get("user-agent") or "").strip() or None,
                 meta={"property_id": prop.id, "bulk_upload_row": row_num, "street": street.strip(), "city": city.strip(), "state": state_upper},
             )
+            create_ledger_event(
+                db,
+                ACTION_PROPERTY_CREATED,
+                target_object_type="Property",
+                target_object_id=prop.id,
+                property_id=prop.id,
+                actor_user_id=current_user.id,
+                meta={"property_id": prop.id, "bulk_upload_row": row_num, "street": street.strip(), "city": city.strip(), "state": state_upper},
+                ip_address=request.client.host if request.client else None,
+                user_agent=(request.headers.get("user-agent") or "").strip() or None,
+            )
             if occupied and (tenant_name or "").strip():
                 inv_code = "INV-" + secrets.token_hex(4).upper()
+                inv_unit_id: int | None = None
+                if prop.is_multi_unit and occupied_unit_raw:
+                    unit_label = str(occupied_unit_raw).strip()
+                    unit_row = db.query(Unit).filter(Unit.property_id == prop.id, Unit.unit_label == unit_label).first()
+                    if unit_row:
+                        inv_unit_id = unit_row.id
                 inv = Invitation(
                     invitation_code=inv_code,
                     owner_id=current_user.id,
                     property_id=prop.id,
+                    unit_id=inv_unit_id,
                     guest_name=(tenant_name or "").strip(),
                     guest_email=None,
                     stay_start_date=lease_start,
@@ -602,6 +731,7 @@ def bulk_upload_properties(
                     region_code=prop.region_code,
                     status="ongoing",
                     token_state="BURNED",
+                    invitation_kind="tenant",
                     dead_mans_switch_enabled=1,
                     dead_mans_switch_alert_email=1,
                     dead_mans_switch_alert_sms=0,
@@ -621,6 +751,18 @@ def bulk_upload_properties(
                     ip_address=request.client.host if request.client else None,
                     user_agent=(request.headers.get("user-agent") or "").strip() or None,
                     meta={"invitation_code": inv_code, "token_state": "BURNED", "guest_name": (tenant_name or "").strip(), "lease_start": str(lease_start), "lease_end": str(lease_end)},
+                )
+                create_ledger_event(
+                    db,
+                    ACTION_INVITATION_CREATED_CSV,
+                    target_object_type="Invitation",
+                    target_object_id=inv.id,
+                    property_id=prop.id,
+                    invitation_id=inv.id,
+                    actor_user_id=current_user.id,
+                    meta={"invitation_code": inv_code, "token_state": "BURNED", "guest_name": (tenant_name or "").strip(), "lease_start": str(lease_start), "lease_end": str(lease_end)},
+                    ip_address=request.client.host if request.client else None,
+                    user_agent=(request.headers.get("user-agent") or "").strip() or None,
                 )
             db.commit()
             db.refresh(prop)
@@ -682,6 +824,10 @@ def bulk_upload_properties(
                 updated += 1
             # When updating to occupied with tenant info, create invite (BURNED) if none exists for this property+tenant+dates
             if occupied and (tenant_name or "").strip() and lease_start and lease_end:
+                if lease_start < date.today():
+                    failed_from_row = row_num
+                    failure_reason = "Lease start cannot be in the past."
+                    break
                 existing_inv = (
                     db.query(Invitation)
                     .filter(
@@ -708,6 +854,7 @@ def bulk_upload_properties(
                         region_code=existing_match.region_code,
                         status="ongoing",
                         token_state="BURNED",
+                        invitation_kind="tenant",
                         dead_mans_switch_enabled=1,
                         dead_mans_switch_alert_email=1,
                         dead_mans_switch_alert_sms=0,
@@ -727,6 +874,18 @@ def bulk_upload_properties(
                         ip_address=request.client.host if request.client else None,
                         user_agent=(request.headers.get("user-agent") or "").strip() or None,
                         meta={"invitation_code": inv_code, "token_state": "BURNED", "guest_name": (tenant_name or "").strip(), "lease_start": str(lease_start), "lease_end": str(lease_end)},
+                    )
+                    create_ledger_event(
+                        db,
+                        ACTION_INVITATION_CREATED_CSV,
+                        target_object_type="Invitation",
+                        target_object_id=inv.id,
+                        property_id=existing_match.id,
+                        invitation_id=inv.id,
+                        actor_user_id=current_user.id,
+                        meta={"invitation_code": inv_code, "token_state": "BURNED", "guest_name": (tenant_name or "").strip(), "lease_start": str(lease_start), "lease_end": str(lease_end)},
+                        ip_address=request.client.host if request.client else None,
+                        user_agent=(request.headers.get("user-agent") or "").strip() or None,
                     )
             db.commit()
 
@@ -783,6 +942,9 @@ def get_property(
     from app.schemas.owner import PropertyJurisdictionDocumentation
     from app.services.jurisdiction_sot import get_jurisdiction_for_property
     payload = PropertyResponse.model_validate(prop).model_dump()
+    # Use effective occupancy (includes units with on-site manager) for display
+    units = db.query(Unit).filter(Unit.property_id == property_id).all()
+    payload["occupancy_status"] = get_property_display_occupancy_status(db, prop, units)
     jinfo = get_jurisdiction_for_property(db, prop.zip_code, prop.region_code)
     if jinfo:
         payload["jurisdiction_documentation"] = PropertyJurisdictionDocumentation(
@@ -793,6 +955,353 @@ def get_property(
             tenancy_threshold_days=jinfo.tenancy_threshold_days,
         )
     return PropertyResponse(**payload)
+
+
+class UnitSummary(BaseModel):
+    id: int
+    unit_label: str
+    occupancy_status: str = "unknown"
+    is_primary_residence: bool = False
+    occupied_by: str | None = None  # guest name, "X (Property manager)", or tenant name
+    invite_id: str | None = None  # invitation_code when applicable (not for manager/tenant)
+
+
+@router.get("/properties/{property_id}/units", response_model=list[UnitSummary])
+def list_property_units(
+    property_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """List units for an owner's property. Used when inviting guests to multi-unit properties."""
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="No owner profile")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+        Property.deleted_at.is_(None),
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    units = db.query(Unit).filter(Unit.property_id == property_id).all()
+    if not units:
+        # Single-unit property: return implicit unit (id=0 for "whole property")
+        return [
+            UnitSummary(
+                id=0,
+                unit_label="1",
+                occupancy_status=prop.occupancy_status or OccupancyStatus.unknown.value,
+                is_primary_residence=bool(prop.owner_occupied),
+                occupied_by=None,
+                invite_id=None,
+            )
+        ]
+    unit_ids = [u.id for u in units]
+    occupancy_display = get_units_occupancy_display(db, unit_ids)
+    return [
+        UnitSummary(
+            id=u.id,
+            unit_label=u.unit_label,
+            occupancy_status=get_unit_display_occupancy_status(db, u),
+            is_primary_residence=bool(getattr(u, "is_primary_residence", 0)),
+            occupied_by=occupancy_display.get(u.id, {}).get("occupied_by"),
+            invite_id=occupancy_display.get(u.id, {}).get("invite_id"),
+        )
+        for u in units
+    ]
+
+
+class InviteManagerRequest(BaseModel):
+    email: str
+
+
+@router.post("/properties/{property_id}/invite-manager")
+def invite_property_manager(
+    property_id: int,
+    data: InviteManagerRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Owner invites a property manager by email. Manager receives an email with signup link."""
+    if not can_assign_property_manager(db, current_user, property_id):
+        raise HTTPException(status_code=403, detail="Only the property owner can invite managers.")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.deleted_at.is_(None),
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile or prop.owner_profile_id != profile.id:
+        raise HTTPException(status_code=404, detail="Property not found")
+    email = (data.email or "").strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email is required")
+    # Check for existing assignment
+    existing_user = db.query(User).filter(User.email == email, User.role == UserRole.property_manager).first()
+    if existing_user:
+        existing_assignment = db.query(PropertyManagerAssignment).filter(
+            PropertyManagerAssignment.property_id == property_id,
+            PropertyManagerAssignment.user_id == existing_user.id,
+        ).first()
+        if existing_assignment:
+            raise HTTPException(status_code=400, detail="This manager is already assigned to this property.")
+    # Create invitation
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc) + timedelta(days=MANAGER_INVITE_EXPIRE_DAYS)
+    inv = ManagerInvitation(
+        token=token,
+        property_id=property_id,
+        invited_by_user_id=current_user.id,
+        email=email,
+        status="pending",
+        expires_at=expires_at,
+    )
+    db.add(inv)
+    db.commit()
+    db.refresh(inv)
+    # Build signup link
+    base_url = (get_settings().stripe_identity_return_url or get_settings().frontend_base_url or "http://localhost:5173").strip().split("#")[0].rstrip("/")
+    invite_link = f"{base_url}/#register/manager/{token}"
+    property_name = (prop.name or f"{prop.street}, {prop.city}").strip() or "Property"
+    sent = send_manager_invite_email(email, invite_link, property_name)
+    create_ledger_event(
+        db,
+        ACTION_MANAGER_INVITED,
+        target_object_type="ManagerInvitation",
+        target_object_id=inv.id,
+        property_id=property_id,
+        actor_user_id=current_user.id,
+        meta={"email": email, "property_id": property_id, "invite_id": inv.id, "email_sent": sent},
+        ip_address=request.client.host if request.client else None,
+        user_agent=(request.headers.get("user-agent") or "").strip() or None,
+    )
+    db.commit()
+    return {"status": "success", "message": "Invitation sent." if sent else "Invitation created. Email delivery may not be configured."}
+
+
+class AssignedManagerItem(BaseModel):
+    user_id: int
+    email: str
+    full_name: str | None
+    has_resident_mode: bool = False
+    resident_unit_id: int | None = None
+    resident_unit_label: str | None = None
+    presence_status: str | None = None  # "present" | "away" when has_resident_mode
+    presence_away_started_at: str | None = None
+
+
+@router.get("/properties/{property_id}/assigned-managers", response_model=list[AssignedManagerItem])
+def list_assigned_managers(
+    property_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """List property managers assigned to this property. Owner only."""
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        return []
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    assignments = db.query(PropertyManagerAssignment).filter(
+        PropertyManagerAssignment.property_id == property_id,
+    ).all()
+    out = []
+    for a in assignments:
+        u = db.query(User).filter(User.id == a.user_id).first()
+        if not u or u.role != UserRole.property_manager:
+            continue
+        resident = (
+            db.query(ResidentMode)
+            .join(Unit, ResidentMode.unit_id == Unit.id)
+            .filter(
+                ResidentMode.user_id == a.user_id,
+                ResidentMode.mode == ResidentModeType.manager_personal,
+                Unit.property_id == property_id,
+            )
+            .first()
+        )
+        unit_row = db.query(Unit).filter(Unit.id == resident.unit_id).first() if resident else None
+        presence_status = None
+        presence_away_started_at = None
+        if resident is not None:
+            pres = db.query(ResidentPresence).filter(
+                ResidentPresence.user_id == a.user_id,
+                ResidentPresence.unit_id == resident.unit_id,
+            ).first()
+            if pres:
+                presence_status = pres.status.value if hasattr(pres.status, "value") else str(pres.status)
+                presence_away_started_at = pres.away_started_at.isoformat() if pres.away_started_at else None
+            else:
+                presence_status = "away"  # default before manager has set presence
+        out.append(AssignedManagerItem(
+            user_id=u.id,
+            email=u.email or "",
+            full_name=getattr(u, "full_name", None),
+            has_resident_mode=resident is not None,
+            resident_unit_id=resident.unit_id if resident else None,
+            resident_unit_label=unit_row.unit_label if unit_row else None,
+            presence_status=presence_status,
+            presence_away_started_at=presence_away_started_at,
+        ))
+    return out
+
+
+class RemoveManagerRequest(BaseModel):
+    manager_user_id: int
+
+
+@router.post("/properties/{property_id}/managers/remove")
+def remove_property_manager(
+    property_id: int,
+    data: RemoveManagerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Remove a property manager from this property. Owner only; requires business context (can_assign_property_manager)."""
+    if not can_assign_property_manager(db, current_user, property_id):
+        raise HTTPException(status_code=403, detail="Only the property owner can remove managers from this property.")
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Owner profile not found")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    assn = db.query(PropertyManagerAssignment).filter(
+        PropertyManagerAssignment.property_id == property_id,
+        PropertyManagerAssignment.user_id == data.manager_user_id,
+    ).first()
+    if not assn:
+        raise HTTPException(status_code=404, detail="Manager is not assigned to this property.")
+    db.delete(assn)
+    db.commit()
+    return {"status": "success", "message": "Manager removed from property."}
+
+
+class AddResidentModeRequest(BaseModel):
+    manager_user_id: int
+    unit_id: int
+
+
+@router.post("/properties/{property_id}/managers/add-resident-mode")
+def add_manager_resident_mode(
+    property_id: int,
+    data: AddResidentModeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Grant a property manager Personal Mode for a unit (manager lives on-site). Owner only."""
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Owner profile not found")
+    if not can_assign_property_manager(db, current_user, property_id):
+        raise HTTPException(status_code=403, detail="Only the property owner can manage managers.")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    assn = db.query(PropertyManagerAssignment).filter(
+        PropertyManagerAssignment.property_id == property_id,
+        PropertyManagerAssignment.user_id == data.manager_user_id,
+    ).first()
+    if not assn:
+        raise HTTPException(status_code=404, detail="Manager is not assigned to this property.")
+    unit = db.query(Unit).filter(Unit.id == data.unit_id, Unit.property_id == property_id).first()
+    if not unit:
+        raise HTTPException(status_code=404, detail="Unit not found or does not belong to this property.")
+    existing = db.query(ResidentMode).filter(
+        ResidentMode.user_id == data.manager_user_id,
+        ResidentMode.unit_id == data.unit_id,
+        ResidentMode.mode == ResidentModeType.manager_personal,
+    ).first()
+    if existing:
+        return {"status": "success", "message": "Manager already has Personal Mode for this unit."}
+    rm = ResidentMode(
+        user_id=data.manager_user_id,
+        unit_id=data.unit_id,
+        mode=ResidentModeType.manager_personal,
+    )
+    db.add(rm)
+    # Mark the unit (and property) as occupied so manager view and occupancy counts are correct
+    unit.occupancy_status = OccupancyStatus.occupied.value
+    if prop.is_multi_unit:
+        units = db.query(Unit).filter(Unit.property_id == property_id).all()
+        occupied_count = sum(1 for u in units if (u.occupancy_status or "").lower() == OccupancyStatus.occupied.value)
+        prop.occupancy_status = OccupancyStatus.occupied.value if occupied_count > 0 else OccupancyStatus.vacant.value
+    else:
+        prop.occupancy_status = OccupancyStatus.occupied.value
+    db.commit()
+    return {"status": "success", "message": "Manager added as on-site resident. They now have Personal Mode for this unit."}
+
+
+@router.post("/properties/{property_id}/managers/remove-resident-mode")
+def remove_manager_resident_mode(
+    property_id: int,
+    data: RemoveManagerRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Remove a property manager as on-site resident for this property. The manager stays assigned; only their Personal Mode (resident) link is removed. That unit becomes vacant if no active stay. Owner only."""
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Owner profile not found")
+    if not can_assign_property_manager(db, current_user, property_id):
+        raise HTTPException(status_code=403, detail="Only the property owner can manage on-site residents.")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    # Find ResidentMode for this manager in a unit of this property
+    resident = (
+        db.query(ResidentMode)
+        .join(Unit, ResidentMode.unit_id == Unit.id)
+        .filter(
+            ResidentMode.user_id == data.manager_user_id,
+            ResidentMode.mode == ResidentModeType.manager_personal,
+            Unit.property_id == property_id,
+        )
+        .first()
+    )
+    if not resident:
+        raise HTTPException(status_code=404, detail="Manager is not an on-site resident for this property.")
+    unit_id = resident.unit_id
+    db.delete(resident)
+    # If the unit has no active stay, mark it vacant
+    unit = db.query(Unit).filter(Unit.id == unit_id).first()
+    if unit:
+        has_active_stay = (
+            db.query(Stay)
+            .filter(
+                Stay.unit_id == unit_id,
+                Stay.checked_in_at.isnot(None),
+                Stay.checked_out_at.is_(None),
+                Stay.cancelled_at.is_(None),
+            )
+            .first()
+        ) is not None
+        if not has_active_stay:
+            unit.occupancy_status = OccupancyStatus.vacant.value
+        # Recompute property-level occupancy
+        if prop.is_multi_unit:
+            units = db.query(Unit).filter(Unit.property_id == property_id).all()
+            occupied_count = sum(1 for u in units if (u.occupancy_status or "").lower() == OccupancyStatus.occupied.value)
+            prop.occupancy_status = OccupancyStatus.occupied.value if occupied_count > 0 else OccupancyStatus.vacant.value
+        else:
+            prop.occupancy_status = OccupancyStatus.vacant.value if not has_active_stay else prop.occupancy_status
+    db.commit()
+    return {"status": "success", "message": "Manager removed as on-site resident. They remain assigned as manager; the unit is now vacant (if no active stay)."}
 
 
 @router.get("/properties/{property_id}/utilities", response_model=PropertyUtilityProvidersResponse)
@@ -1236,6 +1745,16 @@ def upload_ownership_proof(
         ip_address=request.client.host if request.client else None,
         meta={"proof_type": proof_type, "filename": filename},
     )
+    create_ledger_event(
+        db,
+        ACTION_OWNERSHIP_PROOF_UPLOADED,
+        target_object_type="Property",
+        target_object_id=prop.id,
+        property_id=prop.id,
+        actor_user_id=current_user.id,
+        meta={"proof_type": proof_type, "filename": filename},
+        ip_address=request.client.host if request.client else None,
+    )
     db.commit()
     db.refresh(prop)
     return PropertyResponse.model_validate(prop)
@@ -1337,6 +1856,65 @@ def update_property(
         prop.property_type_label = data.property_type
     if data.bedrooms is not None:
         prop.bedrooms = data.bedrooms
+    # Convert single-unit to multi-unit when type and unit_count are provided
+    multi_unit_types = ("apartment", "duplex", "triplex", "quadplex")
+    pt_label = (data.property_type or "").strip().lower() if data.property_type else ""
+    if pt_label in multi_unit_types and data.unit_count is not None and not prop.is_multi_unit:
+        new_count = max(1, int(data.unit_count))
+        prop.is_multi_unit = True
+        primary_unit_label = data.primary_residence_unit if data.primary_residence_unit is not None else None
+        for i in range(1, new_count + 1):
+            is_primary = primary_unit_label is not None and primary_unit_label == i
+            u = Unit(
+                property_id=prop.id,
+                unit_label=str(i),
+                occupancy_status=OccupancyStatus.occupied.value if is_primary else OccupancyStatus.unknown.value,
+                is_primary_residence=1 if is_primary else 0,
+            )
+            db.add(u)
+        if primary_unit_label is not None and primary_unit_label >= 1:
+            prop.owner_occupied = True
+            prop.occupancy_status = OccupancyStatus.occupied.value
+        else:
+            prop.owner_occupied = False
+    # Multi-unit: update unit count and/or primary residence unit
+    elif prop.is_multi_unit:
+        if data.primary_residence_unit is not None:
+            units_list = db.query(Unit).filter(Unit.property_id == prop.id).order_by(Unit.unit_label).all()
+            for u in units_list:
+                u.is_primary_residence = 0
+            if data.primary_residence_unit >= 1:
+                primary_unit = next((u for u in units_list if u.unit_label == str(data.primary_residence_unit)), None)
+                if primary_unit:
+                    primary_unit.is_primary_residence = 1
+                prop.owner_occupied = primary_unit is not None
+            else:
+                prop.owner_occupied = False
+        if data.unit_count is not None:
+            new_count = max(1, int(data.unit_count))
+            units_list = db.query(Unit).filter(Unit.property_id == prop.id).order_by(Unit.unit_label).all()
+            current_count = len(units_list)
+            if new_count > current_count:
+                for i in range(current_count + 1, new_count + 1):
+                    u = Unit(
+                        property_id=prop.id,
+                        unit_label=str(i),
+                        occupancy_status=OccupancyStatus.unknown.value,
+                        is_primary_residence=0,
+                    )
+                    db.add(u)
+            elif new_count < current_count:
+                units_to_remove = units_list[new_count:]
+                for u in units_to_remove:
+                    has_stay = db.query(Stay).filter(Stay.unit_id == u.id).first() is not None
+                    has_invite = db.query(Invitation).filter(Invitation.unit_id == u.id).first() is not None
+                    has_resident_mode = db.query(ResidentMode).filter(ResidentMode.unit_id == u.id).first() is not None
+                    if has_stay or has_invite or has_resident_mode:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Cannot reduce units: Unit {u.unit_label} has stays, invitations, or resident mode. Remove those first.",
+                        )
+                    db.delete(u)
     # Shield Mode: owner can turn ON or OFF anytime. Also turns on automatically on last day of stay and when DMS runs; turns off when a new guest accepts an invitation.
     if data.shield_mode_enabled is not None:
         prop.shield_mode_enabled = 1 if data.shield_mode_enabled else 0
@@ -1381,6 +1959,19 @@ def update_property(
             user_agent=ua,
             meta={"property_id": property_id, "property_name": property_name, "changes": changes_meta},
         )
+        create_ledger_event(
+            db,
+            ACTION_PROPERTY_UPDATED,
+            target_object_type="Property",
+            target_object_id=prop.id,
+            property_id=prop.id,
+            actor_user_id=current_user.id,
+            previous_value=old,
+            new_value=new,
+            meta={"property_id": property_id, "property_name": property_name, "changes": changes_meta},
+            ip_address=ip,
+            user_agent=ua,
+        )
         if "shield_mode_enabled" in changes_meta:
             new_shield = changes_meta["shield_mode_enabled"].get("new")
             create_log(
@@ -1394,6 +1985,17 @@ def update_property(
                 ip_address=ip,
                 user_agent=ua,
                 meta={"property_id": property_id, "property_name": property_name},
+            )
+            create_ledger_event(
+                db,
+                ACTION_SHIELD_MODE_OFF if new_shield == 0 else ACTION_SHIELD_MODE_ON,
+                target_object_type="Property",
+                target_object_id=prop.id,
+                property_id=prop.id,
+                actor_user_id=current_user.id,
+                meta={"property_id": property_id, "property_name": property_name},
+                ip_address=ip,
+                user_agent=ua,
             )
     db.commit()
     db.refresh(prop)
@@ -1455,6 +2057,17 @@ def delete_property(
         user_agent=ua,
         meta={"property_id": property_id, "property_name": property_name},
     )
+    create_ledger_event(
+        db,
+        ACTION_PROPERTY_DELETED,
+        target_object_type="Property",
+        target_object_id=property_id,
+        property_id=property_id,
+        actor_user_id=current_user.id,
+        meta={"property_id": property_id, "property_name": property_name},
+        ip_address=ip,
+        user_agent=ua,
+    )
     db.commit()
     prop.deleted_at = datetime.now(timezone.utc)
     db.commit()
@@ -1504,6 +2117,17 @@ def reactivate_property(
         user_agent=ua,
         meta={"property_id": property_id, "property_name": property_name},
     )
+    create_ledger_event(
+        db,
+        ACTION_PROPERTY_REACTIVATED,
+        target_object_type="Property",
+        target_object_id=property_id,
+        property_id=property_id,
+        actor_user_id=current_user.id,
+        meta={"property_id": property_id, "property_name": property_name},
+        ip_address=ip,
+        user_agent=ua,
+    )
     db.commit()
     db.refresh(prop)
     return PropertyResponse.model_validate(prop)
@@ -1514,26 +2138,11 @@ def create_invitation(
     request: Request,
     data: InvitationCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_owner_onboarding_complete),
+    current_user: User = Depends(get_current_user),
+    context_mode: str = Depends(get_context_mode),
 ):
-    """Create a guest invitation; store it and return code for the link. Requires onboarding invoice to be paid first."""
-    prop_id = data.property_id
-    if not prop_id:
-        raise HTTPException(status_code=400, detail="property_id required")
-    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
-    if not profile:
-        raise HTTPException(status_code=404, detail="Owner profile not found")
-    # Require onboarding invoice paid before inviting guests (if onboarding was charged)
-    if profile.onboarding_billing_completed_at is not None and profile.onboarding_invoice_paid_at is None:
-        raise HTTPException(
-            status_code=403,
-            detail="Pay your onboarding invoice before inviting guests. Go to Billing to view and pay your invoice.",
-        )
-    prop = db.query(Property).filter(Property.id == prop_id, Property.owner_profile_id == profile.id).first()
-    if not prop:
-        raise HTTPException(status_code=404, detail="Property not found")
-    if prop.deleted_at is not None:
-        raise HTTPException(status_code=400, detail="Cannot create invitation for an inactive property. Reactivate the property first.")
+    """Create a guest invitation only (invitation_kind=guest). Owner, Tenant, or Property Manager can create.
+    Tenants may only invite guests for their assigned unit; they cannot create tenant invites."""
     if not (data.guest_name or "").strip():
         raise HTTPException(status_code=400, detail="guest_name is required")
     if not data.checkin_date or not data.checkout_date:
@@ -1542,10 +2151,112 @@ def create_invitation(
     end = datetime.strptime(data.checkout_date, "%Y-%m-%d").date()
     if end <= start:
         raise HTTPException(status_code=400, detail="checkout_date must be after checkin_date")
+    if start < date.today():
+        raise HTTPException(status_code=400, detail="check-in date cannot be in the past")
+
+    prop = None
+    unit_id = data.unit_id
+    owner_user_id = None
+
+    if current_user.role == UserRole.owner:
+        # Owner: property_id required (or unit_id to infer property)
+        prop_id = data.property_id
+        if unit_id is not None:
+            unit = db.query(Unit).filter(Unit.id == unit_id).first()
+            if not unit:
+                raise HTTPException(status_code=404, detail="Unit not found")
+            prop = db.query(Property).filter(Property.id == unit.property_id).first()
+            if not prop:
+                raise HTTPException(status_code=404, detail="Property not found")
+            profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+            if not profile or prop.owner_profile_id != profile.id:
+                raise HTTPException(status_code=403, detail="You do not own this property")
+            if profile.onboarding_billing_completed_at is not None and profile.onboarding_invoice_paid_at is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Pay your onboarding invoice before inviting guests. Go to Billing to view and pay your invoice.",
+                )
+        elif prop_id:
+            profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+            if not profile:
+                raise HTTPException(status_code=404, detail="Owner profile not found")
+            if profile.onboarding_billing_completed_at is not None and profile.onboarding_invoice_paid_at is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Pay your onboarding invoice before inviting guests. Go to Billing to view and pay your invoice.",
+                )
+            prop = db.query(Property).filter(Property.id == prop_id, Property.owner_profile_id == profile.id).first()
+            if not prop:
+                raise HTTPException(status_code=404, detail="Property not found")
+            # Infer unit for single-unit: use first unit if exists; else leave null (backward compat)
+            units = db.query(Unit).filter(Unit.property_id == prop.id).all()
+            if not prop.is_multi_unit and units:
+                unit_id = units[0].id
+        else:
+            raise HTTPException(status_code=400, detail="property_id or unit_id required")
+        owner_user_id = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+        owner_user_id = owner_user_id.user_id if owner_user_id else current_user.id
+
+    elif current_user.role == UserRole.tenant:
+        if unit_id is None:
+            raise HTTPException(status_code=400, detail="unit_id required for tenant")
+        if not can_perform_action(db, current_user, Action.INVITE_GUEST, unit_id=unit_id, mode="business"):
+            raise HTTPException(status_code=403, detail="You do not have access to invite guests for this unit")
+        unit = db.query(Unit).filter(Unit.id == unit_id).first()
+        if not unit:
+            raise HTTPException(status_code=404, detail="Unit not found")
+        prop = db.query(Property).filter(Property.id == unit.property_id).first()
+        if not prop:
+            raise HTTPException(status_code=404, detail="Property not found")
+        owner_profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+        owner_user_id = owner_profile.user_id if owner_profile else None
+        if not owner_user_id:
+            raise HTTPException(status_code=500, detail="Property has no owner")
+        ta = (
+            db.query(TenantAssignment)
+            .filter(TenantAssignment.unit_id == unit_id, TenantAssignment.user_id == current_user.id)
+            .order_by(TenantAssignment.start_date.desc())
+            .first()
+        )
+        if not ta:
+            raise HTTPException(status_code=403, detail="You are not assigned to this unit")
+        if start < ta.start_date:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Guest check-in cannot be before your stay starts ({ta.start_date.isoformat()}). You can only invite guests for the duration of your own stay.",
+            )
+        if ta.end_date is not None and end > ta.end_date:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Guest check-out cannot be after your stay ends ({ta.end_date.isoformat()}). You can only invite guests for the duration of your own stay.",
+            )
+
+    elif current_user.role == UserRole.property_manager:
+        if unit_id is None:
+            raise HTTPException(status_code=400, detail="unit_id required for property manager")
+        # Manager can invite for any unit in a property they manage (business) or where they live (personal)
+        if not can_perform_action(db, current_user, Action.INVITE_GUEST, unit_id=unit_id, mode="business") and not can_perform_action(db, current_user, Action.INVITE_GUEST, unit_id=unit_id, mode="personal"):
+            raise HTTPException(status_code=403, detail="You do not have access to invite guests for this unit")
+        unit = db.query(Unit).filter(Unit.id == unit_id).first()
+        if not unit:
+            raise HTTPException(status_code=404, detail="Unit not found")
+        prop = db.query(Property).filter(Property.id == unit.property_id).first()
+        if not prop:
+            raise HTTPException(status_code=404, detail="Property not found")
+        owner_profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+        owner_user_id = owner_profile.user_id if owner_profile else None
+        if not owner_user_id:
+            raise HTTPException(status_code=500, detail="Property has no owner")
+
+    else:
+        raise HTTPException(status_code=403, detail="Only owners, tenants, or property managers (personal mode) can create invitations")
+
+    if prop.deleted_at is not None:
+        raise HTTPException(status_code=400, detail="Cannot create invitation for an inactive property. Reactivate the property first.")
+
     code = "INV-" + secrets.token_hex(4).upper()
     purpose = _PURPOSE_MAP.get((data.purpose or "visit").lower(), PurposeOfStay.travel)
     rel = _REL_MAP.get((data.relationship or "friend").lower(), RelationshipToOwner.friend)
-    # Dead Man's Switch is always on: triggered automatically; alerts by Email and Dashboard notification
     dms = 1
     dms_email = 1
     dms_sms = 0
@@ -1553,8 +2264,10 @@ def create_invitation(
     dms_phone = 0
     inv = Invitation(
         invitation_code=code,
-        owner_id=current_user.id,
+        owner_id=owner_user_id,
         property_id=prop.id,
+        unit_id=unit_id,
+        invited_by_user_id=current_user.id,
         guest_name=(data.guest_name or "").strip() or None,
         guest_email=(data.guest_email or "").strip() or None,
         stay_start_date=start,
@@ -1564,6 +2277,7 @@ def create_invitation(
         region_code=prop.region_code,
         status="pending",
         token_state="STAGED",
+        invitation_kind="guest",
         dead_mans_switch_enabled=dms,
         dead_mans_switch_alert_email=dms_email,
         dead_mans_switch_alert_sms=dms_sms,
@@ -1588,8 +2302,235 @@ def create_invitation(
         user_agent=ua,
         meta={"invitation_code": code, "token_state": "STAGED", "guest_name": (data.guest_name or "").strip(), "guest_email": (data.guest_email or "").strip()},
     )
+    invited_by_role = getattr(current_user.role, "value", None) or str(current_user.role) if current_user.role else None
+    create_ledger_event(
+        db,
+        ACTION_GUEST_INVITE_CREATED,
+        target_object_type="Invitation",
+        target_object_id=inv.id,
+        property_id=prop.id,
+        unit_id=unit_id,
+        invitation_id=inv.id,
+        actor_user_id=current_user.id,
+        meta={
+            "invitation_code": code,
+            "token_state": "STAGED",
+            "guest_name": (data.guest_name or "").strip(),
+            "guest_email": (data.guest_email or "").strip(),
+            "stay_start_date": str(start),
+            "stay_end_date": str(end),
+            "invited_by_role": invited_by_role,
+        },
+        ip_address=ip,
+        user_agent=ua,
+    )
     db.commit()
     return {"invitation_code": code}
+
+
+@router.post("/properties/{property_id}/invite-tenant")
+def owner_invite_tenant_by_property(
+    property_id: int,
+    request: Request,
+    data: InviteTenantRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Create a tenant invitation for a single-unit property (no Unit rows). Creates invitation with unit_id=null."""
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Owner profile not found")
+    prop = db.query(Property).filter(
+        Property.id == property_id,
+        Property.owner_profile_id == profile.id,
+        Property.deleted_at.is_(None),
+    ).first()
+    if not prop:
+        raise HTTPException(status_code=404, detail="Property not found")
+    units = db.query(Unit).filter(Unit.property_id == property_id).all()
+    if units:
+        raise HTTPException(status_code=400, detail="Use unit-specific invite for multi-unit properties")
+    # Create an implicit unit for single-unit so TenantAssignment has a unit_id when tenant signs up
+    unit = Unit(property_id=property_id, unit_label="1", occupancy_status=OccupancyStatus.occupied.value)
+    db.add(unit)
+    db.flush()
+    tenant_name = (data.tenant_name or "").strip()
+    tenant_email = (data.tenant_email or "").strip()
+    if not tenant_name:
+        raise HTTPException(status_code=400, detail="tenant_name is required")
+    try:
+        start = datetime.strptime(data.lease_start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(data.lease_end_date, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="lease_start_date and lease_end_date must be YYYY-MM-DD")
+    if end <= start:
+        raise HTTPException(status_code=400, detail="lease_end_date must be after lease_start_date")
+    if start < date.today():
+        raise HTTPException(status_code=400, detail="Lease start date cannot be in the past")
+    code = "INV-" + secrets.token_hex(4).upper()
+    inv = Invitation(
+        invitation_code=code,
+        owner_id=current_user.id,
+        property_id=prop.id,
+        unit_id=unit.id,
+        invited_by_user_id=current_user.id,
+        guest_name=tenant_name,
+        guest_email=tenant_email or None,
+        stay_start_date=start,
+        stay_end_date=end,
+        purpose_of_stay=PurposeOfStay.other,
+        relationship_to_owner=RelationshipToOwner.other,
+        region_code=prop.region_code,
+        status="ongoing",
+        token_state="BURNED",
+        invitation_kind="tenant",
+        dead_mans_switch_enabled=1,
+        dead_mans_switch_alert_email=1,
+        dead_mans_switch_alert_sms=0,
+        dead_mans_switch_alert_dashboard=1,
+        dead_mans_switch_alert_phone=0,
+    )
+    db.add(inv)
+    db.commit()
+    db.refresh(inv)
+    ip = request.client.host if request.client else None
+    ua = (request.headers.get("user-agent") or "").strip() or None
+    create_log(
+        db,
+        CATEGORY_STATUS_CHANGE,
+        "Invitation created (owner invite tenant, single-unit)",
+        f"Invite ID {code} created for tenant {tenant_name} at property {prop.id}. Owner invited tenant to register.",
+        property_id=prop.id,
+        invitation_id=inv.id,
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        ip_address=ip,
+        user_agent=ua,
+        meta={"invitation_code": code, "tenant_name": tenant_name, "tenant_email": tenant_email or "", "property_id": property_id},
+    )
+    tenant_invite_message = f"Tenant invitation created for {tenant_name} at property. Invite ID {code}. Lease {start}–{end}."
+    create_ledger_event(
+        db,
+        ACTION_TENANT_INVITED,
+        target_object_type="Invitation",
+        target_object_id=inv.id,
+        property_id=prop.id,
+        unit_id=unit.id,
+        invitation_id=inv.id,
+        actor_user_id=current_user.id,
+        meta={
+            "message": tenant_invite_message,
+            "invitation_code": code,
+            "tenant_name": tenant_name,
+            "tenant_email": tenant_email or "",
+            "property_id": property_id,
+            "lease_start_date": str(start),
+            "lease_end_date": str(end),
+        },
+        ip_address=ip,
+        user_agent=ua,
+    )
+    db.commit()
+    return {"invitation_code": code, "status": "success", "message": "Tenant invitation created. Share the invite link with the tenant."}
+
+
+@router.post("/units/{unit_id}/invite-tenant")
+def owner_invite_tenant(
+    unit_id: int,
+    request: Request,
+    data: InviteTenantRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """Create an invitation for a tenant to register. Owner must own the property that contains the unit."""
+    unit = db.query(Unit).filter(Unit.id == unit_id).first()
+    if not unit:
+        raise HTTPException(status_code=404, detail="Unit not found")
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Owner profile not found")
+    prop = db.query(Property).filter(Property.id == unit.property_id, Property.owner_profile_id == profile.id).first()
+    if not prop:
+        raise HTTPException(status_code=403, detail="You do not own the property for this unit")
+    tenant_name = (data.tenant_name or "").strip()
+    tenant_email = (data.tenant_email or "").strip()
+    if not tenant_name:
+        raise HTTPException(status_code=400, detail="tenant_name is required")
+    try:
+        start = datetime.strptime(data.lease_start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(data.lease_end_date, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="lease_start_date and lease_end_date must be YYYY-MM-DD")
+    if end <= start:
+        raise HTTPException(status_code=400, detail="lease_end_date must be after lease_start_date")
+    if start < date.today():
+        raise HTTPException(status_code=400, detail="Lease start date cannot be in the past")
+    code = "INV-" + secrets.token_hex(4).upper()
+    inv = Invitation(
+        invitation_code=code,
+        owner_id=current_user.id,
+        property_id=prop.id,
+        unit_id=unit_id,
+        invited_by_user_id=current_user.id,
+        guest_name=tenant_name,
+        guest_email=tenant_email or None,
+        stay_start_date=start,
+        stay_end_date=end,
+        purpose_of_stay=PurposeOfStay.other,
+        relationship_to_owner=RelationshipToOwner.other,
+        region_code=prop.region_code,
+        status="ongoing",
+        token_state="BURNED",
+        invitation_kind="tenant",
+        dead_mans_switch_enabled=1,
+        dead_mans_switch_alert_email=1,
+        dead_mans_switch_alert_sms=0,
+        dead_mans_switch_alert_dashboard=1,
+        dead_mans_switch_alert_phone=0,
+    )
+    db.add(inv)
+    db.commit()
+    db.refresh(inv)
+    ip = request.client.host if request.client else None
+    ua = (request.headers.get("user-agent") or "").strip() or None
+    create_log(
+        db,
+        CATEGORY_STATUS_CHANGE,
+        "Invitation created (owner invite tenant)",
+        f"Invite ID {code} created for tenant {tenant_name} at unit {unit_id}. Owner invited tenant to register.",
+        property_id=prop.id,
+        invitation_id=inv.id,
+        actor_user_id=current_user.id,
+        actor_email=current_user.email,
+        ip_address=ip,
+        user_agent=ua,
+        meta={"invitation_code": code, "tenant_name": tenant_name, "tenant_email": tenant_email or "", "unit_id": unit_id},
+    )
+    unit_label = getattr(unit, "unit_label", str(unit_id))
+    tenant_invite_message = f"Tenant invitation created for {tenant_name} at Unit {unit_label}. Invite ID {code}. Lease {start}–{end}."
+    create_ledger_event(
+        db,
+        ACTION_TENANT_INVITED,
+        target_object_type="Invitation",
+        target_object_id=inv.id,
+        property_id=prop.id,
+        unit_id=unit_id,
+        invitation_id=inv.id,
+        actor_user_id=current_user.id,
+        meta={
+            "message": tenant_invite_message,
+            "invitation_code": code,
+            "tenant_name": tenant_name,
+            "tenant_email": tenant_email or "",
+            "unit_id": unit_id,
+            "lease_start_date": str(start),
+            "lease_end_date": str(end),
+        },
+        ip_address=ip,
+        user_agent=ua,
+    )
+    db.commit()
+    return {"invitation_code": code, "status": "success", "message": "Tenant invitation created. Share the invite link with the tenant."}
 
 
 @router.get("/invitation-details")
@@ -1597,15 +2538,20 @@ def get_invitation_details(
     code: str,
     db: Session = Depends(get_db),
 ):
-    """Public: get invitation details by code for the invite signup page (pending or ongoing from bulk upload)."""
+    """Public: get invitation details by code for the invite signup page (guest or tenant). Type comes from invitation_kind in DB."""
     code = code.strip().upper()
     inv = db.query(Invitation).filter(Invitation.invitation_code == code, Invitation.status.in_(["pending", "ongoing"])).first()
     if not inv:
         return {"valid": False}
     prop = db.query(Property).filter(Property.id == inv.property_id).first()
     owner = db.query(User).filter(User.id == inv.owner_id).first()
+    invitation_kind = (getattr(inv, "invitation_kind", None) or "guest").strip().lower()
+    if invitation_kind not in ("guest", "tenant"):
+        invitation_kind = "guest"
     return {
         "valid": True,
+        "invitation_kind": invitation_kind,
+        "is_tenant_invite": invitation_kind == "tenant",
         "property_name": prop.name if prop else None,
         "property_address": f"{prop.street}, {prop.city}, {prop.state}{(' ' + prop.zip_code) if (prop and prop.zip_code) else ''}" if prop else None,
         "stay_start_date": str(inv.stay_start_date),
@@ -1613,4 +2559,5 @@ def get_invitation_details(
         "region_code": inv.region_code,
         "host_name": (owner.full_name if owner else None) or (owner.email if owner else ""),
         "guest_name": inv.guest_name,
+        "guest_email": getattr(inv, "guest_email", None) or None,
     }

@@ -2,10 +2,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Card, Button, Input, Modal } from '../../components/UI';
 import { InviteGuestModal } from '../../components/InviteGuestModal';
+import { InviteRoleChoiceModal } from '../../components/InviteRoleChoiceModal';
 import { UserSession } from '../../types';
 import { JURISDICTION_RULES } from '../../services/jleService';
-import { propertiesApi, dashboardApi, APP_ORIGIN, type Property, type OwnerStayView, type BillingResponse } from '../../services/api';
+import { propertiesApi, dashboardApi, APP_ORIGIN, emitPropertiesChanged, getContextMode, setContextMode, type Property, type OwnerStayView, type OwnerAuditLogEntry, type BillingResponse } from '../../services/api';
+import { ModeSwitcher } from '../../components/ModeSwitcher';
 import { copyToClipboard } from '../../utils/clipboard';
+import { getTodayLocal } from '../../utils/dateUtils';
+import { toUserFriendlyInvitationError } from '../../utils/invitationErrors';
 
 function formatStayDuration(startStr: string, endStr: string): string {
   const start = new Date(startStr);
@@ -20,9 +24,13 @@ const PROPERTY_TYPES = [
   { id: 'apartment', name: 'Apartment' },
   { id: 'condo', name: 'Condo' },
   { id: 'townhouse', name: 'Townhouse' },
+  { id: 'duplex', name: 'Duplex' },
+  { id: 'triplex', name: 'Triplex' },
+  { id: 'quadplex', name: 'Quadplex' },
   { id: 'entire_home', name: 'Entire home' },
   { id: 'private_room', name: 'Private room' },
 ];
+const MULTI_UNIT_TYPES = ['apartment', 'duplex', 'triplex', 'quadplex'];
 
 function isOverstayed(endDateStr: string): boolean {
   const end = new Date(endDateStr);
@@ -39,6 +47,15 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showInviteModal, setShowInviteModal] = useState(false);
+  const [showInviteRoleChoice, setShowInviteRoleChoice] = useState(false);
+  const [showInviteTenantModal, setShowInviteTenantModal] = useState(false);
+  const [inviteTenantForm, setInviteTenantForm] = useState({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
+  const [inviteTenantUnitId, setInviteTenantUnitId] = useState<number | null>(null);
+  const [inviteTenantSubmitting, setInviteTenantSubmitting] = useState(false);
+  const [inviteTenantLink, setInviteTenantLink] = useState<string | null>(null);
+  const [showInviteManagerModal, setShowInviteManagerModal] = useState(false);
+  const [inviteManagerEmail, setInviteManagerEmail] = useState('');
+  const [inviteManagerSending, setInviteManagerSending] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -55,6 +72,8 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
     region_code: '',
     property_type: 'house',
     bedrooms: '1',
+    unit_count: '',
+    primary_residence_unit: '' as string,
     is_primary_residence: false,
     tax_id: '',
     apn: '',
@@ -69,7 +88,30 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
   const [showVerifyQRModal, setShowVerifyQRModal] = useState(false);
   const [verifyQRInviteId, setVerifyQRInviteId] = useState<string | null>(null);
   const [billing, setBilling] = useState<BillingResponse | null>(null);
+  const [personalModeUnits, setPersonalModeUnits] = useState<number[]>([]);
+  const [contextMode, setContextModeState] = useState<'business' | 'personal'>(() => getContextMode());
+  const [personalModeUnitId, setPersonalModeUnitId] = useState<number | null>(null);
+  const [presence, setPresence] = useState<'present' | 'away'>('present');
+  const [presenceAwayStartedAt, setPresenceAwayStartedAt] = useState<string | null>(null);
+  const [presenceGuestsAuthorized, setPresenceGuestsAuthorized] = useState(false);
+  const [presenceUpdating, setPresenceUpdating] = useState(false);
+  const [presenceShowAwayConfirm, setPresenceShowAwayConfirm] = useState(false);
+  const [presenceAwayGuestsAuthorized, setPresenceAwayGuestsAuthorized] = useState(false);
+  const [propertyLogs, setPropertyLogs] = useState<OwnerAuditLogEntry[]>([]);
+  const [propertyLogsLoading, setPropertyLogsLoading] = useState(false);
+  const [logMessageModalEntry, setLogMessageModalEntry] = useState<OwnerAuditLogEntry | null>(null);
+  const [assignedManagers, setAssignedManagers] = useState<Array<{ user_id: number; email: string; full_name: string | null; has_resident_mode: boolean; resident_unit_id: number | null; resident_unit_label: string | null }>>([]);
+  const [propertyUnits, setPropertyUnits] = useState<Array<{ id: number; unit_label: string; occupancy_status?: string; is_primary_residence?: boolean; occupied_by?: string | null; invite_id?: string | null }>>([]);
+  const [addResidentModeForManager, setAddResidentModeForManager] = useState<Record<number, number>>({});
+  const [addResidentModeSaving, setAddResidentModeSaving] = useState(false);
+  const [removeResidentModeSaving, setRemoveResidentModeSaving] = useState<number | null>(null);
   const id = Number(propertyId);
+
+  const handleContextModeChange = (mode: 'business' | 'personal') => {
+    setContextMode(mode);
+    setContextModeState(mode);
+    loadData();
+  };
   const canInvite = billing?.can_invite !== false;
   const stateKey = property?.state ?? 'FL';
   // Prefer jurisdiction from API (JurisdictionInfo SOT); fallback to frontend rules for legacy/offline
@@ -108,10 +150,15 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
     }
     setLoading(true);
     setError(null);
-    Promise.all([propertiesApi.get(id), dashboardApi.ownerStays()])
-      .then(([prop, staysData]) => {
+    Promise.all([
+      propertiesApi.get(id),
+      dashboardApi.ownerStays(),
+      dashboardApi.ownerPersonalModeUnits().catch(() => ({ unit_ids: [] })),
+    ])
+      .then(([prop, staysData, pmUnits]) => {
         setProperty(prop);
         setStays(staysData);
+        setPersonalModeUnits((pmUnits as { unit_ids: number[] }).unit_ids || []);
       })
       .catch((e) => {
         const msg = (e as Error)?.message ?? 'Failed to load property.';
@@ -131,11 +178,59 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
       .catch(() => setBilling({ invoices: [], payments: [], can_invite: true }));
   }, []);
 
+  useEffect(() => {
+    if (contextMode === 'personal' && property?.id) {
+      dashboardApi.ownerPropertyPersonalModeUnit(property.id)
+        .then((r) => setPersonalModeUnitId(r.unit_id ?? null))
+        .catch(() => setPersonalModeUnitId(null));
+    } else {
+      setPersonalModeUnitId(null);
+    }
+  }, [contextMode, property?.id]);
+
+  useEffect(() => {
+    if (personalModeUnitId != null) {
+      dashboardApi.getPresence(personalModeUnitId).then((p) => {
+        setPresence((p.status as 'present' | 'away') || 'present');
+        setPresenceAwayStartedAt(p.away_started_at || null);
+        setPresenceGuestsAuthorized(p.guests_authorized_during_away ?? false);
+      }).catch(() => {});
+    }
+  }, [personalModeUnitId]);
+
+  const loadPropertyLogs = useCallback(() => {
+    if (!property?.id) return;
+    setPropertyLogsLoading(true);
+    dashboardApi.ownerLogs({ property_id: property.id })
+      .then(setPropertyLogs)
+      .catch(() => setPropertyLogs([]))
+      .finally(() => setPropertyLogsLoading(false));
+  }, [property?.id]);
+
+  useEffect(() => {
+    if (activeTab === 'logs') loadPropertyLogs();
+  }, [activeTab, loadPropertyLogs]);
+
+  useEffect(() => {
+    if (!property?.id || contextMode !== 'business') return;
+    propertiesApi.listAssignedManagers(property.id).then(setAssignedManagers).catch(() => setAssignedManagers([]));
+    if (property.is_multi_unit) {
+      propertiesApi.getUnits(property.id).then((u) => setPropertyUnits(u.filter((x) => x.id > 0))).catch(() => setPropertyUnits([]));
+    } else {
+      setPropertyUnits([]);
+    }
+  }, [property?.id, property?.is_multi_unit, contextMode]);
+
   /** When edit modal opens, always pre-fill form from current property so existing values are retained. */
   const syncEditFormFromProperty = useCallback(() => {
     if (!property) return;
     const typeRaw = property.property_type_label ?? property.property_type ?? 'house';
     const typeNorm = String(typeRaw).toLowerCase().trim().replace(/\s+/g, '_');
+    const isMulti = property.is_multi_unit ?? MULTI_UNIT_TYPES.includes(typeNorm);
+    const unitCount = isMulti && propertyUnits.length > 0 ? String(propertyUnits.length) : '';
+    const primaryUnit = isMulti && propertyUnits.length > 0
+      ? (propertyUnits.find((u) => u.is_primary_residence)?.unit_label ?? '')
+      : '';
     setEditForm({
       property_name: property.name ?? '',
       street_address: property.street ?? '',
@@ -145,11 +240,13 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
       region_code: property.region_code ?? '',
       property_type: typeNorm || 'house',
       bedrooms: property.bedrooms ?? '1',
+      unit_count: unitCount,
+      primary_residence_unit: primaryUnit,
       is_primary_residence: property.owner_occupied ?? false,
       tax_id: property.tax_id ?? '',
       apn: property.apn ?? '',
     });
-  }, [property]);
+  }, [property, propertyUnits]);
 
   const openEdit = () => {
     if (property) {
@@ -175,10 +272,18 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
       setEditError('Street address, city, and state are required.');
       return;
     }
+    const isMulti = MULTI_UNIT_TYPES.includes(editForm.property_type);
+    if (isMulti) {
+      const uc = parseInt(editForm.unit_count, 10);
+      if (!editForm.unit_count.trim() || isNaN(uc) || uc < 1) {
+        setEditError('For multi-unit properties, enter a valid number of units (at least 1).');
+        return;
+      }
+    }
     setEditSaving(true);
     setEditError(null);
     try {
-      const payload: Parameters<typeof propertiesApi.update>[1] = {
+      const payload: Record<string, unknown> = {
         street_address: street,
         city,
         state,
@@ -191,9 +296,23 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
         tax_id: editForm.tax_id?.trim() || undefined,
         apn: editForm.apn?.trim() || undefined,
       };
-      const updated = await propertiesApi.update(property.id, payload);
+      if (isMulti) {
+        const uc = parseInt(editForm.unit_count, 10);
+        if (!isNaN(uc) && uc >= 1) payload.unit_count = uc;
+        if (editForm.primary_residence_unit) {
+          const pu = parseInt(editForm.primary_residence_unit, 10);
+          if (!isNaN(pu) && pu >= 1) payload.primary_residence_unit = pu;
+        } else {
+          payload.primary_residence_unit = 0;
+        }
+      }
+      const updated = await propertiesApi.update(property.id, payload as Parameters<typeof propertiesApi.update>[1]);
       setProperty(updated);
       setEditOpen(false);
+      emitPropertiesChanged();
+      if (updated.is_multi_unit) {
+        propertiesApi.getUnits(property.id).then((u) => setPropertyUnits(u.filter((x) => x.id > 0))).catch(() => {});
+      }
       notify('success', 'Property updated.');
     } catch (e) {
       const msg = (e as Error)?.message ?? 'Failed to update property.';
@@ -224,16 +343,19 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
 
   const address = property ? [property.street, property.city, property.state, property.zip_code].filter(Boolean).join(', ') : '';
 
-  const sidebarNav = [
+  const sidebarNavAll = [
     { id: 'dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
     { id: 'properties', label: 'My Properties', icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' },
     { id: 'guests', label: 'Guests', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' },
     { id: 'invitations', label: 'Invitations', icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' },
     { id: 'billing', label: 'Billing', icon: 'M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v2H9v2h2v6a2 2 0 002 2h2a2 2 0 002-2v-6h2V9zm-6 0V7a2 2 0 00-2-2H5a2 2 0 00-2 2v2h4z' },
-    { id: 'logs', label: 'Logs', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+    { id: 'logs', label: 'Event ledger', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
     { id: 'settings', label: 'Settings', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z' },
     { id: 'help', label: 'Help Center', icon: 'M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
   ];
+  const sidebarNav = contextMode === 'personal'
+    ? sidebarNavAll.filter((i) => i.id !== 'logs' && i.id !== 'invitations')
+    : sidebarNavAll;
 
   const onNav = (itemId: string) => {
     if (itemId === 'settings') navigate('settings');
@@ -287,6 +409,15 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
             </ul>
           )}
         </div>
+
+        {/* Mode switcher at bottom (same as OwnerDashboard) */}
+        <div className="mt-6 pt-6 border-t border-slate-200 flex-shrink-0">
+          <ModeSwitcher
+            contextMode={contextMode}
+            personalModeUnits={personalModeUnits}
+            onContextModeChange={handleContextModeChange}
+          />
+        </div>
       </aside>
 
       <main className="flex-grow overflow-y-auto bg-transparent p-6 lg:p-8">
@@ -320,7 +451,9 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
             <p className="text-slate-600 mt-1">{address || '—'}</p>
           </div>
           <div className="flex flex-wrap gap-3">
-            <Button variant="outline" onClick={openEdit}>Edit Property</Button>
+            {contextMode !== 'personal' && (
+              <Button variant="outline" onClick={openEdit}>Edit Property</Button>
+            )}
             {!isInactive && (
               <span className={!canInvite ? 'group relative inline-block cursor-not-allowed' : undefined}>
                 {!canInvite && (
@@ -339,14 +472,25 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                       navigate('dashboard/billing');
                       return;
                     }
-                    setShowInviteModal(true);
+                    setShowInviteRoleChoice(true);
                   }}
                   disabled={!canInvite}
                   className={!canInvite ? 'pointer-events-none' : undefined}
                 >
-                  Invite Guest
+                  Invite
                 </Button>
               </span>
+            )}
+            {!isInactive && contextMode !== 'personal' && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setInviteManagerEmail('');
+                  setShowInviteManagerModal(true);
+                }}
+              >
+                Invite Manager
+              </Button>
             )}
             {isInactive ? (
               <Button
@@ -368,7 +512,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
               >
                 {reactivating ? 'Reactivating…' : 'Reactivate property'}
               </Button>
-            ) : (
+            ) : contextMode !== 'personal' ? (
               <Button
                 variant="ghost"
                 onClick={() => { setDeleteConfirmOpen(true); setDeleteError(null); }}
@@ -378,29 +522,127 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
               >
                 Remove Property
               </Button>
-            )}
+            ) : null}
           </div>
         </div>
       </header>
 
       <div className="flex border-b border-slate-200 mb-8 overflow-x-auto no-scrollbar">
-        {['Overview', 'Stay', 'Guests', 'Documentation'].map(tab => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab.toLowerCase())}
-            className={`px-6 py-3 text-sm font-medium whitespace-nowrap transition-all border-b-2 ${activeTab === tab.toLowerCase() ? 'text-slate-800 border-slate-800' : 'text-slate-500 border-transparent hover:text-slate-700'}`}
-          >
-            {tab}
-          </button>
-        ))}
+        {(['Overview', 'Stay', 'Guests', 'Documentation', 'Event ledger'] as const).map((tab) => {
+          const tabId = tab === 'Event ledger' ? 'logs' : tab.toLowerCase();
+          return (
+            <button
+              key={tabId}
+              onClick={() => setActiveTab(tabId)}
+              className={`px-6 py-3 text-sm font-medium whitespace-nowrap transition-all border-b-2 ${activeTab === tabId ? 'text-slate-800 border-slate-800' : 'text-slate-500 border-transparent hover:text-slate-700'}`}
+            >
+              {tab}
+            </button>
+          );
+        })}
       </div>
 
       <div className="animate-in fade-in slide-in-from-bottom-2 duration-500">
         {activeTab === 'overview' && (
           <div className="space-y-8">
+            {/* Presence card when in Personal Mode (shows for any property where owner has a personal-mode unit) */}
+            {contextMode === 'personal' && personalModeUnitId != null && (
+              <Card className="p-6 border-slate-200">
+                <h3 className="font-medium text-gray-900 mb-3">Presence</h3>
+                <p className="text-sm text-gray-600 mb-4">Let others know if you are at the property or away.</p>
+                <div className="flex flex-wrap items-center gap-4">
+                  <div className={`px-4 py-2 rounded-lg ${presence === 'present' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                    {presence === 'present' ? 'You are here' : presenceAwayStartedAt ? `Away since ${new Date(presenceAwayStartedAt).toLocaleDateString()}` : 'Away'}
+                  </div>
+                  {presence === 'away' && presenceGuestsAuthorized && (
+                    <span className="text-sm text-slate-600">Guests authorized during this period</span>
+                  )}
+                  {!isOccupied && (
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        if (presence === 'present') {
+                          setPresenceShowAwayConfirm(true);
+                          setPresenceAwayGuestsAuthorized(false);
+                        } else {
+                          setPresenceUpdating(true);
+                          dashboardApi.setPresence(personalModeUnitId, 'present')
+                            .then((res) => {
+                              setPresence('present');
+                              setPresenceAwayStartedAt(null);
+                              setPresenceGuestsAuthorized(res.guests_authorized_during_away ?? false);
+                              notify('success', 'Status set to present');
+                            })
+                            .catch((e) => notify('error', (e as Error)?.message || 'Failed to update status'))
+                            .finally(() => setPresenceUpdating(false));
+                        }
+                      }}
+                      disabled={presenceUpdating}
+                    >
+                      Set to {presence === 'present' ? 'Away' : 'Present'}
+                    </Button>
+                  )}
+                </div>
+                {isOccupied && (
+                  <p className="text-sm text-amber-700 mt-3">
+                    You can&apos;t change your presence (here/away) because a guest or tenant is currently staying at this property.
+                  </p>
+                )}
+                {presenceShowAwayConfirm && (
+                  <div className="mt-4 p-4 rounded-lg bg-slate-50 border border-slate-200">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={presenceAwayGuestsAuthorized} onChange={(e) => setPresenceAwayGuestsAuthorized(e.target.checked)} className="rounded" />
+                      <span className="text-sm text-gray-700">Guests authorized during this period</span>
+                    </label>
+                    <div className="flex gap-2 mt-3">
+                      <Button
+                        onClick={async () => {
+                          setPresenceUpdating(true);
+                          setPresenceShowAwayConfirm(false);
+                          try {
+                            const res = await dashboardApi.setPresence(personalModeUnitId, 'away', presenceAwayGuestsAuthorized);
+                            setPresence('away');
+                            setPresenceAwayStartedAt(res.away_started_at ?? null);
+                            setPresenceGuestsAuthorized(res.guests_authorized_during_away ?? false);
+                            notify('success', 'Status set to away');
+                          } catch (e) {
+                            notify('error', (e as Error)?.message || 'Failed to update status');
+                          } finally {
+                            setPresenceUpdating(false);
+                          }
+                        }}
+                        disabled={presenceUpdating}
+                      >
+                        Confirm Away
+                      </Button>
+                      <Button variant="outline" onClick={() => setPresenceShowAwayConfirm(false)}>Cancel</Button>
+                    </div>
+                  </div>
+                )}
+              </Card>
+            )}
+
             <div className="space-y-8">
               {property && (
                 <>
+                {/* Primary residence status – standalone section */}
+                <Card className="p-6 border-slate-200">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Primary residence</h3>
+                  <div className="flex items-center gap-3">
+                    <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium ${
+                      property.owner_occupied ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'
+                    }`}>
+                      <span className={`w-2 h-2 rounded-full ${property.owner_occupied ? 'bg-emerald-500' : 'bg-slate-400'}`} />
+                      {property.owner_occupied ? 'Yes — you live at this property' : 'No'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-2">
+                    {property.owner_occupied
+                      ? 'You live at this property. You can set your presence (here/away) on the Overview tab in Personal Mode.'
+                      : 'You can set your presence (here/away) for this property in Personal Mode.'}
+                  </p>
+                </Card>
+
                 <Card className="p-6 border-slate-200">
                   <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-4">Address & property details</h3>
                   <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
@@ -411,8 +653,9 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                       { label: 'ZIP code', value: property.zip_code },
                       { label: 'Region', value: property.region_code },
                       { label: 'Property type', value: property.property_type_label || property.property_type },
-                      { label: 'Bedrooms', value: property.bedrooms },
-                      { label: 'Primary residence', value: property.owner_occupied ? 'Yes' : 'No' },
+                      ...(property.is_multi_unit
+                        ? [{ label: 'Units', value: propertyUnits.length > 0 ? String(propertyUnits.length) : '—' }]
+                        : [{ label: 'Bedrooms', value: property.bedrooms }]),
                     ].map(({ label, value }) => (
                       <div key={label} className="flex flex-col gap-1">
                         <dt className="text-xs font-medium uppercase tracking-wider text-slate-500">{label}</dt>
@@ -421,6 +664,124 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                     ))}
                   </dl>
                 </Card>
+                {((property.is_multi_unit && propertyUnits.length > 0) || (!property.is_multi_unit && property)) && (
+                  <Card className="p-6 border-slate-200">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-4">Units</h3>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      {(property.is_multi_unit ? propertyUnits : [{ id: 0, unit_label: '1', occupancy_status: property.occupancy_status ?? 'unknown' }]).map((u) => {
+                        const status = (u.occupancy_status ?? 'unknown').toLowerCase();
+                        const statusCls = status === 'occupied' ? 'bg-emerald-100 text-emerald-700' : status === 'vacant' ? 'bg-sky-100 text-sky-700' : status === 'unconfirmed' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600';
+                        const label = status ? status.charAt(0).toUpperCase() + status.slice(1) : (u.occupancy_status ?? 'unknown');
+                        return (
+                          <div key={u.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200 flex flex-col gap-2">
+                            <p className="font-medium text-slate-900">Unit {u.unit_label}</p>
+                            <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusCls}`}>{label}</span>
+                            {u.occupied_by && <p className="text-xs text-slate-600">Occupied by {u.occupied_by}</p>}
+                            {u.invite_id && <p className="text-xs text-slate-500">Invite ID {u.invite_id}</p>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </Card>
+                )}
+                {assignedManagers.length > 0 && (
+                  <Card className="p-6 border-slate-200">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-4">Assigned managers</h3>
+                    <ul className="space-y-3">
+                      {assignedManagers.map((m) => (
+                        <li key={m.user_id} className="flex flex-wrap items-center justify-between gap-2 py-2 border-b border-slate-100 last:border-0">
+                          <div>
+                            <p className="text-sm font-medium text-slate-800">{m.full_name || m.email}</p>
+                            <p className="text-xs text-slate-500">{m.email}</p>
+                            {m.has_resident_mode && m.resident_unit_label && (
+                              <>
+                                <p className="text-xs text-emerald-600 mt-0.5">On-site resident · Unit {m.resident_unit_label}</p>
+                                {m.presence_status && (
+                                  <p className="text-xs text-slate-600 mt-0.5">
+                                    {m.presence_status === 'present' ? (
+                                      <span className="text-emerald-600">Present</span>
+                                    ) : m.presence_away_started_at ? (
+                                      <span className="text-slate-600">Away since {new Date(m.presence_away_started_at).toLocaleDateString()}</span>
+                                    ) : (
+                                      <span className="text-slate-600">Away</span>
+                                    )}
+                                  </p>
+                                )}
+                              </>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {m.has_resident_mode ? (
+                              <Button
+                                variant="outline"
+                                disabled={removeResidentModeSaving === m.user_id}
+                                onClick={async () => {
+                                  if (!property) return;
+                                  setRemoveResidentModeSaving(m.user_id);
+                                  try {
+                                    await propertiesApi.removeManagerResidentMode(property.id, m.user_id);
+                                    notify('success', 'Manager removed as on-site resident. They remain assigned; that unit is now vacant.');
+                                    propertiesApi.listAssignedManagers(property.id).then(setAssignedManagers).catch(() => {});
+                                    loadData();
+                                  } catch (e) {
+                                    notify('error', (e as Error)?.message ?? 'Failed.');
+                                  } finally {
+                                    setRemoveResidentModeSaving(null);
+                                  }
+                                }}
+                              >
+                                {removeResidentModeSaving === m.user_id ? 'Removing…' : 'Remove as on-site resident'}
+                              </Button>
+                            ) : property?.is_multi_unit && propertyUnits.length > 0 ? (
+                              <>
+                                <select
+                                  value={addResidentModeForManager[m.user_id] ?? ''}
+                                  onChange={(e) => {
+                                    const unitId = Number(e.target.value) || 0;
+                                    setAddResidentModeForManager((prev) => {
+                                      const next = { ...prev };
+                                      if (unitId) next[m.user_id] = unitId; else delete next[m.user_id];
+                                      return next;
+                                    });
+                                  }}
+                                  className="text-sm border border-slate-300 rounded-lg px-2 py-1.5"
+                                >
+                                  <option value="">Select unit</option>
+                                  {propertyUnits.map((u) => (
+                                    <option key={u.id} value={u.id}>Unit {u.unit_label}</option>
+                                  ))}
+                                </select>
+                                <Button
+                                  variant="outline"
+                                  disabled={addResidentModeSaving || !addResidentModeForManager[m.user_id]}
+                                  onClick={async () => {
+                                    const unitId = addResidentModeForManager[m.user_id];
+                                    if (!property || !unitId) return;
+                                    setAddResidentModeSaving(true);
+                                    try {
+                                      await propertiesApi.addManagerResidentMode(property.id, m.user_id, unitId);
+                                      notify('success', 'Manager added as on-site resident. They now have Personal Mode.');
+                                      setAddResidentModeForManager((prev) => { const p = { ...prev }; delete p[m.user_id]; return p; });
+                                      propertiesApi.listAssignedManagers(property.id).then(setAssignedManagers).catch(() => {});
+                                      loadData();
+                                    } catch (e) {
+                                      notify('error', (e as Error)?.message ?? 'Failed.');
+                                    } finally {
+                                      setAddResidentModeSaving(false);
+                                    }
+                                  }}
+                                >
+                                  Add as on-site
+                                </Button>
+                              </>
+                            ) : null}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="text-xs text-slate-500 mt-3">On-site residents get Personal Mode (presence, invite guests for their unit).</p>
+                  </Card>
+                )}
                 {property.live_slug && (
                   <Card className="p-6 border-slate-200">
                     <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-4">Live link page</h3>
@@ -827,7 +1188,89 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
             </section>
           </div>
         )}
+
+        {activeTab === 'logs' && (
+          <Card className="overflow-hidden border-slate-200">
+            <div className="p-6">
+              <h3 className="text-lg font-semibold text-slate-800 mb-2">Event ledger for this property</h3>
+              <p className="text-slate-500 text-sm mb-4">Status changes, Shield Mode, guest signatures, and activity for this property. Records cannot be edited or deleted.</p>
+              <Button variant="outline" onClick={loadPropertyLogs} disabled={propertyLogsLoading} className="mb-4">
+                {propertyLogsLoading ? 'Loading…' : 'Refresh'}
+              </Button>
+              {propertyLogsLoading && propertyLogs.length === 0 ? (
+                <p className="p-8 text-slate-500 text-center">Loading logs…</p>
+              ) : propertyLogs.length === 0 ? (
+                <p className="p-8 text-slate-500 text-center">No events for this property.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead className="bg-slate-100 text-slate-500 uppercase text-[10px] tracking-widest font-extrabold border-b border-slate-200">
+                      <tr>
+                        <th className="px-6 py-4">Time</th>
+                        <th className="px-6 py-4">Category</th>
+                        <th className="px-6 py-4">Title</th>
+                        <th className="px-6 py-4">Actor</th>
+                        <th className="px-6 py-4">Message</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200">
+                      {propertyLogs.map((entry) => (
+                        <tr key={entry.id} className="hover:bg-slate-50">
+                          <td className="px-6 py-3 text-slate-600 text-sm whitespace-nowrap">
+                            {entry.created_at ? new Date(entry.created_at).toISOString().replace('T', ' ').slice(0, 19) + 'Z' : '—'}
+                          </td>
+                          <td className="px-6 py-3">
+                            <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                              entry.category === 'failed_attempt' ? 'bg-red-100 text-red-800' :
+                              entry.category === 'guest_signature' ? 'bg-emerald-100 text-emerald-800' :
+                              entry.category === 'shield_mode' ? 'bg-violet-100 text-violet-800' :
+                              entry.category === 'dead_mans_switch' ? 'bg-amber-100 text-amber-800' :
+                              entry.category === 'billing' ? 'bg-slate-200 text-slate-800' :
+                              'bg-sky-100 text-sky-800'
+                            }`}>
+                              {entry.category === 'shield_mode' ? 'Shield Mode' : entry.category === 'dead_mans_switch' ? "Dead Man's Switch" : entry.category === 'billing' ? 'Billing' : entry.category.replace('_', ' ')}
+                            </span>
+                          </td>
+                          <td className="px-6 py-3 font-medium text-slate-800">{entry.title}</td>
+                          <td className="px-6 py-3 text-slate-600 text-sm">{entry.actor_email ?? '—'}</td>
+                          <td className="px-6 py-3 text-slate-600 text-sm max-w-xs">
+                            <span className="truncate block">{entry.message}</span>
+                            <button
+                              type="button"
+                              onClick={() => setLogMessageModalEntry(entry)}
+                              className="text-sky-600 hover:text-sky-800 text-xs mt-0.5 focus:outline-none focus:underline"
+                            >
+                              View full message
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </Card>
+        )}
       </div>
+
+      {/* Log message modal */}
+      <Modal
+        open={!!logMessageModalEntry}
+        onClose={() => setLogMessageModalEntry(null)}
+        title={logMessageModalEntry?.title ?? 'Log entry'}
+        className="max-w-lg"
+      >
+        {logMessageModalEntry && (
+          <div className="p-6">
+            <p className="text-slate-700 whitespace-pre-wrap text-sm">{logMessageModalEntry.message}</p>
+            <p className="text-slate-500 text-xs mt-4">
+              {logMessageModalEntry.created_at ? new Date(logMessageModalEntry.created_at).toLocaleString() : ''}
+              {logMessageModalEntry.actor_email && ` · ${logMessageModalEntry.actor_email}`}
+            </p>
+          </div>
+        )}
+      </Modal>
 
       {/* Remove property (soft-delete) - same behaviour as dashboard */}
       <Modal
@@ -855,114 +1298,185 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
         open={editOpen && !!property}
         title="Edit Property"
         onClose={() => setEditOpen(false)}
-        className="max-w-lg"
+        className="max-w-2xl max-h-[90vh] flex flex-col"
       >
-        <div className="px-6 py-4 space-y-4">
-          {editError && <p className="text-sm text-red-600">{editError}</p>}
-          <Input
-            label="Property name (optional)"
-            name="property_name"
-            value={editForm.property_name}
-            onChange={(e) => setEditForm({ ...editForm, property_name: e.target.value })}
-            placeholder="e.g. Miami Beach Condo"
-          />
-          <Input
-            label="Street address"
-            name="street_address"
-            value={editForm.street_address}
-            onChange={(e) => setEditForm({ ...editForm, street_address: e.target.value })}
-            placeholder="123 Main St"
-            required
-          />
-          <div className="grid grid-cols-2 gap-4">
-            <Input
-              label="City"
-              name="city"
-              value={editForm.city}
-              onChange={(e) => setEditForm({ ...editForm, city: e.target.value })}
-              placeholder="Miami"
-              required
-            />
-            <Input
-              label="State"
-              name="state"
-              value={editForm.state}
-              onChange={(e) => setEditForm({ ...editForm, state: e.target.value })}
-              placeholder="FL"
-              required
-            />
-          </div>
-          <Input
-            label="ZIP code (optional)"
-            name="zip_code"
-            value={editForm.zip_code}
-            onChange={(e) => setEditForm({ ...editForm, zip_code: e.target.value })}
-            placeholder="33139"
-          />
-          <Input
-            label="Region code (optional)"
-            name="region_code"
-            value={editForm.region_code}
-            onChange={(e) => setEditForm({ ...editForm, region_code: e.target.value })}
-            placeholder="e.g. FL, CA"
-          />
-          <div>
-            <label className="block text-sm font-medium text-slate-600 mb-2">Property type</label>
-            <div className="flex flex-wrap gap-2">
-              {PROPERTY_TYPES.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => setEditForm({ ...editForm, property_type: t.id })}
-                  className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${editForm.property_type === t.id ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-600 hover:text-slate-800'}`}
-                >
-                  {t.name}
-                </button>
-              ))}
+        <div className="px-6 py-4 overflow-y-auto flex-1 min-h-0">
+          {editError && <p className="text-sm text-red-600 mb-4">{editError}</p>}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
+            {/* Left column: Address */}
+            <div className="space-y-3">
+              <Input
+                label="Property name (optional)"
+                name="property_name"
+                value={editForm.property_name}
+                onChange={(e) => setEditForm({ ...editForm, property_name: e.target.value })}
+                placeholder="e.g. Miami Beach Condo"
+                className="mb-0"
+              />
+              <Input
+                label="Street address"
+                name="street_address"
+                value={editForm.street_address}
+                onChange={(e) => setEditForm({ ...editForm, street_address: e.target.value })}
+                placeholder="123 Main St"
+                required
+                className="mb-0"
+              />
+              <div className="grid grid-cols-3 gap-2">
+                <Input
+                  label="City"
+                  name="city"
+                  value={editForm.city}
+                  onChange={(e) => setEditForm({ ...editForm, city: e.target.value })}
+                  placeholder="Miami"
+                  required
+                  className="mb-0"
+                />
+                <Input
+                  label="State"
+                  name="state"
+                  value={editForm.state}
+                  onChange={(e) => setEditForm({ ...editForm, state: e.target.value })}
+                  placeholder="FL"
+                  required
+                  className="mb-0"
+                />
+                <Input
+                  label="ZIP"
+                  name="zip_code"
+                  value={editForm.zip_code}
+                  onChange={(e) => setEditForm({ ...editForm, zip_code: e.target.value })}
+                  placeholder="33139"
+                  className="mb-0"
+                />
+              </div>
+              <Input
+                label="Region code (optional)"
+                name="region_code"
+                value={editForm.region_code}
+                onChange={(e) => setEditForm({ ...editForm, region_code: e.target.value })}
+                placeholder="e.g. FL, CA"
+                className="mb-0"
+              />
+            </div>
+            {/* Right column: Property details */}
+            <div className="space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Property type</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {PROPERTY_TYPES.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => {
+                        const defaultUnits: Record<string, string> = { duplex: '2', triplex: '3', quadplex: '4' };
+                        const newUnitCount = MULTI_UNIT_TYPES.includes(t.id) ? (defaultUnits[t.id] ?? editForm.unit_count) : editForm.unit_count;
+                        setEditForm({ ...editForm, property_type: t.id, unit_count: newUnitCount });
+                      }}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${editForm.property_type === t.id ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-600 hover:text-slate-800'}`}
+                    >
+                      {t.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {MULTI_UNIT_TYPES.includes(editForm.property_type) ? (
+                <>
+                  <Input
+                    label="Number of units"
+                    name="unit_count"
+                    value={editForm.unit_count}
+                    onChange={(e) => setEditForm({ ...editForm, unit_count: e.target.value })}
+                    placeholder="e.g. 8"
+                    className="mb-0"
+                  />
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-slate-700">Do you live in one of the units?</p>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!!editForm.primary_residence_unit}
+                        onChange={(e) => {
+                          if (!e.target.checked) setEditForm({ ...editForm, primary_residence_unit: '' });
+                          else {
+                            const uc = parseInt(editForm.unit_count, 10);
+                            setEditForm({ ...editForm, primary_residence_unit: (uc >= 1 ? '1' : '') });
+                          }
+                        }}
+                        className="w-4 h-4 rounded border-slate-300 bg-white text-blue-600"
+                      />
+                      <span className="text-sm text-slate-800">Yes, one unit is my primary residence</span>
+                    </label>
+                    {editForm.primary_residence_unit && (() => {
+                      const uc = Math.max(1, parseInt(editForm.unit_count, 10) || 1);
+                      return (
+                        <div className="pl-6">
+                          <label className="block text-xs font-medium text-slate-500 mb-1">Which unit?</label>
+                          <select
+                            value={editForm.primary_residence_unit}
+                            onChange={(e) => setEditForm({ ...editForm, primary_residence_unit: e.target.value })}
+                            className="w-full max-w-xs px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                          >
+                            {Array.from({ length: uc }, (_, i) => i + 1).map((n) => (
+                              <option key={n} value={String(n)}>Unit {n}</option>
+                            ))}
+                          </select>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <Input
+                    label="Bedrooms"
+                    name="bedrooms"
+                    value={editForm.bedrooms}
+                    onChange={(e) => setEditForm({ ...editForm, bedrooms: e.target.value })}
+                    options={[
+                      { value: '1', label: '1' },
+                      { value: '2', label: '2' },
+                      { value: '3', label: '3' },
+                      { value: '4', label: '4' },
+                      { value: '5', label: '5+' },
+                    ]}
+                    className="mb-0"
+                  />
+                  <label className="flex items-center gap-2 cursor-pointer p-2.5 rounded-lg bg-slate-100 border border-slate-200">
+                    <input
+                      type="checkbox"
+                      checked={editForm.is_primary_residence}
+                      onChange={(e) => setEditForm({ ...editForm, is_primary_residence: e.target.checked })}
+                      className="w-4 h-4 rounded border-slate-300 bg-white text-blue-600"
+                    />
+                    <span className="text-sm font-medium text-slate-800">Primary residence / owner-occupied</span>
+                  </label>
+                </>
+              )}
+              <Input
+                label="Tax ID (optional)"
+                name="tax_id"
+                value={editForm.tax_id}
+                onChange={(e) => setEditForm({ ...editForm, tax_id: e.target.value })}
+                placeholder="Property tax ID"
+                className="mb-0"
+              />
+              <Input
+                label="APN / Parcel (optional)"
+                name="apn"
+                value={editForm.apn}
+                onChange={(e) => setEditForm({ ...editForm, apn: e.target.value })}
+                placeholder="Assessor parcel number"
+                className="mb-0"
+              />
             </div>
           </div>
-          <Input
-            label="Bedrooms"
-            name="bedrooms"
-            value={editForm.bedrooms}
-            onChange={(e) => setEditForm({ ...editForm, bedrooms: e.target.value })}
-            options={[
-              { value: '1', label: '1' },
-              { value: '2', label: '2' },
-              { value: '3', label: '3' },
-              { value: '4', label: '4' },
-              { value: '5', label: '5+' },
-            ]}
-          />
-          <Input
-            label="Tax ID (optional)"
-            name="tax_id"
-            value={editForm.tax_id}
-            onChange={(e) => setEditForm({ ...editForm, tax_id: e.target.value })}
-            placeholder="Property tax ID"
-          />
-          <Input
-            label="APN / Parcel (optional)"
-            name="apn"
-            value={editForm.apn}
-            onChange={(e) => setEditForm({ ...editForm, apn: e.target.value })}
-            placeholder="Assessor parcel number"
-          />
-          <label className="flex items-center gap-3 cursor-pointer p-3 rounded-xl bg-slate-100 border border-slate-200">
-            <input
-              type="checkbox"
-              checked={editForm.is_primary_residence}
-              onChange={(e) => setEditForm({ ...editForm, is_primary_residence: e.target.checked })}
-              className="w-5 h-5 rounded border-slate-300 bg-white text-blue-600"
-            />
-            <span className="text-sm font-medium text-slate-800">Primary residence / owner-occupied</span>
-          </label>
-          <div className="flex gap-3 pt-2">
-            <Button variant="outline" onClick={() => setEditOpen(false)} className="flex-1">Cancel</Button>
-            <Button variant="primary" onClick={saveEdit} disabled={editSaving || !editForm.street_address?.trim() || !editForm.city?.trim() || !editForm.state?.trim()} className="flex-1">
-              {editSaving ? 'Saving…' : 'Save changes'}
-            </Button>
-          </div>
+        </div>
+        <div className="px-6 py-4 border-t border-gray-200 flex gap-3 shrink-0">
+          <Button variant="outline" onClick={() => setEditOpen(false)} className="flex-1">Cancel</Button>
+          <Button variant="primary" onClick={saveEdit} disabled={editSaving || !editForm.street_address?.trim() || !editForm.city?.trim() || !editForm.state?.trim()} className="flex-1">
+            {editSaving ? 'Saving…' : 'Save changes'}
+          </Button>
         </div>
       </Modal>
 
@@ -970,7 +1484,141 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
         )}
       </main>
 
-      {/* Modal placed outside loading conditional so it doesn't unmount during data refresh */}
+      {/* Role choice: Tenant or Guest */}
+      <InviteRoleChoiceModal
+        open={showInviteRoleChoice}
+        onClose={() => setShowInviteRoleChoice(false)}
+        onSelectTenant={() => {
+          const units = property?.is_multi_unit && propertyUnits.length > 0 ? propertyUnits : (property ? [{ id: 0, unit_label: '1', occupancy_status: property.occupancy_status ?? 'unknown' }] : []);
+          const firstUnitId = units[0]?.id ?? 0;
+          setInviteTenantUnitId(firstUnitId || null);
+          setInviteTenantForm({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
+          setShowInviteTenantModal(true);
+        }}
+        onSelectGuest={() => setShowInviteModal(true)}
+      />
+
+      {/* Tenant invite modal (owner) */}
+      {showInviteTenantModal && (
+        <Modal
+          open
+          onClose={() => {
+            setShowInviteTenantModal(false);
+            setInviteTenantUnitId(null);
+            setInviteTenantLink(null);
+            setInviteTenantForm({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
+          }}
+          title="Invite tenant"
+          className="max-w-lg"
+        >
+          <div className="p-6 space-y-4">
+            {inviteTenantLink ? (
+              <>
+                <p className="text-sm text-slate-600">Share this link with the tenant. They will use it to sign up and get access to this unit.</p>
+                <div className="bg-slate-100 border border-slate-200 rounded-xl p-4 text-sm text-slate-700 break-all">
+                  {inviteTenantLink}
+                </div>
+                <div className="flex gap-3">
+                  <Button
+                    variant="outline"
+                    onClick={async () => {
+                      const ok = await copyToClipboard(inviteTenantLink);
+                      if (ok) notify('success', 'Link copied to clipboard.');
+                      else notify('error', 'Copy failed. Please copy the link manually.');
+                    }}
+                    className="flex-1"
+                  >
+                    Copy link
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      setShowInviteTenantModal(false);
+                      setInviteTenantUnitId(null);
+                      setInviteTenantLink(null);
+                      setInviteTenantForm({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
+                    }}
+                    className="flex-1"
+                  >
+                    Done
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                {(property?.is_multi_unit && propertyUnits.length > 0) ? (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5">Unit</label>
+                    <select
+                      value={inviteTenantUnitId ?? ''}
+                      onChange={(e) => setInviteTenantUnitId(Number(e.target.value) || null)}
+                      className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900"
+                    >
+                      <option value="">Select unit</option>
+                      {propertyUnits.map((u) => (
+                        <option key={u.id} value={u.id}>Unit {u.unit_label}</option>
+                      ))}
+                    </select>
+                  </div>
+                ) : null}
+                <Input name="tenant_name" label="Tenant name" value={inviteTenantForm.tenant_name} onChange={(e) => setInviteTenantForm({ ...inviteTenantForm, tenant_name: e.target.value })} placeholder="Full name" required />
+                <Input name="tenant_email" label="Tenant email" type="email" value={inviteTenantForm.tenant_email} onChange={(e) => setInviteTenantForm({ ...inviteTenantForm, tenant_email: e.target.value })} placeholder="email@example.com" />
+                <Input name="lease_start_date" label="Lease start" type="date" min={getTodayLocal()} value={inviteTenantForm.lease_start_date} onChange={(e) => setInviteTenantForm({ ...inviteTenantForm, lease_start_date: e.target.value })} required />
+                <Input name="lease_end_date" label="Lease end" type="date" min={inviteTenantForm.lease_start_date || getTodayLocal()} value={inviteTenantForm.lease_end_date} onChange={(e) => setInviteTenantForm({ ...inviteTenantForm, lease_end_date: e.target.value })} required />
+                <div className="flex gap-3 pt-2">
+                  <Button variant="outline" onClick={() => { setShowInviteTenantModal(false); setInviteTenantUnitId(null); }} className="flex-1">Cancel</Button>
+                  <Button
+                    onClick={async () => {
+                      const unitId = inviteTenantUnitId ?? (property?.is_multi_unit ? propertyUnits[0]?.id : 0) ?? (property ? 0 : null);
+                      if (unitId == null && property == null) {
+                        notify('error', 'Please select a unit.');
+                        return;
+                      }
+                      if (inviteTenantForm.lease_start_date && inviteTenantForm.lease_start_date < getTodayLocal()) {
+                        notify('error', 'Lease start date cannot be in the past.');
+                        return;
+                      }
+                      setInviteTenantSubmitting(true);
+                      try {
+                        let res: { invitation_code?: string };
+                        if (unitId === 0 && property) {
+                          res = await propertiesApi.inviteTenantForProperty(property.id, inviteTenantForm);
+                        } else if (unitId != null && unitId > 0) {
+                          res = await propertiesApi.inviteTenant(unitId, inviteTenantForm);
+                        } else {
+                          notify('error', 'Please select a unit.');
+                          setInviteTenantSubmitting(false);
+                          return;
+                        }
+                        const code = res?.invitation_code;
+                        if (code) {
+                          const base = APP_ORIGIN || (typeof window !== 'undefined' ? window.location.origin : '');
+                          setInviteTenantLink(`${base}${window.location.pathname}#invite/${code}`);
+                          notify('success', 'Tenant invitation created. Share the invite link with the tenant.');
+                          setShowInviteTenantModal(false);
+                          setInviteTenantUnitId(null);
+                          setInviteTenantForm({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
+                          loadData();
+                        } else {
+                          notify('error', 'We couldn\'t create a valid invitation link. Please try again.');
+                        }
+                      } catch (e) {
+                        notify('error', toUserFriendlyInvitationError((e as Error)?.message ?? 'Failed to create invitation.'));
+                      } finally {
+                        setInviteTenantSubmitting(false);
+                      }
+                    }}
+                    disabled={inviteTenantSubmitting || !inviteTenantForm.tenant_name.trim() || !inviteTenantForm.lease_start_date || !inviteTenantForm.lease_end_date || (property?.is_multi_unit && propertyUnits.length > 0 && (inviteTenantUnitId == null || inviteTenantUnitId === 0))}
+                    className="flex-1"
+                  >
+                    {inviteTenantSubmitting ? 'Creating…' : 'Create invitation'}
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </Modal>
+      )}
+
       <InviteGuestModal
         open={showInviteModal}
         onClose={() => setShowInviteModal(false)}
@@ -980,6 +1628,50 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
         navigate={navigate}
         initialPropertyId={id}
       />
+
+      {/* Invite Manager modal */}
+      {showInviteManagerModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="max-w-md w-full rounded-2xl bg-white p-6 shadow-xl border border-slate-200 relative">
+            <button type="button" onClick={() => setShowInviteManagerModal(false)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-700">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+            <h3 className="text-lg font-semibold text-slate-900 mb-1">Invite Property Manager</h3>
+            <p className="text-slate-500 text-sm mb-4">Enter the manager&apos;s email. They will receive an invitation to sign up and manage this property.</p>
+            <Input
+              label="Manager email"
+              name="invite_manager_email"
+              type="email"
+              value={inviteManagerEmail}
+              onChange={(e) => setInviteManagerEmail(e.target.value)}
+              placeholder="manager@example.com"
+            />
+            <div className="flex gap-2 mt-4">
+              <Button
+                variant="primary"
+                disabled={inviteManagerSending || !inviteManagerEmail.trim() || !inviteManagerEmail.includes('@')}
+                onClick={async () => {
+                  if (!property || !inviteManagerEmail.trim() || !inviteManagerEmail.includes('@')) return;
+                  setInviteManagerSending(true);
+                  try {
+                    await propertiesApi.inviteManager(property.id, inviteManagerEmail.trim());
+                    notify('success', 'Invitation sent. The manager will receive an email with a signup link.');
+                    setShowInviteManagerModal(false);
+                    setInviteManagerEmail('');
+                  } catch (e) {
+                    notify('error', (e as Error)?.message ?? 'Failed to send invitation.');
+                  } finally {
+                    setInviteManagerSending(false);
+                  }
+                }}
+              >
+                {inviteManagerSending ? 'Sending…' : 'Send invitation'}
+              </Button>
+              <Button variant="outline" onClick={() => setShowInviteManagerModal(false)}>Cancel</Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Live link QR code modal (same pattern as guest side) */}
       {showLiveLinkQR && property?.live_slug && (

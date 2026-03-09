@@ -25,6 +25,7 @@ class GuestPendingInviteView(BaseModel):
     """Guest view: one pending invitation to sign on dashboard."""
     invitation_code: str
     property_name: str
+    unit_label: str | None = None  # Unit the guest is invited to (e.g. "5" for multi-unit building)
     stay_start_date: date
     stay_end_date: date
     host_name: str | None
@@ -78,6 +79,7 @@ class GuestStayView(BaseModel):
     token_state: str | None = None  # STAGED | BURNED | EXPIRED | REVOKED
     property_live_slug: str | None = None  # for building live link URL (#live/<slug>)
     property_name: str
+    unit_label: str | None = None  # Unit the guest is invited to (e.g. "5" for multi-unit building)
     approved_stay_start_date: date
     approved_stay_end_date: date
     region_code: str

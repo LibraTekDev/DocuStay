@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.user import User
-from app.dependencies import get_current_user, require_owner
+from app.dependencies import get_current_user, require_owner_or_manager
 from app.config import get_settings
 
 router = APIRouter(prefix="/auth/identity", tags=["identity"])
@@ -21,6 +21,10 @@ class IdentityConfirmRequest(BaseModel):
     verification_session_id: str
 
 
+class LatestIdentitySessionResponse(BaseModel):
+    verification_session_id: str
+
+
 def _stripe_configured() -> bool:
     s = get_settings()
     return bool(s.stripe_secret_key and s.stripe_identity_return_url)
@@ -29,9 +33,9 @@ def _stripe_configured() -> bool:
 @router.post("/verification-session", response_model=VerificationSessionResponse)
 def create_verification_session(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_owner),
+    current_user: User = Depends(require_owner_or_manager),
 ):
-    """Create a Stripe Identity VerificationSession for the current owner. Returns client_secret for frontend to open Stripe's verification flow."""
+    """Create a Stripe Identity VerificationSession for owner or property manager. Returns client_secret for frontend to open Stripe's verification flow."""
     if not _stripe_configured():
         raise HTTPException(
             status_code=503,
@@ -78,16 +82,35 @@ def create_verification_session(
     url = getattr(session, "url", None) or (session.get("url") if hasattr(session, "get") and callable(session.get) else None)
     if not url:
         raise HTTPException(status_code=502, detail="Stripe did not return a verification URL. Check Stripe Identity and return_url configuration.")
+    # Store session id so when Stripe redirects back without session_id in URL we can still confirm (manager/owner flow).
+    session_id = getattr(session, "id", None) or (session.get("id") if hasattr(session, "get") and callable(session.get) else None)
+    if session_id:
+        current_user.stripe_verification_session_id = session_id
+        db.commit()
     return VerificationSessionResponse(client_secret=session.client_secret, url=url)
+
+
+@router.get("/latest-session", response_model=LatestIdentitySessionResponse)
+def get_latest_identity_session(
+    current_user: User = Depends(require_owner_or_manager),
+):
+    """Return the verification_session_id we stored when creating the session. Use when Stripe redirects without session_id in URL (e.g. manager/owner flow)."""
+    sid = (current_user.stripe_verification_session_id or "").strip()
+    if not sid:
+        raise HTTPException(
+            status_code=404,
+            detail="No verification session found. Please start identity verification again.",
+        )
+    return LatestIdentitySessionResponse(verification_session_id=sid)
 
 
 @router.post("/confirm")
 def confirm_identity(
     data: IdentityConfirmRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_owner),
+    current_user: User = Depends(require_owner_or_manager),
 ):
-    """Confirm identity after Stripe redirect. Verifies the session with Stripe and marks the user as identity-verified."""
+    """Confirm identity after Stripe redirect. Verifies the session with Stripe and marks the user as identity-verified (for owner or property manager)."""
     if not _stripe_configured():
         raise HTTPException(status_code=503, detail="Identity verification is not configured.")
     if current_user.identity_verified_at:

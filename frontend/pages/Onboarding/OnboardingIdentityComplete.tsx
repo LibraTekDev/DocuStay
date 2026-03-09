@@ -1,28 +1,49 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Button } from "../../components/UI";
-import { pendingOwnerApi } from "../../services/api";
+import { authApi, identityApi, pendingOwnerApi, type UserSession } from "../../services/api";
+import { UserType } from "../../types";
 import { getOwnerSignupErrorFriendly, getStripeIdentityErrorCodeMessage } from "../../utils/ownerSignupErrors";
 
 interface Props {
   navigate: (v: string) => void;
   setLoading: (l: boolean) => void;
   notify: (t: "success" | "error", m: string) => void;
+  /** Called when a full user (owner/manager) completes identity verification. Passes fresh user from me() so parent can update state before navigate. Prevents manager redirect loop. */
+  onIdentityVerified?: (user: UserSession) => void;
 }
 
 type ErrorState = { message: string; sessionId: string | null };
 
-/** Landing page after Stripe Identity redirect. Confirm once then go to POA or show failure with Try again / Start over. */
-export default function OnboardingIdentityComplete({ navigate, setLoading, notify }: Props) {
+/** SessionStorage key set by App when we land on onboarding/identity so we know manager vs owner after Stripe redirect. */
+const IDENTITY_FLOW_KEY = "docustay_identity_flow";
+
+/** Landing page after Stripe Identity redirect. For full user (owner/manager): identityApi. For pending owner: pendingOwnerApi. */
+export default function OnboardingIdentityComplete({ navigate, setLoading, notify, onIdentityVerified }: Props) {
   const [status, setStatus] = useState<"confirming" | "success" | "error">("confirming");
   const [errorState, setErrorState] = useState<ErrorState>({ message: "", sessionId: null });
   const hasRunRef = useRef(false);
 
-  const onSuccess = useCallback(() => {
+  const onSuccessOwner = useCallback(() => {
+    try {
+      if (typeof window !== "undefined") sessionStorage.removeItem(IDENTITY_FLOW_KEY);
+    } catch { /* ignore */ }
     setStatus("success");
     notify("success", "Identity verified. Completing signup…");
     setLoading(false);
     setTimeout(() => navigate("onboarding/poa"), 1500);
   }, [navigate, notify, setLoading]);
+
+  const onSuccessManager = useCallback(() => {
+    try {
+      if (typeof window !== "undefined") sessionStorage.removeItem(IDENTITY_FLOW_KEY);
+    } catch { /* ignore */ }
+    setStatus("success");
+    notify("success", "Identity verified.");
+    setLoading(false);
+    setTimeout(() => navigate("manager-dashboard"), 1500);
+  }, [navigate, notify, setLoading]);
+
+  const onSuccess = onSuccessOwner;
 
   const onFailure = useCallback(
     (errMessage: string, sessionId: string | null, errorCode?: string) => {
@@ -79,15 +100,49 @@ export default function OnboardingIdentityComplete({ navigate, setLoading, notif
   const doConfirm = useCallback(
     (sessionId: string) => {
       setLoading(true);
-      pendingOwnerApi
+      // Try identityApi first (full user: owner or manager with Bearer token)
+      identityApi
         .confirmIdentity(sessionId)
-        .then(onSuccess)
+        .then(() => {
+          // Success for full user: refetch user, update parent state, then navigate by stored flow (manager → manager-dashboard, owner → POA)
+          return authApi.me().then((user) => {
+            if (user) onIdentityVerified?.(user);
+            const flow =
+              typeof window !== "undefined" ? sessionStorage.getItem(IDENTITY_FLOW_KEY) : null;
+            if (flow === "manager") {
+              onSuccessManager();
+            } else {
+              // owner flow (or no key): use API user_type as fallback
+              if (user?.user_type === UserType.PROPERTY_MANAGER) {
+                onSuccessManager();
+              } else {
+                onSuccessOwner();
+              }
+            }
+          });
+        })
         .catch((e) => {
+          const msg = (e as Error)?.message ?? "";
+          // Pending owner flow: identityApi requires full user token; 401 = pending owner
+          const isPendingOwnerFlow =
+            msg.toLowerCase().includes("pending-owner") ||
+            msg.toLowerCase().includes("pending owner") ||
+            msg.toLowerCase().includes("use the pending") ||
+            msg.includes("Not authenticated");
+          if (isPendingOwnerFlow) {
+            return pendingOwnerApi
+              .confirmIdentity(sessionId)
+              .then(onSuccessOwner)
+              .catch((err) => {
+                const err2 = err as Error & { errorCode?: string; sessionId?: string };
+                onFailure(err2?.message ?? "Could not confirm identity.", err2.sessionId ?? sessionId, err2.errorCode);
+              });
+          }
           const err = e as Error & { errorCode?: string; sessionId?: string };
           onFailure(err?.message ?? "Could not confirm identity.", err.sessionId ?? sessionId, err.errorCode);
         });
     },
-    [onSuccess, onFailure, setLoading]
+    [onSuccessOwner, onSuccessManager, onFailure, setLoading, onIdentityVerified]
   );
 
   useEffect(() => {
@@ -109,6 +164,24 @@ export default function OnboardingIdentityComplete({ navigate, setLoading, notif
 
     if (sid) {
       doConfirm(sid);
+      return;
+    }
+
+    // Full user (owner/manager with Bearer token): Stripe may redirect without session_id in URL. Try backend-stored session first.
+    if (authApi.getToken()) {
+      setLoading(true);
+      identityApi
+        .getLatestIdentitySession()
+        .then((r) => {
+          doConfirm(r.verification_session_id);
+        })
+        .catch(() => {
+          setLoading(false);
+          onFailure(
+            "No verification session in this link. Please use the link from the email we sent after identity verification, or start verification again.",
+            null
+          );
+        });
       return;
     }
 

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { publicApi, type VerifyResponse } from '../../services/api';
+import { validatePhone, sanitizePhoneInput } from '../../utils/validatePhone';
 
 function formatDateTime(s: string): string {
   return new Date(s).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' });
@@ -35,6 +36,14 @@ export const VerifyPage: React.FC = () => {
     if (!(tokenId ?? "").trim()) {
       setError('Token ID is required.');
       return;
+    }
+    const phoneVal = (phone ?? "").trim();
+    if (phoneVal) {
+      const phoneCheck = validatePhone(phoneVal);
+      if (!phoneCheck.valid) {
+        setError(phoneCheck.error ?? 'Invalid phone number.');
+        return;
+      }
     }
     setSubmitting(true);
     try {
@@ -101,7 +110,7 @@ export const VerifyPage: React.FC = () => {
             </div>
             <div>
               <label htmlFor="verify-phone" className="block text-sm font-medium text-gray-600 mb-1.5">Phone (optional)</label>
-              <input id="verify-phone" type="text" value={phone} onChange={(e) => setPhone(e.target.value)} className={inputClass} />
+              <input id="verify-phone" type="text" value={phone} onChange={(e) => setPhone(sanitizePhoneInput(e.target.value))} placeholder="+15551234567 or 5551234567" className={inputClass} />
             </div>
           </div>
           {error && (

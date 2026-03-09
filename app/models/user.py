@@ -7,6 +7,8 @@ import enum
 
 class UserRole(str, enum.Enum):
     owner = "owner"
+    property_manager = "property_manager"
+    tenant = "tenant"
     guest = "guest"
     admin = "admin"
 
@@ -27,6 +29,9 @@ class User(Base):
     role = Column(SQLEnum(UserRole), nullable=False)
 
     full_name = Column(String(255), nullable=True)
+    first_name = Column(String(100), nullable=True)
+    last_name = Column(String(100), nullable=True)
+    account_type = Column(String(50), nullable=True)  # individual | property_management_company | leasing_company
     phone = Column(String(50), nullable=True)
     state = Column(String(50), nullable=True)
     city = Column(String(100), nullable=True)

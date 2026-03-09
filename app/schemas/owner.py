@@ -19,6 +19,8 @@ class PropertyCreate(BaseModel):
     is_primary_residence: bool = False
     owner_occupied: bool | None = None
     property_type_enum: PropertyType | None = None
+    unit_count: int | None = None  # When > 1: set is_multi_unit=True and create Unit rows
+    primary_residence_unit: int | None = None  # For multi-unit: unit label (1, 2, ...) that is owner's primary residence
     tax_id: str | None = None
     apn: str | None = None
 
@@ -34,6 +36,8 @@ class PropertyUpdate(BaseModel):
     region_code: str | None = None
     property_type: str | None = None
     bedrooms: str | None = None
+    unit_count: int | None = None  # For multi-unit: number of units (adds/removes Unit rows)
+    primary_residence_unit: int | None = None  # For multi-unit: unit label (1, 2, ...) that is owner's primary residence
     is_primary_residence: bool | None = None
     owner_occupied: bool | None = None
     property_type_enum: PropertyType | None = None
@@ -89,6 +93,9 @@ class PropertyResponse(BaseModel):
     # Vacant-unit monitoring (DMS for vacant)
     vacant_monitoring_enabled: bool = False
     vacant_monitoring_response_due_at: datetime | None = None
+
+    # Multi-unit: when True, property has Unit rows (apartment, duplex, triplex, quadplex)
+    is_multi_unit: bool = False
 
     # Smarty standardized address (ZIP-code utility bucket / authority letters)
     smarty_delivery_line_1: str | None = None

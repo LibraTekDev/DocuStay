@@ -1,11 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Button, Input } from '../../components/UI';
+import { Button, Input, Modal } from '../../components/UI';
 import { UserSession } from '../../types';
-import { dashboardApi, authApi, agreementsApi, APP_ORIGIN, type GuestStayView, type GuestPendingInviteView } from '../../services/api';
+import { dashboardApi, authApi, agreementsApi, APP_ORIGIN, type GuestStayView, type GuestPendingInviteView, type OwnerAuditLogEntry } from '../../services/api';
 import { copyToClipboard } from '../../utils/clipboard';
 import AgreementSignModal, { type PrefilledGuestInfo } from '../../components/AgreementSignModal';
 import PendingSignatureModal from '../../components/PendingSignatureModal';
+import HelpCenter from '../Support/HelpCenter';
 import { PENDING_INVITE_STORAGE_KEY } from './GuestLogin';
+
+type GuestTab = 'stays' | 'invitations' | 'help';
 
 const DROPBOX_REDIRECT_INVITATION_CODE = 'docustay_dropbox_redirect_invitation_code';
 const DROPBOX_REDIRECT_SIGNATURE_ID = 'docustay_dropbox_redirect_signature_id';
@@ -93,6 +96,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedStay, setSelectedStay] = useState<GuestStayView | null>(null);
+  const [activeTab, setActiveTab] = useState<GuestTab>('stays');
   const [stayFilter, setStayFilter] = useState<StayFilter>('all');
   const [endStayConfirm, setEndStayConfirm] = useState<GuestStayView | null>(null);
   const [endingStay, setEndingStay] = useState(false);
@@ -110,10 +114,25 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
   const [checkingInStay, setCheckingInStay] = useState<GuestStayView | null>(null);
   const [prefilledGuestInfoForModal, setPrefilledGuestInfoForModal] = useState<PrefilledGuestInfo | null>(null);
   const [pendingSignatureModalInvite, setPendingSignatureModalInvite] = useState<GuestPendingInviteView | null>(null);
+  const [guestLogs, setGuestLogs] = useState<OwnerAuditLogEntry[]>([]);
+  const [guestLogsLoading, setGuestLogsLoading] = useState(false);
+  const [guestLogsLoadedOnce, setGuestLogsLoadedOnce] = useState(false);
+  const [logMessageModalEntry, setLogMessageModalEntry] = useState<OwnerAuditLogEntry | null>(null);
+  const [stayPresence, setStayPresence] = useState<'present' | 'away'>('present');
+  const [stayPresenceAwayStartedAt, setStayPresenceAwayStartedAt] = useState<string | null>(null);
+  const [stayPresenceGuestsAuthorized, setStayPresenceGuestsAuthorized] = useState(false);
+  const [stayPresenceUpdating, setStayPresenceUpdating] = useState(false);
+  const [stayShowAwayConfirm, setStayShowAwayConfirm] = useState(false);
+  const [stayAwayGuestsAuthorized, setStayAwayGuestsAuthorized] = useState(false);
   /** Track accept-invite attempts that failed so we don't retry in a loop (same invite+signature). */
   const acceptFailedRef = useRef<Set<string>>(new Set());
 
   const openAgreementModal = useCallback((code: string) => {
+    // Clear any stale Dropbox redirect state so we don't accept an invite from a previous attempt
+    try {
+      sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
+      sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
+    } catch { /* ignore */ }
     dashboardApi.guestProfile()
       .then((profile) => {
         setPrefilledGuestInfoForModal({
@@ -140,7 +159,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
         const uniqueStays = [...new Map(staysData.map((s) => [s.stay_id, s])).values()];
         setStays(uniqueStays);
         setPendingInvites(pendingData);
-        return [uniqueStays, pendingData];
+        return [uniqueStays, pendingData] as [GuestStayView[], GuestPendingInviteView[]];
       })
       .catch((e) => {
         const msg = (e as Error)?.message ?? 'Failed to load data.';
@@ -320,6 +339,51 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
       });
   }, [loadData, notify, openAgreementModal]);
 
+  const isOngoingCheckedInStay = (s: GuestStayView | null) =>
+    s?.stay_id && s?.checked_in_at && !s?.checked_out_at && !s?.cancelled_at;
+
+  useEffect(() => {
+    if (!selectedStay || !isOngoingCheckedInStay(selectedStay)) {
+      setStayPresence('present');
+      setStayPresenceAwayStartedAt(null);
+      setStayPresenceGuestsAuthorized(false);
+      setStayShowAwayConfirm(false);
+      return;
+    }
+    dashboardApi.getStayPresence(selectedStay.stay_id).then((p) => {
+      setStayPresence((p.status as 'present' | 'away') || 'present');
+      setStayPresenceAwayStartedAt(p.away_started_at || null);
+      setStayPresenceGuestsAuthorized(p.guests_authorized_during_away ?? false);
+    }).catch(() => {});
+  }, [selectedStay?.stay_id, selectedStay?.checked_in_at, selectedStay?.checked_out_at, selectedStay?.cancelled_at]);
+
+  const doSetStayPresence = useCallback(async (status: 'present' | 'away', guestsAuthorized?: boolean) => {
+    if (!selectedStay || !isOngoingCheckedInStay(selectedStay)) return;
+    setStayPresenceUpdating(true);
+    setStayShowAwayConfirm(false);
+    try {
+      const res = await dashboardApi.setStayPresence(selectedStay.stay_id, status, guestsAuthorized);
+      setStayPresence((res.presence as 'present' | 'away') || status);
+      setStayPresenceAwayStartedAt(res.away_started_at ?? null);
+      setStayPresenceGuestsAuthorized(res.guests_authorized_during_away ?? false);
+      notify('success', `Status set to ${status}`);
+    } catch (e) {
+      notify('error', (e as Error)?.message ?? 'Failed to update status');
+    } finally {
+      setStayPresenceUpdating(false);
+    }
+  }, [selectedStay, notify]);
+
+  const handleStayPresenceToggle = useCallback(() => {
+    if (!selectedStay || !isOngoingCheckedInStay(selectedStay)) return;
+    if (stayPresence === 'present') {
+      setStayShowAwayConfirm(true);
+      setStayAwayGuestsAuthorized(false);
+      return;
+    }
+    doSetStayPresence('present');
+  }, [selectedStay, stayPresence, doSetStayPresence]);
+
   const handleAgreementSigned = useCallback(async (signatureId: number) => {
     if (!agreementModalCode) return;
     try {
@@ -376,6 +440,17 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
       setCheckingInStay(null);
     }
   }, [loadData, notify]);
+
+  const loadGuestLogs = useCallback((stayId?: number) => {
+    setGuestLogsLoading(true);
+    dashboardApi.guestLogs(stayId != null ? { stay_id: stayId } : undefined)
+      .then(setGuestLogs)
+      .catch(() => setGuestLogs([]))
+      .finally(() => {
+        setGuestLogsLoading(false);
+        setGuestLogsLoadedOnce(true);
+      });
+  }, []);
 
   const handleAddInviteLink = useCallback(() => {
     const code = parseInviteCode(inviteLinkInput);
@@ -460,35 +535,47 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
   ];
 
   return (
-    <div className="flex-grow w-full max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-8 flex flex-col min-h-0 relative">
-      {/* Filters in left margin (desktop) | Invitation + Stay cards full width */}
-      <div className="flex flex-col md:block flex-1 min-w-0 mb-6 lg:mb-8">
-        {/* Filters: in flow on mobile (below invitation), absolute in left margin on desktop */}
-        <aside className="order-2 md:absolute md:right-full md:mr-8 md:top-6 w-full md:w-52 shrink-0">
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:sticky md:top-6">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3 px-0.5">Filters</h3>
-            <nav className="flex flex-row md:flex-col gap-1 overflow-x-auto no-scrollbar md:overflow-visible pb-1 md:pb-0">
-              {filterButtons.map(({ id, label, count }) => (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => { setStayFilter(id); if (id !== 'future_invites') setSelectedStay(null); }}
-                  className={`px-3 py-2.5 rounded-lg text-left whitespace-nowrap text-sm font-medium transition-colors w-full lg:w-full ${
-                    stayFilter === id ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-                  }`}
-                >
-                  <span>{label}</span>
-                  <span className={`ml-1.5 tabular-nums ${stayFilter === id ? 'text-slate-300' : 'text-slate-400'}`}>({count})</span>
-                </button>
-              ))}
-            </nav>
-          </div>
-        </aside>
+    <div className="flex h-[calc(100vh-80px)] overflow-hidden bg-[#f0f4ff]/50">
+      {/* Sidebar */}
+      <aside className="hidden lg:flex w-64 min-w-[16rem] flex-shrink-0 flex-col bg-white/80 backdrop-blur-xl border-r border-slate-200 p-5">
+        <nav className="space-y-1">
+          {[
+            { id: 'stays' as GuestTab, label: 'My stays', icon: 'M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' },
+            { id: 'invitations' as GuestTab, label: 'Add invitation', icon: 'M12 6v6m0 0v6m0-6h6m-6 0H6' },
+            { id: 'help' as GuestTab, label: 'Help Center', icon: 'M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
+          ].map((item) => (
+            <button
+              key={item.id}
+              onClick={() => setActiveTab(item.id)}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-medium ${activeTab === item.id ? 'bg-slate-100 text-slate-800 border border-slate-300' : 'text-slate-600 hover:text-slate-800 hover:bg-slate-50'}`}
+            >
+              <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={item.icon} /></svg>
+              {item.label}
+            </button>
+          ))}
+        </nav>
+      </aside>
 
-        {/* Add invitation - full width (same as before) */}
-        <section className="order-1 mb-6 lg:mb-8">
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
-              <h2 className="text-base font-semibold text-slate-900 mb-1">Add invitation</h2>
+      {/* Main content */}
+      <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+        {/* Mobile tab selector */}
+        <div className="lg:hidden mb-4">
+          <select
+            value={activeTab}
+            onChange={(e) => setActiveTab(e.target.value as GuestTab)}
+            className="w-full max-w-xs rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm"
+          >
+            <option value="stays">My stays</option>
+            <option value="invitations">Add invitation</option>
+            <option value="help">Help Center</option>
+          </select>
+        </div>
+
+        {/* Invitations tab */}
+        {activeTab === 'invitations' && (
+          <div className="space-y-6 w-full">
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-slate-900 mb-1">Add invitation</h2>
               <p className="text-sm text-slate-600 mb-4">
                 {isEmpty ? 'Paste an invitation link from your host to view and sign the agreement.' : 'Have another link? Add it below to review and sign.'}
               </p>
@@ -503,8 +590,8 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                   />
                 </div>
                 <Button
-                  variant="primary"
-                  className="shrink-0 self-stretch sm:self-auto sm:mt-7 h-10 px-5 rounded-lg font-medium"
+                  type="button"
+                  className="shrink-0 self-stretch sm:self-auto sm:mt-7 h-10 px-5 rounded-lg font-medium text-white border-0 bg-[#6B90F2] hover:bg-[#5a7ed9]"
                   onClick={handleAddInviteLink}
                   disabled={addingInvite || !parseInviteCode(inviteLinkInput)}
                 >
@@ -512,68 +599,128 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                 </Button>
               </div>
             </div>
-        </section>
-
-        {/* Pending actions: agreement sent to Dropbox but not yet signed – stay not confirmed until signed */}
-        {pendingInvites.filter((inv) => inv.needs_dropbox_signature).length > 0 && (
-          <section className="order-2 mb-6 lg:mb-8">
-            <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-5 sm:p-6 shadow-sm">
-              <h2 className="text-base font-semibold text-slate-900 mb-1">Pending actions</h2>
-              <p className="text-sm text-slate-600 mb-2">Complete signing in Dropbox to confirm these stays. Your stay will not be confirmed until the agreement is signed.</p>
-              <p className="text-sm text-slate-500 mb-4">
-                Already signed?{' '}
-                <button type="button" onClick={() => loadData()} className="text-blue-600 hover:text-blue-800 font-medium underline underline-offset-1">
-                  Check again
-                </button>
-                {' '}— your stay will appear once we detect it.
-              </p>
-              <ul className="space-y-3">
-                {pendingInvites
-                  .filter((inv) => inv.needs_dropbox_signature)
-                  .map((inv) => (
+            {pendingInvites.filter((inv) => inv.needs_dropbox_signature).length > 0 && (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-6 shadow-sm">
+                <h2 className="text-base font-semibold text-slate-900 mb-1">Pending actions</h2>
+                <p className="text-sm text-slate-600 mb-2">Complete signing in Dropbox to confirm these stays.</p>
+                <p className="text-sm text-slate-500 mb-4">
+                  Already signed? <button type="button" onClick={() => loadData()} className="text-blue-600 hover:text-blue-800 font-medium underline">Check again</button>
+                </p>
+                <ul className="space-y-3">
+                  {pendingInvites.filter((inv) => inv.needs_dropbox_signature).map((inv) => (
                     <li key={inv.invitation_code} className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl border border-amber-100 bg-white">
                       <div className="min-w-0 flex-1">
-                        <p className="font-semibold text-slate-900">{inv.property_name}</p>
-                        <p className="text-sm text-slate-500 mt-0.5">
-                          {formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}
-                        </p>
+                        <p className="font-semibold text-slate-900">{inv.property_name}{inv.unit_label ? ` — Unit ${inv.unit_label}` : ''}</p>
+                        <p className="text-sm text-slate-500 mt-0.5">{formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</p>
                         <p className="text-xs text-amber-700 font-medium mt-1">Awaiting your signature in Dropbox</p>
                       </div>
-                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => setPendingSignatureModalInvite(inv)}>
-                        Complete signing
+                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => setPendingSignatureModalInvite(inv)}>Complete signing</Button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {pendingInvites.filter((inv) =>
+              stays.some((s) => datesOverlap(inv.stay_start_date, inv.stay_end_date, s.approved_stay_start_date, s.approved_stay_end_date))
+            ).length > 0 && (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-6 shadow-sm">
+                <h2 className="text-base font-semibold text-slate-900 mb-1">Overlapping invitations</h2>
+                <p className="text-sm text-slate-600 mb-4">These overlap with an accepted stay and cannot be accepted.</p>
+                <ul className="space-y-3">
+                  {pendingInvites
+                    .filter((inv) =>
+                      stays.some((s) => datesOverlap(inv.stay_start_date, inv.stay_end_date, s.approved_stay_start_date, s.approved_stay_end_date))
+                    )
+                    .map((inv) => (
+                      <li key={inv.invitation_code} className="flex flex-wrap items-center justify-between gap-4 p-4 bg-white rounded-xl border border-amber-100">
+                        <div className="min-w-0 flex-1">
+                          <p className="font-semibold text-slate-900">{inv.property_name}{inv.unit_label ? ` — Unit ${inv.unit_label}` : ''}</p>
+                          <p className="text-sm text-slate-500 mt-0.5">{formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</p>
+                          <p className="text-xs text-amber-700 font-medium mt-1">Overlaps existing stay</p>
+                        </div>
+                        <span className="text-sm font-medium text-slate-400 shrink-0">Cannot accept</span>
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            )}
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-base font-semibold text-slate-900 mb-1">Future invites</h2>
+              <p className="text-sm text-slate-500 mb-4">Invitations that don&apos;t overlap your existing stays. Sign the agreement to accept.</p>
+              {futureInvites.length === 0 ? (
+                <p className="text-slate-500 text-sm">No future invites. Add an invitation link above.</p>
+              ) : (
+                <ul className="space-y-3">
+                  {futureInvites.map((inv) => (
+                    <li key={inv.invitation_code} className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl border border-slate-200 bg-slate-50/50">
+                      <div className="min-w-0 flex-1">
+                        <p className="font-semibold text-slate-900">{inv.property_name}{inv.unit_label ? ` — Unit ${inv.unit_label}` : ''}</p>
+                        <p className="text-sm text-slate-500 mt-0.5">{formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</p>
+                      </div>
+                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => (inv.needs_dropbox_signature ? setPendingSignatureModalInvite(inv) : openAgreementModal(inv.invitation_code))}>
+                        {inv.needs_dropbox_signature ? 'Complete signing' : 'Review & sign'}
                       </Button>
                     </li>
                   ))}
-              </ul>
+                </ul>
+              )}
             </div>
-          </section>
+          </div>
         )}
 
-        {pendingSignatureModalInvite && (
-          <PendingSignatureModal
-            open={!!pendingSignatureModalInvite}
-            onClose={() => setPendingSignatureModalInvite(null)}
-            invitationCode={pendingSignatureModalInvite.invitation_code}
-            propertyName={pendingSignatureModalInvite.property_name}
-            stayStartDate={pendingSignatureModalInvite.stay_start_date}
-            stayEndDate={pendingSignatureModalInvite.stay_end_date}
-            guestEmail={guestEmail}
-            guestFullName={guestFullName}
-          />
+        {/* Help tab */}
+        {activeTab === 'help' && (
+          <div className="max-w-3xl">
+            <HelpCenter navigate={() => {}} embedded />
+          </div>
         )}
 
-        {/* Stay cards - right margin on desktop (vertical list), in flow on mobile */}
-        <aside className="order-3 w-full md:absolute md:left-full md:ml-8 md:top-6 md:w-64 md:max-h-[calc(100vh-8rem)] md:overflow-y-auto shrink-0">
-          {stayFilter !== 'future_invites' && (
-            <>
-              {filteredStays.length === 0 ? (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-6 md:p-4">
-                  <p className="text-slate-600 text-sm">
-                    {stayFilter === 'all' ? 'No stays yet.' : stayFilter === 'previous' ? 'No completed stays.' : `No ${stayFilter} stays.`} Add an invitation link and accept an invite to see stays here.
-                  </p>
-                </div>
+        {/* Stays tab */}
+        {activeTab === 'stays' && (
+        <div className="flex flex-col lg:flex-row gap-6 lg:gap-8">
+          {/* Filters + Stay list */}
+          <div className="lg:w-80 xl:w-96 flex-shrink-0 space-y-4">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Filter</h3>
+              <div className="flex flex-wrap gap-2">
+                {filterButtons.map(({ id, label, count }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => { setStayFilter(id); if (id !== 'future_invites') setSelectedStay(null); }}
+                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                      stayFilter === id ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    {label} ({count})
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden max-h-[calc(100vh-20rem)] overflow-y-auto">
+              <div className="p-4">
+              {stayFilter === 'future_invites' ? (
+                futureInvites.length === 0 ? (
+                  <p className="text-slate-500 text-sm py-4">No future invites. Add an invitation link in the Add invitation tab.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {futureInvites.map((inv) => (
+                      <li key={inv.invitation_code} className="rounded-lg border border-slate-200 bg-slate-50/50 p-3">
+                        <p className="font-semibold text-slate-900 text-sm">{inv.property_name}{inv.unit_label ? ` — Unit ${inv.unit_label}` : ''}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">{formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</p>
+                        <Button variant="primary" className="mt-2 w-full text-xs h-8 py-1.5" onClick={() => (inv.needs_dropbox_signature ? setPendingSignatureModalInvite(inv) : openAgreementModal(inv.invitation_code))}>
+                          {inv.needs_dropbox_signature ? 'Complete signing' : 'Review & sign'}
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                )
+              ) : filteredStays.length === 0 ? (
+                <p className="text-slate-600 text-sm py-4">
+                  {stayFilter === 'all' ? 'No stays yet.' : stayFilter === 'previous' ? 'No completed stays.' : `No ${stayFilter} stays.`} Add an invitation link in the Add invitation tab.
+                </p>
               ) : (
-                <div className="flex flex-col gap-3 md:gap-2">
+                <div className="flex flex-col gap-2">
                     {filteredStays.map((s) => {
                       const isOngoing = !!(s.checked_in_at && s.approved_stay_start_date <= today && s.approved_stay_end_date >= today);
                       const isFuture = s.approved_stay_start_date > today;
@@ -589,7 +736,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                         key={s.stay_id}
                         className={`rounded-xl border bg-white text-left transition-all ${
                           isSelected
-                            ? 'border-slate-300 border-l-4 border-l-indigo-500 bg-indigo-50/40 shadow-sm'
+                            ? 'border-slate-300 border-l-4 border-l-[#6B90F2] bg-[#6B90F2]/10 shadow-sm'
                             : 'border-slate-200 hover:border-slate-300'
                         }`}
                       >
@@ -603,13 +750,15 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                                 <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide bg-red-50 text-red-700 border border-red-100">Revoked</span>
                               )}
                               <span className={`px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide ${
-                                s.cancelled_at ? 'bg-amber-50 text-amber-700 border border-amber-100' : s.checked_out_at ? 'bg-slate-100 text-slate-600 border border-slate-200' : isOngoing ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : isUpcoming ? 'bg-amber-50 text-amber-700 border border-amber-100' : isFuture ? 'bg-sky-50 text-sky-700 border border-sky-100' : 'bg-slate-100 text-slate-600'
+                                s.cancelled_at ? 'bg-amber-50 text-amber-700 border border-amber-100' : s.checked_out_at ? 'bg-slate-100 text-slate-600 border border-slate-200' : isOngoing ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : isUpcoming ? 'bg-[#FFC107] text-slate-900 border-0' : isFuture ? 'bg-slate-200 text-slate-700 border-0' : 'bg-slate-100 text-slate-600'
                               }`}>
-                                {s.cancelled_at ? 'Cancelled' : s.checked_out_at ? 'Completed' : isOngoing ? 'Ongoing' : isUpcoming ? 'Upcoming' : isFuture ? 'Future' : 'Previous'}
+                                {s.cancelled_at ? 'Cancelled' : s.checked_out_at ? 'Completed' : isOngoing ? 'Ongoing' : isUpcoming ? 'UPCOMING' : isFuture ? 'FUTURE' : 'Previous'}
                               </span>
                               <span className="text-slate-400 text-xs">{s.region_code}</span>
                             </div>
-                            <p className="font-semibold text-slate-900">{s.property_name}</p>
+                            <p className="text-sm text-slate-600">
+                              {s.property_name}{s.unit_label ? ` — Unit ${s.unit_label}` : ''}
+                            </p>
                             <p className="text-sm text-slate-500 mt-0.5">
                               {formatDate(s.approved_stay_start_date)} – {formatDate(s.approved_stay_end_date)}
                             </p>
@@ -619,7 +768,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                               <button
                                 type="button"
                                 disabled={!!checkingInStay}
-                                className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                                className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-white bg-[#6F42C1] hover:bg-[#5e35a8] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
                                 onClick={(e) => { e.stopPropagation(); handleCheckIn(s); }}
                               >
                                 {checkingInStay?.stay_id === s.stay_id ? 'Checking in…' : 'Check in'}
@@ -645,8 +794,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                                 className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
                                 onClick={(e) => { e.stopPropagation(); setCancelStayConfirm(s); }}
                               >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
-                                Cancel stay
+                                <span className="text-red-500 font-semibold">X</span> Cancel stay
                               </button>
                             </div>
                           )}
@@ -655,52 +803,20 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                   })}
                 </div>
               )}
-            </>
-          )}
-        </aside>
+              </div>
+            </div>
+          </div>
 
-        {/* Future invites - center content when that filter is selected */}
-        <div className="order-4 flex-1 min-w-0 w-full space-y-6">
-          {stayFilter === 'future_invites' && (
-            <>
-              <h2 className="text-lg font-semibold text-slate-900">Future invites</h2>
-              <p className="text-sm text-slate-500 mb-4">Invitations that don't overlap your existing stays. Sign the agreement to accept.</p>
-              {futureInvites.length === 0 ? (
-                <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-8">
-                  <p className="text-slate-600 text-sm">No future invites. Add an invitation link above; only invites that don't overlap your stays will appear here.</p>
-                </div>
-              ) : (
-                <ul className="space-y-3">
-                  {futureInvites.map((inv) => (
-                    <li key={inv.invitation_code} className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl border border-slate-200 bg-white">
-                      <div className="min-w-0 flex-1">
-                        <p className="font-semibold text-slate-900">{inv.property_name}</p>
-                        <p className="text-sm text-slate-500 mt-0.5">
-                          {formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}
-                        </p>
-                        <p className="text-xs text-slate-400 mt-0.5">{inv.host_name}</p>
-                      </div>
-                      <Button
-                        variant="primary"
-                        className="shrink-0 h-10 rounded-lg font-medium px-4"
-                        onClick={() => (inv.needs_dropbox_signature ? setPendingSignatureModalInvite(inv) : openAgreementModal(inv.invitation_code))}
-                      >
-                        {inv.needs_dropbox_signature ? 'Complete signing' : 'Review & sign'}
-                      </Button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </>
+          {/* Stay detail panel - show placeholder when no stay selected */}
+          {!stay && stayFilter !== 'future_invites' && (
+            <div className="flex-1 min-w-0 flex items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50/50 p-12">
+              <p className="text-slate-500 text-sm text-center">Select a stay from the list to view details and actions.</p>
+            </div>
           )}
-        </div>
-      </div>
-
-      {/* Full-width stay detail (same width as invitation bar) - when a stay is selected, below Filters | Stay cards */}
-      {stay && stayFilter !== 'future_invites' && (() => {
+          {stay && stayFilter !== 'future_invites' && (() => {
         const detailHasCheckedIn = !!(stay.checked_in_at != null && stay.checked_in_at !== '');
         return (
-        <div className="w-full space-y-6 mb-6 lg:mb-8">
+        <div className="flex-1 min-w-0 space-y-6 overflow-y-auto">
       {/* Revoked: Authorization Revoked per guidance */}
       {stay.revoked_at || stay.vacate_by ? (
         <div className="rounded-2xl border border-red-200 bg-red-50/80 p-5">
@@ -724,7 +840,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
 
       {/* Hero: Stay overview */}
       <section className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
-        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-8">
+            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-8">
           <div className="min-w-0">
             <div className="flex items-center gap-2 mb-4 flex-wrap">
               <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide ${
@@ -733,11 +849,11 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                   : stay.checked_out_at
                     ? 'bg-slate-100 text-slate-600'
                     : detailHasCheckedIn && stay.approved_stay_start_date <= today && stay.approved_stay_end_date >= today
-                      ? 'bg-emerald-50 text-emerald-700'
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
                       : !detailHasCheckedIn && stay.approved_stay_start_date <= today && stay.approved_stay_end_date >= today
-                        ? 'bg-amber-50 text-amber-700 border border-amber-100'
+                        ? 'bg-[#FFC107] text-slate-900 border-0'
                         : stay.approved_stay_start_date > today
-                          ? 'bg-sky-50 text-sky-700'
+                          ? 'bg-slate-200 text-slate-700 border-0'
                           : 'bg-slate-100 text-slate-600'
               }`}>
                 {stay.cancelled_at
@@ -747,13 +863,13 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                     : detailHasCheckedIn && stay.approved_stay_start_date <= today && stay.approved_stay_end_date >= today
                       ? 'Ongoing'
                       : !detailHasCheckedIn && stay.approved_stay_start_date <= today && stay.approved_stay_end_date >= today
-                        ? 'Upcoming'
+                        ? 'UPCOMING'
                         : stay.approved_stay_start_date > today
-                          ? 'Upcoming'
+                          ? 'FUTURE'
                           : 'Ended'}
               </span>
               <span className="text-slate-400">·</span>
-              <span className="text-slate-500 text-sm">{stay.property_name}</span>
+              <span className="text-slate-500 text-sm">{stay.property_name}{stay.unit_label ? ` — Unit ${stay.unit_label}` : ''}</span>
               <span className="text-slate-400 text-sm">({stay.region_code})</span>
               {stay.invite_id && (
                 <>
@@ -761,7 +877,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                   <span className="text-slate-500 text-sm font-mono">Invite ID: {stay.invite_id}</span>
                   {stay.token_state && (
                     <span className={`ml-1 px-1.5 py-0.5 rounded text-xs font-medium ${
-                      stay.token_state === 'BURNED' ? 'bg-emerald-50 text-emerald-700' :
+                      stay.token_state === 'BURNED' ? 'bg-[#28A745] text-white' :
                       stay.token_state === 'EXPIRED' ? 'bg-slate-100 text-slate-600' :
                       stay.token_state === 'REVOKED' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-600'
                     }`}>
@@ -776,11 +892,11 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
             </h1>
             <div className="flex gap-6 mt-4">
               <div>
-                <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Check-in</p>
+                <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">CHECK-IN</p>
                 <p className="text-slate-900 font-medium mt-0.5">{formatDate(stay.approved_stay_start_date)}</p>
               </div>
               <div>
-                <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">Check-out</p>
+                <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">CHECK-OUT</p>
                 <p className="text-slate-900 font-medium mt-0.5">{formatDate(stay.approved_stay_end_date)}</p>
               </div>
             </div>
@@ -793,8 +909,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
             {stay.property_live_slug && (
               <Button
                 type="button"
-                variant="primary"
-                className="w-full h-11 rounded-lg font-medium"
+                className="w-full h-11 rounded-lg font-medium text-white border-0 bg-[#007BFF] hover:bg-[#006ee6] focus:ring-[#007BFF]"
                 onClick={() => { setLiveLinkSlug(stay.property_live_slug ?? null); setShowLiveLinkModal(true); }}
               >
                 Open live link
@@ -804,7 +919,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
               <Button
                 type="button"
                 variant="outline"
-                className="w-full h-11 rounded-lg font-medium"
+                className="w-full h-11 rounded-lg font-medium bg-white border border-slate-300 text-slate-700 hover:bg-slate-50"
                 onClick={() => { setVerifyQRInviteId(stay.invite_id ?? null); setShowVerifyQRModal(true); }}
               >
                 Verify with QR code
@@ -814,7 +929,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
               <button
                 type="button"
                 disabled={!!checkingInStay}
-                className="w-full h-11 rounded-lg font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                className="w-full h-11 rounded-lg font-medium text-white bg-[#6F42C1] hover:bg-[#5e35a8] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
                 onClick={() => handleCheckIn(stay)}
               >
                 {checkingInStay?.stay_id === stay.stay_id ? 'Checking in…' : 'Check in'}
@@ -836,8 +951,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                 className="w-full h-11 rounded-lg font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
                 onClick={() => setCancelStayConfirm(stay)}
               >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
-                Cancel stay
+                <span className="text-red-500 font-semibold">X</span> Cancel stay
               </button>
             )}
           </div>
@@ -850,48 +964,42 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
         const total = allDays.length;
         const maxShow = 42; // ~6 weeks
         const showDays = total <= maxShow ? allDays : allDays.slice(-maxShow);
-        const isUpcoming = stay.approved_stay_start_date > today;
         return (
-          <section className="rounded-2xl border border-indigo-200/80 bg-gradient-to-br from-indigo-50/80 via-white to-slate-50/60 p-6 md:p-8 shadow-sm">
-            <h3 className="text-sm font-bold uppercase tracking-wider text-indigo-700 mb-4">Time left on your stay</h3>
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-700 mb-4">TIME LEFT ON YOUR STAY</h3>
             <div className="flex flex-col sm:flex-row sm:items-center gap-8">
-              {/* Big countdown */}
               <div className="flex-shrink-0">
-                <div className="inline-flex flex-col items-center justify-center rounded-2xl bg-white/90 border-2 border-indigo-200/80 shadow-inner px-8 py-6 min-w-[180px]">
-                  <span className="text-4xl md:text-5xl font-bold tabular-nums text-indigo-900">
+                <div className="inline-flex flex-col items-center justify-center rounded-2xl bg-white border border-slate-200 shadow-inner px-8 py-6 min-w-[140px]">
+                  <span className="text-4xl md:text-5xl font-bold tabular-nums text-slate-900">
                     {dLeft}
                   </span>
-                  <span className="text-sm font-semibold uppercase tracking-wider text-indigo-600 mt-1">
-                    {dLeft === 0 ? 'day (check-out today)' : dLeft === 1 ? 'day left' : 'days left'}
+                  <span className="text-xs font-semibold uppercase tracking-wider text-slate-600 mt-1">
+                    {dLeft === 0 ? 'DAY (CHECK-OUT TODAY)' : dLeft === 1 ? 'DAY LEFT' : 'DAYS LEFT'}
                   </span>
                 </div>
               </div>
-              {/* Calendar strip */}
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium text-slate-500 mb-2">
-                  {isUpcoming ? 'Your stay period' : 'Stay timeline'} · {formatDate(stay.approved_stay_start_date)} → {formatDate(stay.approved_stay_end_date)}
+                  Stay timeline – {formatDate(stay.approved_stay_start_date)} → {formatDate(stay.approved_stay_end_date)}
                 </p>
-                <div className="flex flex-wrap gap-1">
+                <div className="flex flex-wrap gap-1.5">
                   {showDays.map((dayStr) => {
                     const isToday = dayStr === today;
                     const isEnd = dayStr === stay.approved_stay_end_date;
                     const isPast = dayStr < today;
-                    const isStart = dayStr === stay.approved_stay_start_date;
                     const dayNum = new Date(dayStr + 'T12:00:00').getDate();
                     return (
                       <div
                         key={dayStr}
                         title={`${dayStr}${isToday ? ' (today)' : ''}${isEnd ? ' (check-out)' : ''}`}
-                        className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-medium transition-all ${
+                        className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-medium transition-all ${
                           isToday
-                            ? 'bg-indigo-600 text-white ring-2 ring-indigo-300 ring-offset-1 scale-110'
+                            ? 'bg-[#6F42C1] text-white ring-2 ring-[#6F42C1]/30 ring-offset-1'
                             : isEnd
-                              ? 'bg-amber-500 text-white font-semibold'
+                              ? 'bg-[#FFC107] text-slate-900 font-semibold'
                               : isPast
                                 ? 'bg-slate-200 text-slate-500'
-                                : isStart
-                                  ? 'bg-indigo-100 text-indigo-800 border border-indigo-200'
-                                  : 'bg-slate-100 text-slate-700 border border-slate-200/80'
+                                : 'bg-slate-100 text-slate-700 border border-slate-200'
                         }`}
                       >
                         {dayNum}
@@ -904,13 +1012,13 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                 )}
                 <div className="flex flex-wrap gap-4 mt-3 text-xs text-slate-500">
                   <span className="flex items-center gap-1.5">
-                    <span className="w-3 h-3 rounded bg-indigo-600" /> Today
+                    <span className="w-3 h-3 rounded-full bg-[#6F42C1]" /> Today
                   </span>
                   <span className="flex items-center gap-1.5">
-                    <span className="w-3 h-3 rounded bg-amber-500" /> Check-out day
+                    <span className="w-3 h-3 rounded-full bg-[#FFC107]" /> Check-out day
                   </span>
                   <span className="flex items-center gap-1.5">
-                    <span className="w-3 h-3 rounded bg-slate-200" /> Past
+                    <span className="w-3 h-3 rounded-full bg-slate-200" /> Past
                   </span>
                 </div>
               </div>
@@ -950,7 +1058,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
           {/* Applicable law from Jurisdiction SOT (same as live property page) */}
           {stay && (stay.jurisdiction_state_name || (stay.jurisdiction_statutes && stay.jurisdiction_statutes.length > 0)) && (
             <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-              <p className="text-xs font-semibold uppercase tracking-wider text-indigo-600/90">Applicable law ({stay.jurisdiction_state_name ?? stay.region_code})</p>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-700">APPLICABLE LAW ({(stay.jurisdiction_state_name ?? (stay.region_code || 'State')).toUpperCase()})</p>
               <ul className="mt-2 space-y-2">
                 {(stay.jurisdiction_statutes ?? []).map((s, i) => (
                   <li key={i} className="text-sm text-slate-700">
@@ -971,10 +1079,98 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
               )}
             </div>
           )}
+
+          {/* Audit trail: guest can view their audit trail for this stay */}
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h3 className="text-base font-semibold text-slate-900 mb-2">Audit trail</h3>
+            <p className="text-sm text-slate-500 mb-4">Status changes, signatures, and related events for your stay. View-only.</p>
+            <Button variant="outline" onClick={() => loadGuestLogs(stay?.stay_id)} disabled={guestLogsLoading} className="mb-4">
+              {guestLogsLoading ? 'Loading…' : 'View audit trail'}
+            </Button>
+            {guestLogsLoading && guestLogs.length === 0 ? (
+              <p className="text-slate-500 text-sm">Loading…</p>
+            ) : guestLogsLoadedOnce && guestLogs.length === 0 ? (
+              <p className="text-slate-500 text-sm">No log entries for this stay.</p>
+            ) : guestLogs.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead className="bg-slate-100 text-slate-500 uppercase text-[10px] tracking-widest font-extrabold border-b border-slate-200">
+                    <tr>
+                      <th className="px-4 py-3">Time</th>
+                      <th className="px-4 py-3">Category</th>
+                      <th className="px-4 py-3">Title</th>
+                      <th className="px-4 py-3">Actor</th>
+                      <th className="px-4 py-3">Message</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {guestLogs.map((entry) => (
+                      <tr key={entry.id} className="hover:bg-slate-50">
+                        <td className="px-4 py-2 text-slate-600 text-sm whitespace-nowrap">
+                          {entry.created_at ? new Date(entry.created_at).toISOString().replace('T', ' ').slice(0, 19) + 'Z' : '—'}
+                        </td>
+                        <td className="px-4 py-2">
+                          <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                            entry.category === 'failed_attempt' ? 'bg-red-100 text-red-800' :
+                            entry.category === 'guest_signature' ? 'bg-emerald-100 text-emerald-800' :
+                            entry.category === 'status_change' ? 'bg-sky-100 text-sky-800' :
+                            'bg-slate-200 text-slate-800'
+                          }`}>
+                            {entry.category.replace('_', ' ')}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 font-medium text-slate-800 text-sm">{entry.title}</td>
+                        <td className="px-4 py-2 text-slate-600 text-sm">{entry.actor_email ?? '—'}</td>
+                        <td className="px-4 py-2 text-slate-600 text-sm max-w-xs">
+                          <span className="truncate block">{entry.message}</span>
+                          <button
+                            type="button"
+                            onClick={() => setLogMessageModalEntry(entry)}
+                            className="text-sky-600 hover:text-sky-800 text-xs mt-0.5 focus:outline-none focus:underline"
+                          >
+                            View full message
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </section>
         </div>
 
-        {/* Right: Help */}
+        {/* Right: Presence (ongoing checked-in stay) + Help */}
         <div className="space-y-6">
+          {detailHasCheckedIn && !stay.checked_out_at && !stay.cancelled_at && stay.approved_stay_end_date >= today && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h4 className="font-semibold text-slate-900 mb-3">Presence at this property</h4>
+              <p className="text-sm text-slate-600 mb-4">Set here or away for this stay. Each property you’re invited to has its own status.</p>
+              <div className="flex flex-wrap items-center gap-4">
+                <div className={`px-4 py-2 rounded-lg ${stayPresence === 'present' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                  {stayPresence === 'present' ? 'You are here' : stayPresenceAwayStartedAt ? `Away since ${new Date(stayPresenceAwayStartedAt).toLocaleDateString()}` : 'Away'}
+                </div>
+                {stayPresence === 'away' && stayPresenceGuestsAuthorized && (
+                  <span className="text-sm text-slate-600">Guests authorized during this period</span>
+                )}
+                <Button variant="outline" onClick={handleStayPresenceToggle} disabled={stayPresenceUpdating} className="rounded-lg">
+                  Set to {stayPresence === 'present' ? 'Away' : 'Present'}
+                </Button>
+              </div>
+              {stayShowAwayConfirm && (
+                <div className="mt-4 p-4 rounded-lg bg-slate-50 border border-slate-200">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={stayAwayGuestsAuthorized} onChange={(e) => setStayAwayGuestsAuthorized(e.target.checked)} className="rounded" />
+                    <span className="text-sm text-slate-700">Guests authorized during this period</span>
+                  </label>
+                  <div className="flex gap-2 mt-3">
+                    <Button onClick={() => doSetStayPresence('away', stayAwayGuestsAuthorized)} disabled={stayPresenceUpdating}>Confirm Away</Button>
+                    <Button variant="outline" onClick={() => setStayShowAwayConfirm(false)}>Cancel</Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <h4 className="font-semibold text-slate-900 mb-3">Need help?</h4>
             <div className="flex flex-col gap-2">
@@ -1091,6 +1287,9 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
         </div>
   );
 })()}
+        </div>
+        )}
+      </main>
 
       {/* Checkout confirmation */}
       {endStayConfirm && (
@@ -1100,7 +1299,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
             <p className="text-sm text-slate-600 mb-4">
               Have you vacated the property? Completing checkout will end your stay and set your checkout date to today ({formatDate(today)}). This cannot be undone.
             </p>
-            <p className="text-sm font-medium text-slate-700 mb-6">{endStayConfirm.property_name}</p>
+            <p className="text-sm font-medium text-slate-700 mb-6">{endStayConfirm.property_name}{endStayConfirm.unit_label ? ` — Unit ${endStayConfirm.unit_label}` : ''}</p>
             <div className="flex gap-3">
               <Button variant="outline" className="flex-1 h-11 rounded-lg font-medium" onClick={() => setEndStayConfirm(null)} disabled={endingStay}>
                 Cancel
@@ -1126,7 +1325,7 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
             <p className="text-sm text-slate-600 mb-4">
               Cancel your upcoming stay? This will remove the stay from your dashboard and notify the host. This cannot be undone.
             </p>
-            <p className="text-sm font-medium text-slate-700 mb-6">{cancelStayConfirm.property_name}</p>
+            <p className="text-sm font-medium text-slate-700 mb-6">{cancelStayConfirm.property_name}{cancelStayConfirm.unit_label ? ` — Unit ${cancelStayConfirm.unit_label}` : ''}</p>
             <div className="flex gap-3">
               <Button variant="outline" className="flex-1 h-11 rounded-lg font-medium" onClick={() => setCancelStayConfirm(null)} disabled={cancellingStay}>
                 Keep stay
@@ -1144,32 +1343,35 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
         </div>
       )}
 
-      {/* Overlapping invites: cannot accept */}
-      {pendingInvites.filter((inv) =>
-        stays.some((s) => datesOverlap(inv.stay_start_date, inv.stay_end_date, s.approved_stay_start_date, s.approved_stay_end_date))
-      ).length > 0 && (
-        <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-6 mt-6">
-          <h3 className="text-base font-semibold text-slate-900 mb-1">Overlapping invitations</h3>
-          <p className="text-sm text-slate-600 mb-4">These overlap with an accepted stay and cannot be accepted.</p>
-          <ul className="space-y-3">
-            {pendingInvites
-              .filter((inv) =>
-                stays.some((s) => datesOverlap(inv.stay_start_date, inv.stay_end_date, s.approved_stay_start_date, s.approved_stay_end_date))
-              )
-              .map((inv) => (
-                <li key={inv.invitation_code} className="flex flex-wrap items-center justify-between gap-4 p-4 bg-white rounded-xl border border-amber-100">
-                  <div className="min-w-0 flex-1">
-                    <p className="font-semibold text-slate-900">{inv.property_name}</p>
-                    <p className="text-sm text-slate-500 mt-0.5">
-                      {formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}
-                    </p>
-                    <p className="text-xs text-amber-700 font-medium mt-1">Overlaps existing stay</p>
-                  </div>
-                  <span className="text-sm font-medium text-slate-400 shrink-0">Cannot accept</span>
-                </li>
-              ))}
-          </ul>
-        </div>
+      {/* Log message modal */}
+      <Modal
+        open={!!logMessageModalEntry}
+        onClose={() => setLogMessageModalEntry(null)}
+        title={logMessageModalEntry?.title ?? 'Log entry'}
+        className="max-w-lg"
+      >
+        {logMessageModalEntry && (
+          <div className="p-6">
+            <p className="text-slate-700 whitespace-pre-wrap text-sm">{logMessageModalEntry.message}</p>
+            <p className="text-slate-500 text-xs mt-4">
+              {logMessageModalEntry.created_at ? new Date(logMessageModalEntry.created_at).toLocaleString() : ''}
+              {logMessageModalEntry.actor_email && ` · ${logMessageModalEntry.actor_email}`}
+            </p>
+          </div>
+        )}
+      </Modal>
+
+      {pendingSignatureModalInvite && (
+        <PendingSignatureModal
+          open={!!pendingSignatureModalInvite}
+          onClose={() => setPendingSignatureModalInvite(null)}
+          invitationCode={pendingSignatureModalInvite.invitation_code}
+          propertyName={pendingSignatureModalInvite.property_name}
+          stayStartDate={pendingSignatureModalInvite.stay_start_date}
+          stayEndDate={pendingSignatureModalInvite.stay_end_date}
+          guestEmail={guestEmail}
+          guestFullName={guestFullName}
+        />
       )}
 
       {agreementModalCode && (

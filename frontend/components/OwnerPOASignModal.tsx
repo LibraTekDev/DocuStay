@@ -21,7 +21,7 @@ One signature applies to all properties you add to your account, now and later.
 
 **3. What Does DocuStay Do With This?**
 With your authorization, DocuStay can:
-- Create and send utility authorization tokens (e.g. USAT) so providers can verify occupancy
+- Create and send utility authorization so providers can verify occupancy
 - Contact utility companies when needed to confirm or update service for your properties
 - Put together documentation packages (e.g. occupancy, dates, guest info) for your records
 - Keep dated records of property status and actions for your reference

@@ -8,15 +8,18 @@ from sqlalchemy import func
 
 from app.database import get_db
 from app.models.owner import Property, OwnerProfile
+from app.models.unit import Unit
 from app.models.user import User
 from app.models.stay import Stay
 from app.models.guest import GuestProfile
 from app.models.audit_log import AuditLog
+from app.models.event_ledger import EventLedger
 from app.models.invitation import Invitation
 from app.models.owner_poa_signature import OwnerPOASignature
 from app.services.agreements import agreement_content_to_pdf, poa_content_with_signature
 from app.services.dropbox_sign import get_signed_pdf
 from app.services.audit_log import create_log, CATEGORY_VERIFY_ATTEMPT, CATEGORY_FAILED_ATTEMPT
+from app.services.event_ledger import create_ledger_event, ledger_event_to_display, ACTION_VERIFY_ATTEMPT_VALID, ACTION_VERIFY_ATTEMPT_FAILED
 from app.schemas.public import (
     LivePropertyPagePayload,
     LivePropertyInfo,
@@ -132,22 +135,24 @@ def get_live_property_page(slug: str, db: Session = Depends(get_db)):
         # Overstay: end date passed but not checked out
         current_stay = max(current_stays, key=lambda x: (x.stay_end_date, x.id))
 
-    # Logs for this property (all categories)
+    # Logs for this property from event ledger
     log_rows = (
-        db.query(AuditLog)
-        .filter(AuditLog.property_id == prop.id)
-        .order_by(AuditLog.created_at.desc())
+        db.query(EventLedger)
+        .filter(EventLedger.property_id == prop.id)
+        .order_by(EventLedger.created_at.desc())
         .limit(100)
     ).all()
-    logs = [
-        LiveLogEntry(
-            category=r.category or "—",
-            title=r.title or "—",
-            message=r.message or "—",
-            created_at=r.created_at if r.created_at is not None else datetime.now(timezone.utc),
+    logs = []
+    for r in log_rows:
+        cat, title, msg = ledger_event_to_display(r)
+        logs.append(
+            LiveLogEntry(
+                category=cat,
+                title=title,
+                message=msg,
+                created_at=r.created_at if r.created_at is not None else datetime.now(timezone.utc),
+            )
         )
-        for r in log_rows
-    ]
 
     # Invitations for this property – invite states indicate stay status (STAGED→pending, BURNED→accepted/stay, EXPIRED→ended, REVOKED→cancelled)
     inv_rows = (
@@ -497,6 +502,18 @@ def post_verify(
         user_agent=user_agent,
         meta={"result": "valid", "reason": "valid"},
     )
+    create_ledger_event(
+        db,
+        ACTION_VERIFY_ATTEMPT_VALID,
+        target_object_type="Stay",
+        target_object_id=stay.id,
+        property_id=prop.id,
+        stay_id=stay.id,
+        invitation_id=inv.id,
+        meta={"result": "valid", "reason": "valid"},
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
     db.commit()
 
     # Guest name
@@ -634,16 +651,22 @@ def get_portfolio_page(slug: str, db: Session = Depends(get_db)):
         .order_by(Property.created_at.asc())
         .all()
     )
-    property_items = [
-        PortfolioPropertyItem(
-            id=p.id,
-            name=p.name,
-            city=p.city,
-            state=p.state,
-            region_code=p.region_code,
-            property_type_label=getattr(p, "property_type_label", None) or (p.property_type.value if p.property_type else None),
-            bedrooms=getattr(p, "bedrooms", None),
+    property_items = []
+    for p in properties:
+        unit_count = None
+        if getattr(p, "is_multi_unit", False):
+            unit_count = db.query(Unit).filter(Unit.property_id == p.id).count() or 0
+        property_items.append(
+            PortfolioPropertyItem(
+                id=p.id,
+                name=p.name,
+                city=p.city,
+                state=p.state,
+                region_code=p.region_code,
+                property_type_label=getattr(p, "property_type_label", None) or (p.property_type.value if p.property_type else None),
+                bedrooms=getattr(p, "bedrooms", None),
+                is_multi_unit=getattr(p, "is_multi_unit", False),
+                unit_count=unit_count,
+            )
         )
-        for p in properties
-    ]
     return PortfolioPagePayload(owner=owner_info, properties=property_items)

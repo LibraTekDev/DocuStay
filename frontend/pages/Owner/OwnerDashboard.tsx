@@ -1,12 +1,16 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Card, Button, Modal, LoadingOverlay } from '../../components/UI';
+import { Card, Button, Modal, LoadingOverlay, Input } from '../../components/UI';
 import { InviteGuestModal } from '../../components/InviteGuestModal';
+import { InviteRoleChoiceModal } from '../../components/InviteRoleChoiceModal';
 import { UserSession } from '../../types';
-import { dashboardApi, propertiesApi, type OwnerStayView, type OwnerInvitationView, type OwnerAuditLogEntry, type Property, type BulkUploadResult, type BillingResponse, type BillingInvoiceView, type BillingPaymentView } from '../../services/api';
+import { dashboardApi, propertiesApi, getContextMode, setContextMode, onPropertiesChanged, type OwnerStayView, type OwnerInvitationView, type OwnerAuditLogEntry, type Property, type BulkUploadResult, type BillingResponse, type BillingInvoiceView, type BillingPaymentView } from '../../services/api';
 import { copyToClipboard } from '../../utils/clipboard';
+import { getTodayLocal } from '../../utils/dateUtils';
+import { toUserFriendlyInvitationError } from '../../utils/invitationErrors';
 import Settings from '../Settings/Settings';
 import HelpCenter from '../Support/HelpCenter';
+import { ModeSwitcher } from '../../components/ModeSwitcher';
 
 function daysLeft(endDateStr: string): number {
   const end = new Date(endDateStr);
@@ -62,12 +66,19 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
   const [loading, setLoadingState] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showInviteModal, setShowInviteModal] = useState(false);
+  const [showInviteRoleChoice, setShowInviteRoleChoice] = useState(false);
+  const [showInviteTenantModal, setShowInviteTenantModal] = useState(false);
+  const [inviteTenantPropertyId, setInviteTenantPropertyId] = useState<number | null>(null);
+  const [inviteTenantUnits, setInviteTenantUnits] = useState<Array<{ id: number; unit_label: string }>>([]);
+  const [inviteTenantUnitId, setInviteTenantUnitId] = useState<number | null>(null);
+  const [inviteTenantForm, setInviteTenantForm] = useState({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
+  const [inviteTenantSubmitting, setInviteTenantSubmitting] = useState(false);
+  const [inviteTenantLink, setInviteTenantLink] = useState<string | null>(null);
   const [revokeConfirmStay, setRevokeConfirmStay] = useState<OwnerStayView | null>(null);
   const [revokeSuccessGuest, setRevokeSuccessGuest] = useState<string | null>(null);
   const [packetModalStay, setPacketModalStay] = useState<OwnerStayView | null>(null);
   const [deleteConfirmProperty, setDeleteConfirmProperty] = useState<Property | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [visibleTokenId, setVisibleTokenId] = useState<number | null>(null);
   const [shieldTogglePropertyId, setShieldTogglePropertyId] = useState<number | null>(null);
   const [logs, setLogs] = useState<OwnerAuditLogEntry[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
@@ -88,8 +99,20 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
   const [showVerifyQRModal, setShowVerifyQRModal] = useState(false);
   const [verifyQRInviteId, setVerifyQRInviteId] = useState<string | null>(null);
   const [verifyQRCopyToast, setVerifyQRCopyToast] = useState<string | null>(null);
+  const [personalModeUnits, setPersonalModeUnits] = useState<number[]>([]);
+  const [contextMode, setContextModeState] = useState<'business' | 'personal'>(() => getContextMode());
+  type AssignedManagerItem = { user_id: number; email: string; full_name: string | null; has_resident_mode: boolean; resident_unit_id: number | null; resident_unit_label: string | null };
+  const [propertyManagersMap, setPropertyManagersMap] = useState<Record<number, AssignedManagerItem[]>>({});
+  const [removingManager, setRemovingManager] = useState<{ propertyId: number; userId: number } | null>(null);
+  const [removingResidentMode, setRemovingResidentMode] = useState<{ propertyId: number; userId: number } | null>(null);
 
   const setLoadingWrapper = (x: boolean) => { setLoadingState(x); setLoading(x); };
+
+  const handleContextModeChange = (mode: 'business' | 'personal') => {
+    setContextMode(mode);
+    setContextModeState(mode);
+    loadData();
+  };
 
   const loadData = () => {
     setLoadingWrapper(true);
@@ -99,12 +122,14 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
       dashboardApi.ownerInvitations(),
       propertiesApi.list(),
       propertiesApi.listInactive(),
+      dashboardApi.ownerPersonalModeUnits().catch(() => ({ unit_ids: [] })),
     ])
-      .then(([staysData, invitationsData, propertiesList, inactiveList]) => {
+      .then(([staysData, invitationsData, propertiesList, inactiveList, pmUnits]) => {
         setStays(staysData);
         setInvitations(invitationsData);
         setProperties(propertiesList);
         setInactiveProperties(inactiveList);
+        setPersonalModeUnits((pmUnits as { unit_ids: number[] }).unit_ids || []);
       })
       .catch((e) => {
         const msg = (e as Error)?.message ?? 'Failed to load dashboard.';
@@ -119,8 +144,36 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
   }, []);
 
   useEffect(() => {
+    const unsub = onPropertiesChanged(() => loadData());
+    return unsub;
+  }, []);
+
+  useEffect(() => {
     if (initialTab) setActiveTab(initialTab);
   }, [initialTab]);
+
+  useEffect(() => {
+    if (contextMode === 'personal' && ['billing', 'logs', 'invitations'].includes(activeTab)) setActiveTab('dashboard');
+  }, [contextMode]);
+
+  useEffect(() => {
+    if (activeTab !== 'properties' || properties.length === 0) return;
+    const loadManagers = async () => {
+      const next: Record<number, AssignedManagerItem[]> = {};
+      await Promise.all(
+        properties.map(async (prop) => {
+          try {
+            const list = await propertiesApi.listAssignedManagers(prop.id);
+            next[prop.id] = list;
+          } catch {
+            next[prop.id] = [];
+          }
+        })
+      );
+      setPropertyManagersMap(next);
+    };
+    loadManagers();
+  }, [activeTab, properties]);
 
   // Only checked-in stays count as active for occupancy, current guest, and DMS
   const activeStays = stays.filter((s) => s.checked_in_at && !s.checked_out_at && !s.cancelled_at);
@@ -160,7 +213,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
     setRemovalLoading(true);
     try {
       await dashboardApi.initiateRemoval(packetModalStay.stay_id);
-      notify('success', 'Removal initiated. USAT token revoked. Guest and owner notified via email.');
+      notify('success', 'Removal initiated. Guest and owner notified via email.');
       setPacketModalStay(null);
       loadData();
     } catch (e) {
@@ -231,7 +284,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
       setActiveTab('billing');
       return;
     }
-    setShowInviteModal(true);
+    setShowInviteRoleChoice(true);
   };
 
   return (
@@ -243,9 +296,9 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             { id: 'dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
             { id: 'properties', label: 'My Properties', icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' },
             { id: 'guests', label: 'Guests', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' },
-            { id: 'invitations', label: 'Invitations', icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' },
-            { id: 'billing', label: 'Billing', icon: 'M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v2H9v2h2v6a2 2 0 002 2h2a2 2 0 002-2v-6h2V9zm-6 0V7a2 2 0 00-2-2H5a2 2 0 00-2 2v2h4z' },
-            { id: 'logs', label: 'Logs', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+            ...(contextMode !== 'personal' ? [{ id: 'invitations', label: 'Invitations', icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' }] : []),
+            ...(contextMode !== 'personal' ? [{ id: 'billing', label: 'Billing', icon: 'M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v2H9v2h2v6a2 2 0 002 2h2a2 2 0 002-2v-6h2V9zm-6 0V7a2 2 0 00-2-2H5a2 2 0 00-2 2v2h4z' }] : []),
+            ...(contextMode !== 'personal' ? [{ id: 'logs', label: 'Event ledger', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' }] : []),
             { id: 'settings', label: 'Settings', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z' },
             { id: 'help', label: 'Help Center', icon: 'M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' }
           ].map(item => (
@@ -260,38 +313,15 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
           ))}
         </div>
 
-        {/* Guests section: list guests with property and duration */}
-        <div className="mt-6 pt-6 border-t border-slate-200 flex-grow min-h-0 flex flex-col">
-          <h3 className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-3 px-1">Your guests</h3>
-          {loading ? (
-            <p className="text-slate-500 text-sm">Loading…</p>
-          ) : activeStays.length === 0 ? (
-            <p className="text-slate-500 text-sm">No active guests. Invite someone to get started.</p>
-          ) : (
-            <ul className="space-y-3 overflow-y-auto no-scrollbar pr-1">
-              {activeStays.map((stay) => (
-                <li
-                  key={stay.stay_id}
-                  className={`rounded-xl p-3 border transition-colors ${activeTab === 'guests' ? 'bg-blue-600/10 border-blue-500/20' : 'bg-slate-100 border-slate-200 hover:bg-slate-100'}`}
-                >
-                  <div className="flex items-start gap-2">
-                    <div className="w-8 h-8 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-xs flex-shrink-0">
-                      {stay.guest_name.charAt(0)}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-semibold text-slate-800 truncate">{stay.guest_name}</p>
-                      <p className="text-xs text-slate-600 truncate mt-0.5" title={stay.property_name}>
-                        {stay.property_name}
-                      </p>
-                      <p className="text-xs text-slate-500 mt-1">
-                        {formatStayDuration(stay.stay_start_date, stay.stay_end_date)}
-                      </p>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
+        <div className="flex-grow min-h-0" />
+
+        {/* Mode switcher at bottom */}
+        <div className="mt-6 pt-6 border-t border-slate-200 flex-shrink-0">
+          <ModeSwitcher
+            contextMode={contextMode}
+            personalModeUnits={personalModeUnits}
+            onContextModeChange={handleContextModeChange}
+          />
         </div>
       </aside>
 
@@ -309,9 +339,9 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             <option value="dashboard">Dashboard</option>
             <option value="properties">My Properties</option>
             <option value="guests">Guests</option>
-            <option value="invitations">Invitations</option>
-            <option value="billing">Billing</option>
-            <option value="logs">Logs</option>
+            {contextMode !== 'personal' && <option value="invitations">Invitations</option>}
+            {contextMode !== 'personal' && <option value="billing">Billing</option>}
+            {contextMode !== 'personal' && <option value="logs">Event ledger</option>}
             <option value="settings">Settings</option>
             <option value="help">Help Center</option>
           </select>
@@ -321,10 +351,10 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
           <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-10 gap-6">
             <div>
               <h1 className="text-4xl font-extrabold text-slate-800 tracking-tight">
-                {activeTab === 'properties' ? 'My Properties' : activeTab === 'guests' ? 'Guests' : activeTab === 'invitations' ? 'Invitations' : activeTab === 'billing' ? 'Billing' : activeTab === 'logs' ? 'Logs' : 'Overview'}
+                {activeTab === 'properties' ? 'My Properties' : activeTab === 'guests' ? 'Guests' : activeTab === 'invitations' ? 'Invitations' : activeTab === 'billing' ? 'Billing' : activeTab === 'logs' ? 'Event ledger' : 'Overview'}
               </h1>
               <p className="text-slate-600 mt-1">
-                {activeTab === 'properties' ? 'View, edit, or remove your registered properties.' : activeTab === 'guests' ? 'Guests currently staying at your properties and their stay details.' : activeTab === 'invitations' ? 'Pending invitations waiting for guests to accept.' : activeTab === 'billing' ? 'Invoices and payment history. Onboarding and subscription charges appear here.' : activeTab === 'logs' ? 'Immutable audit trail: status changes, guest signatures, payment and billing activity, and failed attempts. Filter by time, category, or search.' : 'Documentation and authorization for your properties.'}
+                {activeTab === 'properties' ? 'View, edit, or remove your registered properties.' : activeTab === 'guests' ? 'Guests currently staying at your properties and their stay details.' : activeTab === 'invitations' ? 'Pending invitations waiting for guests to accept.' : activeTab === 'billing' ? 'Invoices and payment history. Onboarding and subscription charges appear here.' : activeTab === 'logs' ? 'Immutable event ledger: status changes, guest signatures, payment and billing activity, and failed attempts. Filter by time, category, or search.' : 'Documentation and authorization for your properties.'}
               </p>
             </div>
             <div className="flex gap-4 flex-wrap items-center">
@@ -340,11 +370,11 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                   )}
                   <Button variant="outline" onClick={openInviteModalOrNotify} className={`px-6 flex items-center gap-2${!canInvite ? ' pointer-events-none' : ''}`} disabled={!canInvite}>
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
-                    Invite Guest
+                    Invite
                   </Button>
                 </span>
               )}
-              {activeTab === 'properties' && (
+              {activeTab === 'properties' && contextMode !== 'personal' && (
                 <div className="flex items-center gap-1.5">
                   <Button variant="outline" onClick={() => setShowBulkUploadModal(true)} className="px-6 flex items-center gap-2">
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
@@ -362,9 +392,11 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                   </button>
                 </div>
               )}
-              <Button variant="primary" onClick={() => navigate('add-property')} className="px-6">
-                Register Property
-              </Button>
+              {contextMode !== 'personal' && (
+                <Button variant="primary" onClick={() => navigate('add-property')} className="px-6">
+                  Register Property
+                </Button>
+              )}
             </div>
           </header>
         )}
@@ -402,6 +434,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                         <th className="px-6 py-4">Region</th>
                         <th className="px-6 py-4">Code</th>
                         <th className="px-6 py-4">Status</th>
+                        <th className="px-6 py-4 text-right">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-800">
@@ -425,6 +458,20 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                             ) : (
                               <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-amber-500/10 text-amber-700 border border-amber-200">Pending</span>
                             )}
+                          </td>
+                          <td className="px-6 py-5 text-right">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={async () => {
+                                const url = `${typeof window !== 'undefined' ? window.location.origin : ''}${typeof window !== 'undefined' ? window.location.pathname : ''}#invite/${inv.invitation_code}`;
+                                const ok = await copyToClipboard(url);
+                                if (ok) notify('success', 'Invitation link copied to clipboard.');
+                                else notify('error', 'Could not copy. Please copy the link manually.');
+                              }}
+                            >
+                              Copy link
+                            </Button>
                           </td>
                         </tr>
                       ))}
@@ -534,7 +581,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                       Go to Billing and pay your onboarding fee to invite guests.
                     </span>
                   )}
-                  <Button variant="primary" onClick={openInviteModalOrNotify} className={!canInvite ? 'pointer-events-none' : undefined} disabled={!canInvite}>Invite Guest</Button>
+                  <Button variant="primary" onClick={openInviteModalOrNotify} className={!canInvite ? 'pointer-events-none' : undefined} disabled={!canInvite}>Invite</Button>
                 </span>
               </Card>
             )}
@@ -591,24 +638,20 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                             <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-amber-500/10 text-amber-700 border border-amber-200">Pending</span>
                           </td>
                           <td className="px-6 py-5">
-                            <div className="flex items-center gap-2">
-                              <Button variant="outline" size="sm" onClick={() => { setVerifyQRInviteId(inv.invitation_code); setShowVerifyQRModal(true); }}>Verify QR</Button>
-                              <button
-                                type="button"
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Button
+                                variant="outline"
+                                size="sm"
                                 onClick={async () => {
                                   const url = `${typeof window !== 'undefined' ? window.location.origin : ''}${typeof window !== 'undefined' ? window.location.pathname : ''}#invite/${inv.invitation_code}`;
                                   const ok = await copyToClipboard(url);
                                   if (ok) notify('success', 'Invitation link copied to clipboard.');
                                   else notify('error', 'Could not copy. Please copy the link manually.');
                                 }}
-                                title="Copy invitation link"
-                                className="p-2 rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-800 hover:border-slate-300 transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:ring-offset-1"
-                                aria-label="Copy invitation link"
                               >
-                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                                </svg>
-                              </button>
+                                Copy link
+                              </Button>
+                              <Button variant="outline" size="sm" onClick={() => { setVerifyQRInviteId(inv.invitation_code); setShowVerifyQRModal(true); }}>Verify QR</Button>
                               <Button variant="outline" size="sm" onClick={async () => { try { await dashboardApi.cancelInvitation(inv.id); notify('success', 'Invitation cancelled.'); loadData(); } catch (e) { notify('error', (e as Error)?.message ?? 'Failed to cancel.'); } }}>Cancel invite</Button>
                             </div>
                           </td>
@@ -664,7 +707,20 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                           <td className="px-6 py-5">
                             <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-slate-100 text-slate-600 border border-slate-200">Expired</span>
                           </td>
-                          <td className="px-6 py-5 text-slate-400 text-sm">—</td>
+                          <td className="px-6 py-5">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={async () => {
+                                const url = `${typeof window !== 'undefined' ? window.location.origin : ''}${typeof window !== 'undefined' ? window.location.pathname : ''}#invite/${inv.invitation_code}`;
+                                const ok = await copyToClipboard(url);
+                                if (ok) notify('success', 'Invitation link copied to clipboard.');
+                                else notify('error', 'Could not copy. Please copy the link manually.');
+                              }}
+                            >
+                              Copy link
+                            </Button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -726,7 +782,19 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                               </span>
                             </td>
                             <td className="px-6 py-5">
-                              <div className="flex items-center gap-2">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={async () => {
+                                    const url = `${typeof window !== 'undefined' ? window.location.origin : ''}${typeof window !== 'undefined' ? window.location.pathname : ''}#invite/${inv.invitation_code}`;
+                                    const ok = await copyToClipboard(url);
+                                    if (ok) notify('success', 'Invitation link copied to clipboard.');
+                                    else notify('error', 'Could not copy. Please copy the link manually.');
+                                  }}
+                                >
+                                  Copy link
+                                </Button>
                                 <Button variant="outline" size="sm" onClick={() => { setVerifyQRInviteId(inv.invitation_code); setShowVerifyQRModal(true); }}>Verify QR</Button>
                                 {(inv.status === 'ongoing' || inv.status === 'accepted') && (
                                   <Button variant="outline" size="sm" onClick={async () => { try { await dashboardApi.cancelInvitation(inv.id); notify('success', 'Invitation cancelled.'); loadData(); } catch (e) { notify('error', (e as Error)?.message ?? 'Failed to cancel.'); } }}>Cancel invite</Button>
@@ -851,7 +919,9 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             {properties.length === 0 && inactiveProperties.length === 0 ? (
               <Card className="p-12 text-center">
                 <p className="text-slate-600 mb-6">You haven’t registered any properties yet.</p>
-                <Button variant="primary" onClick={() => navigate('add-property')}>Register your first property</Button>
+                {contextMode !== 'personal' && (
+                  <Button variant="primary" onClick={() => navigate('add-property')}>Register your first property</Button>
+                )}
               </Card>
             ) : (
               <>
@@ -868,14 +938,6 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                   const isOccupied = !!activeStayForProp;
                   const shieldOn = !!prop.shield_mode_enabled;
                   const shieldStatus = shieldOn ? (isOccupied ? 'PASSIVE GUARD' : 'ACTIVE MONITORING') : null;
-                  const tokenVisible = visibleTokenId === prop.id;
-                  const copyToken = async () => {
-                    if (prop.usat_token) {
-                      const ok = await copyToClipboard(prop.usat_token);
-                      if (ok) notify('success', 'Token copied to clipboard.');
-                      else notify('error', 'Copy failed.');
-                    }
-                  };
                   return (
                     <Card key={prop.id} className="p-6 border border-slate-200">
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
@@ -911,7 +973,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                             {(prop.property_type_label || prop.property_type) && (
                               <span>Type: <span className="text-slate-600 font-medium">{prop.property_type_label || prop.property_type}</span></span>
                             )}
-                            {prop.bedrooms && (
+                            {!prop.is_multi_unit && prop.bedrooms && (
                               <span>Bedrooms: <span className="text-slate-600 font-medium">{prop.bedrooms}</span></span>
                             )}
                             {isOccupied && activeStayForProp && (
@@ -928,13 +990,15 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                           <Button variant="outline" onClick={() => navigate(`property/${prop.id}`)} className="px-4">
                             View & Edit
                           </Button>
-                          <Button
-                            variant="ghost"
-                            onClick={() => { setDeleteConfirmProperty(prop); setDeleteError(null); }}
-                            className="px-4 text-red-600 hover:text-red-700 hover:bg-red-50"
-                          >
-                            Remove Property
-                          </Button>
+                          {contextMode === 'business' && (
+                            <Button
+                              variant="ghost"
+                              onClick={() => { setDeleteConfirmProperty(prop); setDeleteError(null); }}
+                              className="px-4 text-red-600 hover:text-red-700 hover:bg-red-50"
+                            >
+                              Remove Property
+                            </Button>
+                          )}
                         </div>
                       </div>
                       {/* Occupancy status: VACANT | OCCUPIED | UNKNOWN | UNCONFIRMED */}
@@ -1010,28 +1074,87 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                         </div>
                       </div>
 
-                      {/* USAT Token: owner only; not shared with guests */}
-                      {prop.usat_token && (
-                        <div className="mt-6 pt-6 border-t border-slate-200">
-                          <p className="text-xs text-slate-500 mb-2">Your property token. Guests cannot view owner tokens.</p>
-                          <div className="flex flex-wrap items-center gap-3">
-                            <span className="text-xs font-bold uppercase tracking-wider text-slate-500">USAT Token</span>
-                            <code className={`px-3 py-1.5 rounded-lg font-mono text-sm ${tokenVisible ? 'bg-slate-100 text-slate-800' : 'bg-slate-100 text-slate-400'}`}>
-                              {tokenVisible ? prop.usat_token : '••••••••••••••••••••••••••••••••'}
-                            </code>
-                            <button
-                              type="button"
-                              onClick={() => setVisibleTokenId(tokenVisible ? null : prop.id)}
-                              className="text-xs font-semibold text-blue-600 hover:text-blue-800"
-                            >
-                              {tokenVisible ? 'Hide' : 'Show'}
-                            </button>
-                            <Button variant="outline" onClick={copyToken} className="text-xs py-1.5 px-3">
-                              Copy
-                            </Button>
-                          </div>
-                        </div>
-                      )}
+                      {/* Property managers: visible in both personal and business; remove only in business */}
+                      <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+                        <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Property managers</p>
+                        {(propertyManagersMap[prop.id]?.length ?? 0) === 0 ? (
+                          <p className="text-sm text-slate-500">No managers assigned. Invite from property details.</p>
+                        ) : (
+                          <ul className="space-y-2">
+                            {(propertyManagersMap[prop.id] || []).map((m) => (
+                              <li key={m.user_id} className="flex flex-wrap items-center justify-between gap-2 py-2 border-b border-slate-100 last:border-0">
+                                <div>
+                                  <p className="text-sm font-medium text-slate-800">{m.full_name || m.email}</p>
+                                  <p className="text-xs text-slate-500">{m.email}</p>
+                                  {m.has_resident_mode && m.resident_unit_label && (
+                                    <>
+                                      <p className="text-xs text-emerald-600 mt-0.5">On-site resident · Unit {m.resident_unit_label}</p>
+                                      {m.presence_status && (
+                                        <p className="text-xs text-slate-600 mt-0.5">
+                                          {m.presence_status === 'present' ? (
+                                            <span className="text-emerald-600">Present</span>
+                                          ) : m.presence_away_started_at ? (
+                                            <span className="text-slate-600">Away since {new Date(m.presence_away_started_at).toLocaleDateString()}</span>
+                                          ) : (
+                                            <span className="text-slate-600">Away</span>
+                                          )}
+                                        </p>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                                {contextMode === 'business' && (
+                                  <div className="flex items-center gap-2">
+                                    {m.has_resident_mode && (
+                                      <Button
+                                        variant="outline"
+                                        onClick={async () => {
+                                          setRemovingResidentMode({ propertyId: prop.id, userId: m.user_id });
+                                          try {
+                                            await propertiesApi.removeManagerResidentMode(prop.id, m.user_id);
+                                            notify('success', 'Manager removed as on-site resident. They remain assigned; that unit is now vacant.');
+                                            const next = await propertiesApi.listAssignedManagers(prop.id);
+                                            setPropertyManagersMap((prev) => ({ ...prev, [prop.id]: next }));
+                                          } catch (e) {
+                                            notify('error', (e as Error)?.message ?? 'Failed.');
+                                          } finally {
+                                            setRemovingResidentMode(null);
+                                          }
+                                        }}
+                                        disabled={(removingResidentMode?.propertyId === prop.id && removingResidentMode?.userId === m.user_id) || removingManager !== null}
+                                      >
+                                        {removingResidentMode?.propertyId === prop.id && removingResidentMode?.userId === m.user_id ? 'Removing…' : 'Remove as on-site resident'}
+                                      </Button>
+                                    )}
+                                    <Button
+                                      variant="ghost"
+                                      onClick={async () => {
+                                        setRemovingManager({ propertyId: prop.id, userId: m.user_id });
+                                        try {
+                                          await propertiesApi.removePropertyManager(prop.id, m.user_id);
+                                          notify('success', 'Manager removed from property.');
+                                          setPropertyManagersMap((prev) => ({
+                                            ...prev,
+                                            [prop.id]: (prev[prop.id] || []).filter((x) => x.user_id !== m.user_id),
+                                          }));
+                                        } catch (e) {
+                                          notify('error', (e as Error)?.message ?? 'Failed to remove manager.');
+                                        } finally {
+                                          setRemovingManager(null);
+                                        }
+                                      }}
+                                      disabled={(removingManager?.propertyId === prop.id && removingManager?.userId === m.user_id) || removingResidentMode !== null}
+                                      className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                                    >
+                                      {removingManager?.propertyId === prop.id && removingManager?.userId === m.user_id ? 'Removing…' : 'Remove'}
+                                    </Button>
+                                  </div>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
                     </Card>
                   );
                 })}
@@ -1114,7 +1237,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             )}
             <Card className="p-6">
               <h3 className="text-lg font-bold text-slate-800 mb-2">Billing</h3>
-              <p className="text-slate-500 text-sm mb-4">Invoices and payment history. Onboarding and subscription charges appear here. Billing activity is also recorded in Logs.</p>
+              <p className="text-slate-500 text-sm mb-4">Invoices and payment history. Onboarding and subscription charges appear here. Billing activity is also recorded in Event ledger.</p>
               {billing && (billing.current_unit_count != null || billing.current_shield_count != null) && (
                 <p className="text-slate-600 text-sm mb-4 p-3 bg-slate-50 rounded-lg border border-slate-200">
                   <strong>Current subscription:</strong> {billing.current_unit_count ?? 0} unit{(billing.current_unit_count ?? 0) !== 1 ? 's' : ''} (${(billing.current_unit_count ?? 0) * 1}/mo baseline)
@@ -1266,6 +1389,8 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                     <option value="guest_signature">Guest signature</option>
                     <option value="failed_attempt">Failed attempt</option>
                     <option value="billing">Billing</option>
+                    <option value="presence">Presence / Away</option>
+                    <option value="tenant_assignment">Tenant assignment</option>
                   </select>
                 </div>
                 <div>
@@ -1285,8 +1410,8 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             </Card>
             <Card className="overflow-hidden">
               <div className="p-6 border-b border-slate-200 bg-slate-50">
-                <h3 className="text-lg font-bold text-slate-800">Audit log (append-only)</h3>
-                <p className="text-slate-500 text-sm mt-1">Status changes, Shield Mode and Dead Man&apos;s Switch on/off, guest signatures, payment and billing activity (invoices created, paid), and failed attempts are recorded. Use the category filter to view Shield Mode, Dead Man&apos;s Switch, or Billing logs. Records cannot be edited or deleted.</p>
+                <h3 className="text-lg font-bold text-slate-800">Event ledger (append-only)</h3>
+                <p className="text-slate-500 text-sm mt-1">Status changes, Shield Mode and Dead Man&apos;s Switch on/off, guest signatures, payment and billing activity (invoices created, paid), and failed attempts are recorded. Use the category filter to view Shield Mode, Dead Man&apos;s Switch, or Billing events. Records cannot be edited or deleted.</p>
               </div>
               <div className="overflow-x-auto">
                 {logsLoading && logs.length === 0 ? (
@@ -1346,7 +1471,15 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
           </div>
         ) : activeTab === 'settings' ? (
           <div className="w-full">
-            <Settings user={user} navigate={navigate} embedded onOpenBilling={() => setActiveTab('billing')} />
+            <Settings
+              user={user}
+              navigate={navigate}
+              embedded
+              onOpenBilling={() => setActiveTab('billing')}
+              contextMode={contextMode}
+              personalModeUnits={personalModeUnits}
+              onContextModeChange={handleContextModeChange}
+            />
           </div>
         ) : activeTab === 'help' ? (
           <div className="w-full">
@@ -1370,7 +1503,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
               </div>
             )}
 
-            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
+            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-10">
               <Card
                 className="p-6 border-l-4 border-blue-500 hover:scale-[1.02] transition-transform cursor-pointer"
                 onClick={() => setActiveTab('properties')}
@@ -1385,10 +1518,6 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
               <Card className="p-6 border-l-4 border-red-500 hover:scale-[1.02] transition-transform cursor-pointer">
                 <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Overstays</p>
                 <p className="text-4xl font-extrabold text-red-600 mt-1">{overstays.length}</p>
-              </Card>
-              <Card className="p-6 border-l-4 border-blue-400 hover:scale-[1.02] transition-transform cursor-pointer">
-                <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Documentation</p>
-                <p className="text-4xl font-extrabold text-slate-800 mt-1 uppercase tracking-tighter">{properties.length > 0 ? 'Active' : '—'}</p>
               </Card>
             </div>
 
@@ -1466,8 +1595,8 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
         className="max-w-lg"
       >
         <div className="px-6 py-4 space-y-3 text-slate-600 text-sm">
-          <p><strong>Required columns:</strong> <code className="bg-slate-100 px-1 rounded">street_address</code> (or <code className="bg-slate-100 px-1 rounded">street</code>), <code className="bg-slate-100 px-1 rounded">city</code>, <code className="bg-slate-100 px-1 rounded">state</code>.</p>
-          <p><strong>Optional columns:</strong> <code className="bg-slate-100 px-1 rounded">property_name</code>, <code className="bg-slate-100 px-1 rounded">zip_code</code>, <code className="bg-slate-100 px-1 rounded">region_code</code>, <code className="bg-slate-100 px-1 rounded">property_type</code>, <code className="bg-slate-100 px-1 rounded">bedrooms</code>, <code className="bg-slate-100 px-1 rounded">is_primary_residence</code> (true/false), <code className="bg-slate-100 px-1 rounded">tax_id</code>, <code className="bg-slate-100 px-1 rounded">apn</code>.</p>
+          <p><strong>Required:</strong> <code className="bg-slate-100 px-1 rounded">Address</code>, <code className="bg-slate-100 px-1 rounded">City</code>, <code className="bg-slate-100 px-1 rounded">State</code>, <code className="bg-slate-100 px-1 rounded">Zip</code>, <code className="bg-slate-100 px-1 rounded">Occupied</code> (YES/NO). If Occupied=YES: <code className="bg-slate-100 px-1 rounded">Tenant Name</code>, <code className="bg-slate-100 px-1 rounded">Lease Start</code>, <code className="bg-slate-100 px-1 rounded">Lease End</code>.</p>
+          <p><strong>Property details (optional):</strong> <code className="bg-slate-100 px-1 rounded">property_name</code>, <code className="bg-slate-100 px-1 rounded">property_type</code> (house, apartment, condo, townhouse, duplex, triplex, quadplex), <code className="bg-slate-100 px-1 rounded">bedrooms</code> (for house/condo), <code className="bg-slate-100 px-1 rounded">units</code> (for apartment/duplex/triplex/quadplex), <code className="bg-slate-100 px-1 rounded">primary_residence_unit</code> (unit number 1, 2, … if owner lives there), <code className="bg-slate-100 px-1 rounded">occupied_unit</code> (which unit is occupied, for multi-unit with Occupied=YES), <code className="bg-slate-100 px-1 rounded">Unit No</code>, <code className="bg-slate-100 px-1 rounded">Shield Mode</code>, <code className="bg-slate-100 px-1 rounded">is_primary_residence</code>, <code className="bg-slate-100 px-1 rounded">tax_id</code>, <code className="bg-slate-100 px-1 rounded">apn</code>.</p>
           <p>Existing properties (same street, city, state) are updated only when values change. Empty optional cells keep existing values.</p>
           <p>If the upload fails partway, rows before the failure are saved.</p>
         </div>
@@ -1491,9 +1620,9 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             <Button
               variant="outline"
               onClick={() => {
-                const header = 'Address,Unit No,City,State,Zip,Occupied,Tenant Name,Lease Start,Lease End,Shield Mode,Tax ID,APN';
-                const exampleOccupied = '123 Ocean Ave,,Miami,FL,33139,YES,Jane Doe,2025-01-01,2025-12-31,NO';
-                const exampleVacant = '456 Oak St,,Austin,TX,78701,NO,,,NO';
+                const header = 'Address,Unit No,City,State,Zip,Occupied,Tenant Name,Lease Start,Lease End,Property Name,Property Type,Units,Bedrooms,Primary Residence Unit,Occupied Unit,Shield Mode,Tax ID,APN';
+                const exampleOccupied = '123 Ocean Ave,,Miami,FL,33139,YES,Jane Doe,2025-01-01,2025-12-31,Miami Beach Condo,house,,3,,,NO,,';
+                const exampleVacant = '456 Oak St,,Austin,TX,78701,NO,,,Astro Apartments,apartment,12,,1,,NO,,';
                 const blob = new Blob([header + '\n' + exampleOccupied + '\n' + exampleVacant], { type: 'text/csv' });
                 const a = document.createElement('a');
                 a.href = URL.createObjectURL(blob);
@@ -1643,7 +1772,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
               </div>
               <div className="p-6 space-y-4">
                 <p className="text-slate-600 text-sm">
-                  Revoking <span className="font-bold text-slate-800">{revokeConfirmStay.guest_name}</span> will terminate their USAT token and trigger a 12-hour vacate notice. Proceed?
+                  Revoking <span className="font-bold text-slate-800">{revokeConfirmStay.guest_name}</span> will trigger a 12-hour vacate notice. Proceed?
                 </p>
                 <div className="flex gap-3">
                   <Button variant="outline" onClick={() => setRevokeConfirmStay(null)} className="flex-1" disabled={revokeLoading}>Cancel</Button>
@@ -1689,7 +1818,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                 <div className="bg-red-50 border border-red-200 rounded-lg p-4 space-y-2">
                   <p className="text-sm font-bold text-red-800">This action will:</p>
                   <ul className="text-sm text-red-700 list-disc list-inside space-y-1">
-                    <li>Revoke the guest's USAT token (utility access disabled)</li>
+                    <li>Revoke the guest's stay authorization (access disabled)</li>
                     <li>Send removal notice email to the guest</li>
                     <li>Send confirmation email to you</li>
                     <li>Log all actions in the audit trail</li>
@@ -1795,6 +1924,150 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             )}
           </div>
         </div>
+      )}
+
+      <InviteRoleChoiceModal
+        open={showInviteRoleChoice}
+        onClose={() => setShowInviteRoleChoice(false)}
+        onSelectTenant={() => {
+          const firstId = properties[0]?.id ?? null;
+          setInviteTenantPropertyId(firstId);
+          setInviteTenantUnitId(null);
+          setInviteTenantForm({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
+          if (firstId) {
+            propertiesApi.getUnits(firstId).then((u) => {
+              setInviteTenantUnits(u.filter((x) => x.id >= 0));
+              setInviteTenantUnitId(u[0]?.id ?? 0);
+            }).catch(() => setInviteTenantUnits([]));
+          } else {
+            setInviteTenantUnits([]);
+          }
+          setShowInviteTenantModal(true);
+        }}
+        onSelectGuest={() => setShowInviteModal(true)}
+      />
+
+      {showInviteTenantModal && (
+        <Modal open onClose={() => { setShowInviteTenantModal(false); setInviteTenantPropertyId(null); setInviteTenantUnits([]); setInviteTenantUnitId(null); setInviteTenantLink(null); }} title="Invite tenant" className="max-w-lg">
+          <div className="p-6 space-y-4">
+            {inviteTenantLink ? (
+              <>
+                <p className="text-sm text-slate-600">Share this link with the tenant to complete registration.</p>
+                <div className="bg-slate-100 border border-slate-200 rounded-xl p-4 text-sm text-slate-800 break-all font-mono">{inviteTenantLink}</div>
+                <div className="flex gap-3">
+                  <Button
+                    variant="outline"
+                    className="flex-1"
+                    onClick={async () => {
+                      const ok = await copyToClipboard(inviteTenantLink);
+                      if (ok) notify('success', 'Link copied to clipboard.');
+                      else notify('error', 'Copy failed. Please copy the link manually.');
+                    }}
+                  >
+                    Copy link
+                  </Button>
+                  <Button
+                    className="flex-1"
+                    onClick={() => {
+                      setShowInviteTenantModal(false);
+                      setInviteTenantPropertyId(null);
+                      setInviteTenantUnits([]);
+                      setInviteTenantUnitId(null);
+                      setInviteTenantLink(null);
+                      setInviteTenantForm({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
+                    }}
+                  >
+                    Done
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">Property</label>
+                  <select
+                    value={inviteTenantPropertyId ?? ''}
+                    onChange={(e) => {
+                      const pid = Number(e.target.value) || null;
+                      setInviteTenantPropertyId(pid);
+                      setInviteTenantUnitId(null);
+                      if (pid) propertiesApi.getUnits(pid).then((u) => { setInviteTenantUnits(u.filter((x) => x.id >= 0)); setInviteTenantUnitId(u[0]?.id ?? 0); }).catch(() => setInviteTenantUnits([]));
+                      else setInviteTenantUnits([]);
+                    }}
+                    className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900"
+                  >
+                    <option value="">Select property</option>
+                    {properties.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name || p.street || `Property ${p.id}`}</option>
+                    ))}
+                  </select>
+                </div>
+                {inviteTenantUnits.length > 0 && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5">Unit</label>
+                    <select
+                      value={inviteTenantUnitId ?? ''}
+                      onChange={(e) => setInviteTenantUnitId(Number(e.target.value) || null)}
+                      className="w-full px-4 py-2.5 bg-white border border-gray-300 rounded-lg text-gray-900"
+                    >
+                      <option value="">Select unit</option>
+                      {inviteTenantUnits.map((u) => (
+                        <option key={u.id} value={u.id}>Unit {u.unit_label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                {inviteTenantPropertyId && inviteTenantUnits.length === 0 && inviteTenantUnitId === null && (
+                  <p className="text-sm text-slate-600">Single-unit property — invitation will be for the whole property.</p>
+                )}
+                <Input name="tenant_name" label="Tenant name" value={inviteTenantForm.tenant_name} onChange={(e) => setInviteTenantForm({ ...inviteTenantForm, tenant_name: e.target.value })} placeholder="Full name" required />
+                <Input name="tenant_email" label="Tenant email" type="email" value={inviteTenantForm.tenant_email} onChange={(e) => setInviteTenantForm({ ...inviteTenantForm, tenant_email: e.target.value })} placeholder="email@example.com" />
+                <Input name="lease_start_date" label="Lease start" type="date" min={getTodayLocal()} value={inviteTenantForm.lease_start_date} onChange={(e) => setInviteTenantForm({ ...inviteTenantForm, lease_start_date: e.target.value })} required />
+                <Input name="lease_end_date" label="Lease end" type="date" min={inviteTenantForm.lease_start_date || getTodayLocal()} value={inviteTenantForm.lease_end_date} onChange={(e) => setInviteTenantForm({ ...inviteTenantForm, lease_end_date: e.target.value })} required />
+                <div className="flex gap-3 pt-2">
+                  <Button variant="outline" onClick={() => { setShowInviteTenantModal(false); setInviteTenantPropertyId(null); setInviteTenantUnits([]); setInviteTenantUnitId(null); }} className="flex-1">Cancel</Button>
+                  <Button
+                    onClick={async () => {
+                      if (!inviteTenantPropertyId || !inviteTenantForm.tenant_name.trim() || !inviteTenantForm.lease_start_date || !inviteTenantForm.lease_end_date) {
+                        notify('error', 'Please fill in property, tenant name, and lease dates.');
+                        return;
+                      }
+                      if (inviteTenantForm.lease_start_date < getTodayLocal()) {
+                        notify('error', 'Lease start date cannot be in the past.');
+                        return;
+                      }
+                      setInviteTenantSubmitting(true);
+                      try {
+                        const unitId = inviteTenantUnitId ?? 0;
+                        const res = unitId > 0
+                          ? await propertiesApi.inviteTenant(unitId, inviteTenantForm)
+                          : await propertiesApi.inviteTenantForProperty(inviteTenantPropertyId, inviteTenantForm);
+                        const code = res?.invitation_code;
+                        if (code) {
+                          const base = typeof window !== 'undefined' ? window.location.origin : '';
+                          setInviteTenantLink(`${base}${typeof window !== 'undefined' ? window.location.pathname : ''}#invite/${code}`);
+                          notify('success', 'Tenant invitation created. Share the invite link with the tenant.');
+                          setInviteTenantForm({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
+                          loadData();
+                        } else {
+                          notify('error', 'We couldn\'t create a valid invitation link. Please try again.');
+                        }
+                      } catch (e) {
+                        notify('error', toUserFriendlyInvitationError((e as Error)?.message ?? 'Failed to create invitation.'));
+                      } finally {
+                        setInviteTenantSubmitting(false);
+                      }
+                    }}
+                    disabled={inviteTenantSubmitting || !inviteTenantForm.tenant_name.trim() || !inviteTenantForm.lease_start_date || !inviteTenantForm.lease_end_date || !inviteTenantPropertyId}
+                    className="flex-1"
+                  >
+                    {inviteTenantSubmitting ? 'Creating…' : 'Create invitation'}
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </Modal>
       )}
 
       <InviteGuestModal

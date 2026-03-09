@@ -3,13 +3,14 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, desc, cast, String
 
 from app.database import get_db
 from app.dependencies import require_admin
 from app.models.user import User
 from app.models.owner import Property, OwnerProfile
 from app.models.audit_log import AuditLog
+from app.models.event_ledger import EventLedger
 from app.models.stay import Stay
 from app.models.invitation import Invitation
 from app.schemas.admin import (
@@ -80,57 +81,62 @@ def admin_list_audit_logs(
     limit: int = Query(200, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
-    """Global audit log viewer with filters. No scoping to a single owner."""
-    q = db.query(AuditLog)
+    """Global event ledger viewer with filters. No scoping to a single owner."""
+    from app.services.event_ledger import ledger_event_to_display, get_actor_email, _CATEGORY_TO_ACTION_TYPES, ACTION_PROPERTY_DELETED
+
+    q = db.query(EventLedger)
     from_dt = _parse_optional_utc(from_ts)
     to_dt = _parse_optional_utc(to_ts)
     if from_dt is not None:
-        q = q.filter(AuditLog.created_at >= from_dt)
+        q = q.filter(EventLedger.created_at >= from_dt)
     if to_dt is not None:
-        q = q.filter(AuditLog.created_at <= to_dt)
+        q = q.filter(EventLedger.created_at <= to_dt)
     if category and category.strip():
-        q = q.filter(AuditLog.category == category.strip())
+        action_types = _CATEGORY_TO_ACTION_TYPES.get(category.strip(), [])
+        if action_types:
+            q = q.filter(EventLedger.action_type.in_(action_types))
     if property_id is not None:
-        q = q.filter(AuditLog.property_id == property_id)
+        q = q.filter(EventLedger.property_id == property_id)
     if actor_user_id is not None:
-        q = q.filter(AuditLog.actor_user_id == actor_user_id)
+        q = q.filter(EventLedger.actor_user_id == actor_user_id)
     if search and search.strip():
         term = f"%{search.strip()}%"
         q = q.filter(
-            (AuditLog.title.ilike(term)) | (AuditLog.message.ilike(term))
+            (EventLedger.action_type.ilike(term)) | (cast(EventLedger.meta, String).ilike(term))
         )
-    q = q.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit)
+    q = q.order_by(desc(EventLedger.created_at)).offset(offset).limit(limit)
     rows = q.all()
     prop_ids = {r.property_id for r in rows if r.property_id}
-    props = {}
-    if prop_ids:
-        for p in db.query(Property).filter(Property.id.in_(prop_ids)).all():
-            props[p.id] = p.name or f"{p.city}, {p.state}"
+    props = {p.id: p.name or f"{p.city}, {p.state}" for p in db.query(Property).filter(Property.id.in_(prop_ids)).all()} if prop_ids else {}
 
     def _property_name(r):
         if r.property_id:
             return props.get(r.property_id)
-        if r.title == "Property deleted" and r.meta and isinstance(r.meta, dict):
+        if r.action_type == ACTION_PROPERTY_DELETED and r.meta and isinstance(r.meta, dict):
             return r.meta.get("property_name")
         return None
 
-    return [
-        AdminAuditLogEntry(
-            id=r.id,
-            property_id=r.property_id,
-            stay_id=r.stay_id,
-            invitation_id=r.invitation_id,
-            category=r.category or "—",
-            title=r.title or "—",
-            message=r.message or "—",
-            actor_user_id=r.actor_user_id,
-            actor_email=r.actor_email,
-            ip_address=r.ip_address,
-            created_at=r.created_at or datetime.now(timezone.utc),
-            property_name=_property_name(r),
+    out = []
+    for r in rows:
+        cat, title, msg = ledger_event_to_display(r)
+        actor_email = get_actor_email(db, r.actor_user_id)
+        out.append(
+            AdminAuditLogEntry(
+                id=r.id,
+                property_id=r.property_id,
+                stay_id=r.stay_id,
+                invitation_id=r.invitation_id,
+                category=cat,
+                title=title,
+                message=msg,
+                actor_user_id=r.actor_user_id,
+                actor_email=actor_email,
+                ip_address=r.ip_address,
+                created_at=r.created_at or datetime.now(timezone.utc),
+                property_name=_property_name(r),
+            )
         )
-        for r in rows
-    ]
+    return out
 
 
 @router.get("/properties", response_model=list[AdminPropertyView])

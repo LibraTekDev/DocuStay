@@ -1,5 +1,7 @@
 """Module A: Auth schemas."""
+import enum
 import re
+from typing import Literal
 from pydantic import BaseModel, EmailStr, model_validator, field_validator
 from app.models.user import UserRole, OwnerType
 
@@ -25,7 +27,14 @@ def _validate_phone_digits(phone: str) -> None:
         raise ValueError(f"Phone number cannot exceed {PHONE_MAX_DIGITS} digits.")
 
 
+class AccountType(str, enum.Enum):
+    individual = "individual"
+
+
 class UserCreate(BaseModel):
+    account_type: AccountType | None = None  # individual (only)
+    first_name: str | None = None
+    last_name: str | None = None
     full_name: str
     email: EmailStr
     phone: str = ""
@@ -52,6 +61,17 @@ class UserCreate(BaseModel):
             raise ValueError("Passwords do not match")
         if not self.terms_agreed or not self.privacy_agreed:
             raise ValueError("You must agree to Terms and Privacy Policy")
+        return self
+
+    @model_validator(mode="after")
+    def account_type_fields(self):
+        """Validate individual owner fields."""
+        at = self.account_type or AccountType.individual
+        if at == AccountType.individual:
+            if not (self.first_name or "").strip():
+                raise ValueError("First name is required.")
+            if not (self.last_name or "").strip():
+                raise ValueError("Last name is required.")
         return self
 
 
@@ -89,7 +109,8 @@ class Token(BaseModel):
 
 
 class GuestRegister(BaseModel):
-    """Guest registration; invitation_code optional. With code but no agreement_signature_id, account is created and invite is added as pending."""
+    """Guest or tenant registration; invitation_code optional for guests. Same form, role sets user type."""
+    role: Literal["guest", "tenant"] = "guest"
     invitation_id: str = ""
     invitation_code: str = ""
     full_name: str
@@ -116,6 +137,31 @@ class GuestRegister(BaseModel):
             raise ValueError("You must agree to Terms and Privacy Policy")
         if not self.guest_status_acknowledged or not self.no_tenancy_acknowledged or not self.vacate_acknowledged:
             raise ValueError("You must acknowledge all guest and vacate terms")
+        if self.role == "guest" and not (self.permanent_address and self.permanent_city and self.permanent_state and self.permanent_zip):
+            raise ValueError("Permanent address is required for guests")
+        return self
+
+
+class ManagerRegister(BaseModel):
+    """Property manager registration via invite link."""
+    invite_token: str
+    full_name: str
+    email: EmailStr  # Must match invite email
+    phone: str = ""
+    password: str
+    confirm_password: str = ""
+
+    @field_validator("phone")
+    @classmethod
+    def phone_valid(cls, v: str) -> str:
+        if v and v.strip():
+            _validate_phone_digits(v)
+        return (v or "").strip()
+
+    @model_validator(mode="after")
+    def passwords_match_and_agreed(self):
+        if self.confirm_password != self.password:
+            raise ValueError("Passwords do not match")
         return self
 
 

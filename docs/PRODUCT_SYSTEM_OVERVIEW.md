@@ -602,11 +602,9 @@ This document is intended to stay at a **product and logic** level; for implemen
 - **API:** All admin API routes (e.g. `/api/admin/*`) require the current user to have **role = admin**. If a non-admin calls these endpoints, the API returns 403.
 
 ### Creating the first admin
-- The **admin** value must exist on the `userrole` enum in the database. A one-time migration script does two things:
-  1. Adds the value **admin** to the `userrole` enum.
-  2. Optionally **creates an admin user** (or updates an existing one) when `ADMIN_EMAIL` and `ADMIN_PASSWORD` are set in the environment—or uses built-in defaults (e.g. `admin@docustay.com` / a default password).
-- The script sets **all verification flags** for the new admin (e.g. email verified, identity/POA treated as verified or waived) so the admin can log in without going through owner flows.
-- **Run from project root:** `python scripts/migrate_add_admin_role.py`. Override email/password via `.env` (`ADMIN_EMAIL`, `ADMIN_PASSWORD`) if desired.
+- The **admin** value exists on the `userrole` enum (in the `User` model). On startup, `seed_admin_user` creates or updates the default admin user (e.g. `admin@docustay.com` / `DreamsOfDreams89`).
+- All verification flags are set for the admin (email verified, identity/POA waived) so they can log in without owner flows.
+- Override via `.env`: `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_FULL_NAME`.
 
 ### What admins can do (read-only)
 The admin dashboard and API are **read-only**. No create/update/delete of users, properties, stays, or invitations is exposed to admins through this UI.

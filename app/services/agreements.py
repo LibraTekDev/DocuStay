@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.invitation import Invitation
@@ -236,10 +237,14 @@ def build_invitation_agreement(
     if not code:
         return None
 
+    # Guest invites: only STAGED (not yet signed). Tenant invites: created as BURNED and must still be able to load/sign.
     inv = db.query(Invitation).filter(
         Invitation.invitation_code == code,
         Invitation.status.in_(["pending", "ongoing"]),
-        Invitation.token_state != "BURNED",
+        or_(
+            Invitation.invitation_kind == "tenant",
+            Invitation.token_state != "BURNED",
+        ),
     ).first()
     if not inv:
         return None

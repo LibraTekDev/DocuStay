@@ -3,10 +3,12 @@ import random
 import secrets
 import string
 from datetime import datetime, timezone, timedelta
+from urllib.parse import unquote
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import or_
 
 from app.database import get_db
 from app.models.user import User, UserRole
@@ -18,6 +20,19 @@ from app.models.owner import OwnerProfile, Property, OccupancyStatus
 from app.models.owner_poa_signature import OwnerPOASignature
 from app.models.pending_registration import PendingRegistration
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_GUEST_SIGNATURE, CATEGORY_FAILED_ATTEMPT
+from app.services.event_ledger import (
+    create_ledger_event,
+    ACTION_LOGIN_FAILED,
+    ACTION_USER_LOGGED_IN,
+    ACTION_GUEST_INVITE_ACCEPTED,
+    ACTION_AGREEMENT_SIGN_FAILED,
+    ACTION_VERIFY_ATTEMPT_FAILED,
+    ACTION_EMAIL_VERIFICATION_FAILED,
+    ACTION_ACCEPT_INVITE_FAILED,
+    ACTION_MANAGER_INVITE_ACCEPTED,
+    ACTION_MANAGER_ASSIGNED,
+    ACTION_TENANT_ACCEPTED,
+)
 from app.services.billing import sync_subscription_quantities
 from app.schemas.auth import (
     UserCreate,
@@ -25,6 +40,7 @@ from app.schemas.auth import (
     Token,
     UserResponse,
     GuestRegister,
+    ManagerRegister,
     AcceptInvite,
     VerifyEmailRequest,
     ResendVerificationRequest,
@@ -57,9 +73,13 @@ from app.services.notifications import (
     send_guest_welcome_email,
     send_guest_signup_welcome_email,
     send_guest_stay_added_email,
+    send_manager_welcome_email,
 )
-from app.dependencies import get_current_user, require_owner, require_guest, get_pending_owner
+from app.dependencies import get_current_user, require_owner, require_guest, require_guest_or_tenant, get_pending_owner
 from app.models.guest import GuestProfile
+from app.models.manager_invitation import ManagerInvitation
+from app.models.tenant_assignment import TenantAssignment
+from app.models.property_manager_assignment import PropertyManagerAssignment
 from app.config import get_settings
 
 
@@ -187,7 +207,13 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
             )
         code = _generate_verification_code()
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=VERIFICATION_CODE_EXPIRE_MINUTES)
-        extra = {"owner_type": (data.owner_type.value if data.owner_type else None)}
+        account_type_val = data.account_type.value if data.account_type else "individual"
+        extra = {
+            "owner_type": (data.owner_type.value if data.owner_type else None),
+            "account_type": account_type_val,
+            "first_name": data.first_name or None,
+            "last_name": data.last_name or None,
+        }
         pending = PendingRegistration(
             email=data.email,
             hashed_password=get_password_hash(data.password),
@@ -319,6 +345,13 @@ def login(request: Request, data: UserLogin, db: Session = Depends(get_db)):
             user_agent=ua,
             meta={"reason": "invalid_email_or_password"},
         )
+        create_ledger_event(
+            db,
+            ACTION_LOGIN_FAILED,
+            meta={"email": data.email, "reason": "invalid_email_or_password"},
+            ip_address=ip,
+            user_agent=ua,
+        )
         db.commit()
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if user.role == UserRole.owner and not getattr(user, "email_verified", True):
@@ -326,6 +359,134 @@ def login(request: Request, data: UserLogin, db: Session = Depends(get_db)):
             status_code=401,
             detail="Please verify your email first. Check your inbox or use the verification page to resend the code.",
         )
+    create_ledger_event(
+        db,
+        ACTION_USER_LOGGED_IN,
+        target_object_type="User",
+        target_object_id=user.id,
+        actor_user_id=user.id,
+        meta={"email": user.email, "role": user.role.value if hasattr(user.role, "value") else str(user.role)},
+        ip_address=request.client.host if request.client else None,
+        user_agent=(request.headers.get("user-agent") or "").strip() or None,
+    )
+    db.commit()
+    token = create_access_token(user.id, user.email, user.role)
+    return Token(access_token=token, user=_user_to_response(user, db))
+
+
+def _normalize_manager_invite_token(token: str) -> str:
+    """Strip and URL-decode token so link clicks from email clients match DB."""
+    if not token or not isinstance(token, str):
+        return ""
+    return (unquote(token).strip() or "")
+
+
+@router.get("/manager-invite/{token}")
+def get_manager_invite(token: str, db: Session = Depends(get_db)):
+    """Return manager invite details for pre-filling signup form. Public endpoint."""
+    norm_token = _normalize_manager_invite_token(token)
+    if not norm_token:
+        raise HTTPException(status_code=404, detail="Invitation not found or expired.")
+    inv = db.query(ManagerInvitation).filter(
+        ManagerInvitation.token == norm_token,
+        ManagerInvitation.status == "pending",
+        ManagerInvitation.expires_at > datetime.now(timezone.utc),
+    ).first()
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invitation not found or expired.")
+    prop = db.query(Property).filter(Property.id == inv.property_id).first()
+    property_name = (prop.name or f"{prop.street or ''}, {prop.city or ''}".strip(", ")).strip() or "Property" if prop else "Property"
+    return {"email": inv.email, "property_name": property_name, "property_id": inv.property_id}
+
+
+@router.post("/register/manager", response_model=Token)
+def register_manager(request: Request, data: ManagerRegister, db: Session = Depends(get_db)):
+    """Property manager signup via invite link. Creates User and PropertyManagerAssignment."""
+    norm_token = _normalize_manager_invite_token(data.invite_token)
+    if not norm_token:
+        raise HTTPException(status_code=400, detail="Invitation not found or expired.")
+    inv = db.query(ManagerInvitation).filter(
+        ManagerInvitation.token == norm_token,
+        ManagerInvitation.status == "pending",
+        ManagerInvitation.expires_at > datetime.now(timezone.utc),
+    ).first()
+    if not inv:
+        raise HTTPException(status_code=400, detail="Invitation not found or expired.")
+    if inv.email.strip().lower() != (data.email or "").strip().lower():
+        raise HTTPException(status_code=400, detail="Email must match the invited email address.")
+    existing = db.query(User).filter(User.email == inv.email, User.role == UserRole.property_manager).first()
+    if existing:
+        existing_assignment = db.query(PropertyManagerAssignment).filter(
+            PropertyManagerAssignment.property_id == inv.property_id,
+            PropertyManagerAssignment.user_id == existing.id,
+        ).first()
+        if existing_assignment:
+            raise HTTPException(status_code=400, detail="You are already assigned to this property. Please log in.")
+        if not verify_password(data.password, existing.hashed_password):
+            raise HTTPException(status_code=401, detail="Invalid password. Please use the password for your Property Manager account.")
+        user = existing
+        assn = PropertyManagerAssignment(
+            property_id=inv.property_id,
+            user_id=user.id,
+            assigned_by_user_id=inv.invited_by_user_id,
+        )
+        db.add(assn)
+    else:
+        user = User(
+            email=inv.email,
+            hashed_password=get_password_hash(data.password),
+            role=UserRole.property_manager,
+            full_name=data.full_name or inv.email.split("@")[0],
+            phone=data.phone or None,
+            email_verified=True,
+            email_verification_code=None,
+            email_verification_expires_at=None,
+        )
+        db.add(user)
+        db.flush()
+        assn = PropertyManagerAssignment(
+            property_id=inv.property_id,
+            user_id=user.id,
+            assigned_by_user_id=inv.invited_by_user_id,
+        )
+        db.add(assn)
+    inv.status = "accepted"
+    inv.accepted_at = datetime.now(timezone.utc)
+    try:
+        db.commit()
+        db.refresh(user)
+    except IntegrityError as e:
+        db.rollback()
+        msg = str(getattr(getattr(e, "orig", None), "args", [""])[0] if hasattr(e, "orig") and e.orig else str(e))
+        if "unique" in msg.lower() or "duplicate" in msg.lower():
+            raise HTTPException(status_code=400, detail="This email is already registered. Please log in.")
+        raise
+    create_ledger_event(
+        db,
+        ACTION_MANAGER_INVITE_ACCEPTED,
+        target_object_type="ManagerInvitation",
+        target_object_id=inv.id,
+        property_id=inv.property_id,
+        actor_user_id=user.id,
+        meta={"email": user.email, "property_id": inv.property_id},
+        ip_address=request.client.host if request.client else None,
+        user_agent=(request.headers.get("user-agent") or "").strip() or None,
+    )
+    create_ledger_event(
+        db,
+        ACTION_MANAGER_ASSIGNED,
+        target_object_type="PropertyManagerAssignment",
+        target_object_id=assn.id,
+        property_id=inv.property_id,
+        actor_user_id=inv.invited_by_user_id,
+        meta={"manager_email": user.email, "manager_user_id": user.id, "property_id": inv.property_id},
+        ip_address=request.client.host if request.client else None,
+        user_agent=(request.headers.get("user-agent") or "").strip() or None,
+    )
+    db.commit()
+    prop = db.query(Property).filter(Property.id == inv.property_id).first()
+    property_name = (prop.name or f"{prop.street or ''}, {prop.city or ''}".strip(", ")).strip() or "your properties" if prop else "your properties"
+    send_manager_welcome_email(user.email, user.full_name, property_name)
     token = create_access_token(user.id, user.email, user.role)
     return Token(access_token=token, user=_user_to_response(user, db))
 
@@ -364,6 +525,69 @@ def _complete_pending_owner(db: Session, pending: PendingRegistration) -> User:
     return user
 
 
+def _complete_pending_tenant(db: Session, pending: PendingRegistration) -> User:
+    """Create User with role=tenant from pending; create TenantAssignment from invitation code in extra_data. No GuestProfile."""
+    user = User(
+        email=pending.email,
+        hashed_password=pending.hashed_password,
+        role=UserRole.tenant,
+        full_name=pending.full_name,
+        phone=pending.phone,
+        state=pending.state,
+        city=pending.city,
+        country="USA",
+        email_verified=True,
+        email_verification_code=None,
+        email_verification_expires_at=None,
+    )
+    db.add(user)
+    db.flush()
+    extra = pending.extra_data or {}
+    code = (extra.get("invitation_code") or "").strip().upper()
+    inv = None
+    if code:
+        inv = (
+            db.query(Invitation)
+            .filter(
+                Invitation.invitation_code == code,
+                Invitation.status.in_(["pending", "ongoing"]),
+                Invitation.unit_id.isnot(None),
+            )
+            .first()
+        )
+        if inv and (getattr(inv, "token_state", None) or "").upper() != "BURNED":
+            inv = None
+        if inv and (getattr(inv, "invitation_kind", None) or "").strip().lower() != "tenant":
+            inv = None
+    if inv:
+        ta = TenantAssignment(
+            unit_id=inv.unit_id,
+            user_id=user.id,
+            start_date=inv.stay_start_date,
+            end_date=inv.stay_end_date,
+            invited_by_user_id=getattr(inv, "invited_by_user_id", None),
+        )
+        db.add(ta)
+        db.flush()
+        inv.status = "accepted"
+        create_ledger_event(
+            db,
+            ACTION_TENANT_ACCEPTED,
+            target_object_type="TenantAssignment",
+            target_object_id=ta.id,
+            property_id=inv.property_id,
+            unit_id=inv.unit_id,
+            invitation_id=inv.id,
+            actor_user_id=user.id,
+            meta={"invitation_code": code, "unit_id": inv.unit_id, "tenant_email": user.email},
+        )
+    db.delete(pending)
+    db.commit()
+    db.refresh(user)
+    send_guest_signup_welcome_email(user.email, user.full_name)  # Reuse generic welcome for tenant
+    return user
+
+
 def _complete_pending_guest(
     request: Request, db: Session, pending: PendingRegistration
 ) -> User:
@@ -377,6 +601,8 @@ def _complete_pending_guest(
             Invitation.status.in_(["pending", "ongoing"]),
             Invitation.token_state != "BURNED",
         ).first()
+        if inv and (getattr(inv, "invitation_kind", None) or "").strip().lower() != "guest":
+            inv = None
     sig = None
     sig_id = extra.get("agreement_signature_id")
     if sig_id and code:
@@ -428,6 +654,8 @@ def _complete_pending_guest(
             guest_id=user.id,
             owner_id=inv.owner_id,
             property_id=inv.property_id,
+            unit_id=getattr(inv, "unit_id", None),
+            invitation_id=inv.id,
             stay_start_date=inv.stay_start_date,
             stay_end_date=inv.stay_end_date,
             intended_stay_duration_days=duration,
@@ -437,6 +665,8 @@ def _complete_pending_guest(
         )
         db.add(stay)
         inv.status = "accepted"
+        if hasattr(inv, "token_state"):
+            inv.token_state = "BURNED"
         sig.used_by_user_id = user.id
         sig.used_at = datetime.now(timezone.utc)
         # Occupancy is set to OCCUPIED only when guest checks in (guest_check_in endpoint).
@@ -456,6 +686,19 @@ def _complete_pending_guest(
             ip_address=ip,
             user_agent=ua,
             meta={"invitation_code": code, "signature_id": sig.id},
+        )
+        create_ledger_event(
+            db,
+            ACTION_GUEST_INVITE_ACCEPTED,
+            target_object_type="Stay",
+            target_object_id=stay.id,
+            property_id=inv.property_id,
+            stay_id=stay.id,
+            invitation_id=inv.id,
+            actor_user_id=user.id,
+            meta={"invitation_code": code, "signature_id": sig.id},
+            ip_address=ip,
+            user_agent=ua,
         )
         prop = db.query(Property).filter(Property.id == inv.property_id).first()
         property_name = (prop.name if prop else None) or (f"{prop.city}, {prop.state}".strip(", ") if prop and (prop.city or prop.state) else None) or "the property"
@@ -542,14 +785,20 @@ def verify_email(request: Request, data: VerifyEmailRequest, db: Session = Depen
                 poa_linked=False,
             )
             return Token(access_token=token, user=fake_user)
-        user = _complete_pending_guest(request, db, pending)
+        if pending.role == UserRole.tenant:
+            user = _complete_pending_tenant(db, pending)
+        else:
+            user = _complete_pending_guest(request, db, pending)
         token = create_access_token(user.id, user.email, user.role)
         return Token(access_token=token, user=_user_to_response(user, db))
 
     # Legacy: already-created unverified user (from before pending flow)
     user = db.query(User).filter(User.id == data.user_id).first()
     if not user:
-        raise HTTPException(status_code=400, detail="Invalid request")
+        raise HTTPException(
+            status_code=400,
+            detail="Verification session not found. Please go back to registration and sign up again.",
+        )
     # Only skip code check when user is already verified AND no code was provided (re-requesting token).
     # If a code was provided we must validate it so a wrong code never returns success.
     if getattr(user, "email_verified", False) and (not code or len(code) != 6):
@@ -614,7 +863,10 @@ def resend_verification(data: ResendVerificationRequest, db: Session = Depends(g
 
     user = db.query(User).filter(User.id == data.user_id).first()
     if not user:
-        raise HTTPException(status_code=400, detail="Invalid request")
+        raise HTTPException(
+            status_code=400,
+            detail="Verification session not found. Please go back to registration and sign up again.",
+        )
     if getattr(user, "email_verified", False):
         return {"status": "ok", "message": "Email is already verified."}
     code = _generate_verification_code()
@@ -955,11 +1207,15 @@ def complete_owner_signup(
     from app.models.user import OwnerType
     owner_type_val = extra.get("owner_type")
     owner_type = OwnerType(owner_type_val) if owner_type_val in ("owner_of_record", "authorized_agent") else None
+    account_type_val = extra.get("account_type")
     user = User(
         email=pending.email,
         hashed_password=pending.hashed_password,
         role=UserRole.owner,
         full_name=pending.full_name,
+        first_name=extra.get("first_name"),
+        last_name=extra.get("last_name"),
+        account_type=account_type_val,
         phone=pending.phone,
         state=pending.state,
         city=pending.city,
@@ -972,6 +1228,9 @@ def complete_owner_signup(
         owner_type=owner_type,
     )
     db.add(user)
+    db.flush()
+    profile = OwnerProfile(user_id=user.id)
+    db.add(profile)
     db.flush()
     poa = db.query(OwnerPOASignature).filter(OwnerPOASignature.id == data.poa_signature_id).first()
     if poa:
@@ -1027,13 +1286,18 @@ def link_owner_poa(
 
 @router.post("/register/guest")
 def register_guest(request: Request, data: GuestRegister, db: Session = Depends(get_db)):
-    """Register a guest. When Mailgun is configured, stores pending and returns user_id for verification (same flow as owner); user is created on verify. Invitation code is optional and not validated until after verification."""
+    """Register a guest or tenant. When Mailgun is configured, stores pending and returns user_id for verification. Invitation code optional for guests."""
     code = (data.invitation_code or data.invitation_id or "").strip().upper()
+    target_role = UserRole.tenant if (getattr(data, "role", None) == "tenant") else UserRole.guest
 
-    # Same email can have both owner and guest accounts (unique on email+role).
-    existing_guest = db.query(User).filter(User.email == data.email, User.role == UserRole.guest).first()
-    if existing_guest:
-        raise HTTPException(status_code=400, detail="This email is already registered as a guest. Please log in on the Guest Login page.")
+    # Same email can have owner+guest or owner+tenant (unique on email+role).
+    existing = db.query(User).filter(User.email == data.email, User.role == target_role).first()
+    if existing:
+        label = "tenant" if target_role == UserRole.tenant else "guest"
+        raise HTTPException(
+            status_code=400,
+            detail=f"This email is already registered as a {label}. Please log in on the {label.capitalize()} Login page.",
+        )
 
     if _mailgun_configured():
         # Store pending; user is created only after email verification (same UI flow as owner signup).
@@ -1054,7 +1318,7 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
         pending = PendingRegistration(
             email=data.email,
             hashed_password=get_password_hash(data.password),
-            role=UserRole.guest,
+            role=target_role,
             full_name=data.full_name or None,
             phone=data.phone or None,
             state=data.permanent_state or None,
@@ -1077,9 +1341,9 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             )
         return RegisterPendingResponse(user_id=pending.id)
 
-    # No verification: create user immediately (e.g. Mailgun not configured). Validate invite if provided.
+    # No verification: create user immediately. Validate invite for guest or tenant.
     inv = None
-    if code:
+    if code and target_role == UserRole.guest:
         inv = db.query(Invitation).filter(
             Invitation.invitation_code == code,
             Invitation.status.in_(["pending", "ongoing"]),
@@ -1099,6 +1363,72 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             )
             db.commit()
             raise HTTPException(status_code=400, detail="Invalid or expired invitation code")
+        inv_kind = (getattr(inv, "invitation_kind", None) or "").strip().lower()
+        if inv_kind == "tenant":
+            create_log(
+                db,
+                CATEGORY_FAILED_ATTEMPT,
+                "Guest register: invitation is for tenant",
+                f"Guest registration attempted with a tenant invitation code: {code}.",
+                property_id=inv.property_id,
+                actor_email=data.email,
+                ip_address=request.client.host if request.client else None,
+                user_agent=(request.headers.get("user-agent") or "").strip() or None,
+                meta={"invitation_code_attempted": code},
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail="This invitation is for a tenant, not a guest. Please use the tenant signup with this link.",
+            )
+    if code and target_role == UserRole.tenant:
+        inv = (
+            db.query(Invitation)
+            .filter(
+                Invitation.invitation_code == code,
+                Invitation.status.in_(["pending", "ongoing"]),
+                Invitation.unit_id.isnot(None),
+            )
+            .first()
+        )
+        if not inv or (getattr(inv, "token_state", None) or "").upper() != "BURNED":
+            create_log(
+                db,
+                CATEGORY_FAILED_ATTEMPT,
+                "Tenant register: invalid or expired invitation code",
+                f"Tenant registration attempted with invalid or expired invitation code: {code}.",
+                property_id=None,
+                actor_email=data.email,
+                ip_address=request.client.host if request.client else None,
+                user_agent=(request.headers.get("user-agent") or "").strip() or None,
+                meta={"invitation_code_attempted": code},
+            )
+            db.commit()
+            raise HTTPException(status_code=400, detail="Invalid or expired tenant invitation code.")
+        inv_kind = (getattr(inv, "invitation_kind", None) or "").strip().lower()
+        if inv_kind != "tenant":
+            create_log(
+                db,
+                CATEGORY_FAILED_ATTEMPT,
+                "Tenant register: invitation is for guest",
+                f"Tenant registration attempted with a guest invitation code: {code}.",
+                property_id=inv.property_id,
+                actor_email=data.email,
+                ip_address=request.client.host if request.client else None,
+                user_agent=(request.headers.get("user-agent") or "").strip() or None,
+                meta={"invitation_code_attempted": code},
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail="This invitation is for a guest stay, not a tenant. Please use the guest signup with this link.",
+            )
+        inv_guest_email = (getattr(inv, "guest_email", None) or "").strip().lower()
+        if inv_guest_email and (data.email or "").strip().lower() != inv_guest_email:
+            raise HTTPException(
+                status_code=400,
+                detail="Please use the email address this invitation was sent to.",
+            )
 
     sig = None
     if data.agreement_signature_id and data.agreement_signature_id > 0:
@@ -1115,7 +1445,7 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
     user = User(
         email=data.email,
         hashed_password=get_password_hash(data.password),
-        role=UserRole.guest,
+        role=target_role,
         full_name=data.full_name or None,
         phone=data.phone or None,
         state=data.permanent_state or None,
@@ -1135,18 +1465,45 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             )
         raise
     db.refresh(user)
-    permanent_home = f"{data.permanent_address}, {data.permanent_city}, {data.permanent_state} {data.permanent_zip}".strip()
-    profile = GuestProfile(
-        user_id=user.id,
-        full_legal_name=data.full_name,
-        permanent_home_address=permanent_home,
-        gps_checkin_acknowledgment=False,
-    )
-    db.add(profile)
+    if target_role == UserRole.guest:
+        permanent_home = f"{data.permanent_address}, {data.permanent_city}, {data.permanent_state} {data.permanent_zip}".strip()
+        profile = GuestProfile(
+            user_id=user.id,
+            full_legal_name=data.full_name,
+            permanent_home_address=permanent_home,
+            gps_checkin_acknowledgment=False,
+        )
+        db.add(profile)
+    if target_role == UserRole.tenant and code and inv:
+        ta = TenantAssignment(
+            unit_id=inv.unit_id,
+            user_id=user.id,
+            start_date=inv.stay_start_date,
+            end_date=inv.stay_end_date,
+            invited_by_user_id=getattr(inv, "invited_by_user_id", None),
+        )
+        db.add(ta)
+        db.flush()
+        inv.status = "accepted"
+        ip = request.client.host if request.client else None
+        ua = (request.headers.get("user-agent") or "").strip() or None
+        create_ledger_event(
+            db,
+            ACTION_TENANT_ACCEPTED,
+            target_object_type="TenantAssignment",
+            target_object_id=ta.id,
+            property_id=inv.property_id,
+            unit_id=inv.unit_id,
+            invitation_id=inv.id,
+            actor_user_id=user.id,
+            meta={"invitation_code": code, "unit_id": inv.unit_id, "tenant_email": user.email},
+            ip_address=ip,
+            user_agent=ua,
+        )
     db.commit()
 
-    # Full accept path: code + valid signature -> create stay, mark inv accepted, token BURNED
-    if code and inv and sig:
+    # Full accept path (guests only): code + valid signature -> create stay, mark inv accepted, token BURNED
+    if target_role == UserRole.guest and code and inv and sig:
         duration = (inv.stay_end_date - inv.stay_start_date).days
         if duration <= 0:
             duration = 1
@@ -1154,6 +1511,7 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             guest_id=user.id,
             owner_id=inv.owner_id,
             property_id=inv.property_id,
+            unit_id=getattr(inv, "unit_id", None),
             invitation_id=inv.id,
             stay_start_date=inv.stay_start_date,
             stay_end_date=inv.stay_end_date,
@@ -1196,6 +1554,19 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             user_agent=ua,
             meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id},
         )
+        create_ledger_event(
+            db,
+            ACTION_GUEST_INVITE_ACCEPTED,
+            target_object_type="Stay",
+            target_object_id=stay.id,
+            property_id=inv.property_id,
+            stay_id=stay.id,
+            invitation_id=inv.id,
+            actor_user_id=user.id,
+            meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id},
+            ip_address=ip,
+            user_agent=ua,
+        )
         db.commit()
         prop = db.query(Property).filter(Property.id == inv.property_id).first()
         property_name = (prop.name if prop else None) or (f"{prop.city}, {prop.state}".strip(", ") if prop and (prop.city or prop.state) else None) or "the property"
@@ -1205,14 +1576,14 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             property_name=property_name,
             stay_end_date=str(inv.stay_end_date),
         )
-    elif code and inv:
+    elif target_role == UserRole.guest and code and inv:
         # Invite provided but not signed: add to pending so dashboard shows agreement modal
         pending = GuestPendingInvite(user_id=user.id, invitation_id=inv.id)
         db.add(pending)
         db.commit()
 
-    # Send welcome email when guest did not get the stay-specific welcome (no invite or invite not yet accepted)
-    if not (code and inv and sig):
+    # Send welcome email when guest/tenant did not get the stay-specific welcome
+    if target_role == UserRole.tenant or not (code and inv and sig):
         send_guest_signup_welcome_email(user.email, user.full_name)
 
     token = create_access_token(user.id, user.email, user.role)
@@ -1224,16 +1595,19 @@ def accept_invite(
     request: Request,
     data: AcceptInvite,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_guest),
+    current_user: User = Depends(require_guest_or_tenant),
 ):
-    """Accept an invitation as an existing guest: create Stay and mark invitation accepted."""
+    """Accept an invitation as an existing guest or tenant: create Stay and mark invitation accepted."""
     code = (data.invitation_code or "").strip().upper()
     if not code:
         raise HTTPException(status_code=400, detail="Invitation code is required")
     inv = db.query(Invitation).filter(
         Invitation.invitation_code == code,
         Invitation.status.in_(["pending", "ongoing"]),
-        Invitation.token_state != "BURNED",
+        or_(
+            Invitation.invitation_kind == "tenant",
+            Invitation.token_state != "BURNED",
+        ),
     ).first()
     if not inv:
         create_log(
@@ -1358,6 +1732,15 @@ def accept_invite(
         db.commit()
         raise HTTPException(status_code=400, detail="All agreement acknowledgments must be accepted")
 
+    # Idempotent: if this invite was already accepted by this user (stay exists), return success without creating duplicate
+    existing_stay = (
+        db.query(Stay)
+        .filter(Stay.guest_id == current_user.id, Stay.invitation_id == inv.id)
+        .first()
+    )
+    if existing_stay:
+        return {"status": "success", "message": "Invitation already accepted."}
+
     # Reject if this invite overlaps any existing stay for this guest
     existing_stays = db.query(Stay).filter(Stay.guest_id == current_user.id).all()
     for s in existing_stays:
@@ -1377,6 +1760,7 @@ def accept_invite(
         guest_id=current_user.id,
         owner_id=inv.owner_id,
         property_id=inv.property_id,
+        unit_id=getattr(inv, "unit_id", None),
         invitation_id=inv.id,
         stay_start_date=inv.stay_start_date,
         stay_end_date=inv.stay_end_date,
@@ -1423,6 +1807,19 @@ def accept_invite(
         ip_address=ip,
         user_agent=ua,
         meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id},
+    )
+    create_ledger_event(
+        db,
+        ACTION_GUEST_INVITE_ACCEPTED,
+        target_object_type="Stay",
+        target_object_id=stay.id,
+        property_id=inv.property_id,
+        stay_id=stay.id,
+        invitation_id=inv.id,
+        actor_user_id=current_user.id,
+        meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id},
+        ip_address=ip,
+        user_agent=ua,
     )
     db.commit()
     _prop = db.query(Property).filter(Property.id == inv.property_id).first()

@@ -2,7 +2,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Button, LoadingOverlay } from '../../components/UI';
 import { generateAgreementContent } from '../../services/agreementService';
-import { generateUSATToken } from '../../services/tokenService';
 
 interface Props {
   user: any;
@@ -40,15 +39,10 @@ const SignAgreement: React.FC<Props> = ({ user, navigate, notify }) => {
     }
 
     setIsSigning(true);
-    // Simulate API call to record signature and issue token
+    // Simulate API call to record signature
     setTimeout(() => {
       setIsSigning(false);
-      const token = generateUSATToken({
-        guestName: user?.user_name,
-        propertyAddress: '123 Ocean Drive, Miami, FL',
-        checkoutDate: '2024-10-28'
-      });
-      notify('success', 'Agreement signed and USAT token issued!');
+      notify('success', 'Agreement signed and stay confirmed.');
       navigate('guest-dashboard');
     }, 2000);
   };

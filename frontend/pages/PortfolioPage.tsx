@@ -170,11 +170,17 @@ export const PortfolioPage: React.FC<{ slug: string }> = ({ slug }) => {
                         {prop.property_type_label.replace(/_/g, ' ')}
                       </span>
                     )}
-                    {prop.bedrooms && (
+                    {prop.is_multi_unit ? (
+                      <span className="inline-flex items-center px-2.5 py-1 rounded-lg bg-slate-100 text-slate-600 text-xs font-medium">
+                        {prop.unit_count != null && prop.unit_count > 0
+                          ? `${prop.unit_count} unit${prop.unit_count !== 1 ? 's' : ''}`
+                          : 'Multi-unit'}
+                      </span>
+                    ) : prop.bedrooms ? (
                       <span className="inline-flex items-center px-2.5 py-1 rounded-lg bg-slate-100 text-slate-600 text-xs font-medium">
                         {prop.bedrooms} bed{prop.bedrooms !== '1' ? 's' : ''}
                       </span>
-                    )}
+                    ) : null}
                   </div>
                 </div>
               ))}

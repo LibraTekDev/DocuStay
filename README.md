@@ -34,7 +34,7 @@ FastAPI + PostgreSQL backend with a **Vite + React** frontend. Implements Auth (
    - **Mailgun** (preferred): `MAILGUN_API_KEY`, `MAILGUN_DOMAIN`, `MAILGUN_FROM_EMAIL`, `MAILGUN_FROM_NAME`
    - **SendGrid** (fallback): `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`, `SENDGRID_FROM_NAME`
 
-4. **Database**: Create the database in PostgreSQL (e.g. `docustay_demo`). Tables and region rules are created automatically on backend startup. The schema is defined in `app/models/`; `Base.metadata.create_all()` runs on startup, so **no migration scripts are required for a fresh database**. Scripts in `scripts/migrate_*.py` are only for existing databases that were created before a model change.
+4. **Database**: Create the database in PostgreSQL (e.g. `docustay_demo`). Tables and region rules are created automatically on backend startup. The schema is defined in `app/models/`; `Base.metadata.create_all()` runs on startup. For fresh databases, all schema is in the models; no migration scripts are required.
 
 5. **Test users (when verification email is not configured)**  
    If you are not using Mailgun/SendGrid, verification emails will not be sent and you cannot complete signup via the UI. Create an owner and a guest user directly in the database:

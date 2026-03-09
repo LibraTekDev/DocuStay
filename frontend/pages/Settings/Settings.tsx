@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Button, Input } from '../../components/UI';
+import { ModeSwitcher } from '../../components/ModeSwitcher';
 import { UserSession } from '../../types';
 import { ownerPoaApi, dashboardApi, API_URL } from '../../services/api';
 import type { OwnerPOASignatureResponse } from '../../services/api';
@@ -12,7 +13,11 @@ const Settings: React.FC<{
   embedded?: boolean;
   /** When embedded in owner dashboard, call to switch to Billing tab */
   onOpenBilling?: () => void;
-}> = ({ user, navigate, embedded, onOpenBilling }) => {
+  /** Owner mode switcher (only when embedded in OwnerDashboard) */
+  contextMode?: 'business' | 'personal';
+  personalModeUnits?: number[];
+  onContextModeChange?: (mode: 'business' | 'personal') => void;
+}> = ({ user, navigate, embedded, onOpenBilling, contextMode = 'business', personalModeUnits = [], onContextModeChange }) => {
   const [poaSignature, setPoaSignature] = useState<OwnerPOASignatureResponse | null | undefined>(undefined);
   const [billing, setBilling] = useState<BillingResponse | null>(null);
   const [billingLoading, setBillingLoading] = useState(false);
@@ -97,8 +102,24 @@ const Settings: React.FC<{
           </div>
         </Card>
 
-        {/* Subscription & Billing (owners only) */}
-        {isOwner && (
+        {/* Mode (owners only, when embedded with props) */}
+        {isOwner && onContextModeChange && (
+          <Card className="p-8 md:p-10">
+            <h2 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-3 mb-6">Mode</h2>
+            <p className="text-gray-600 text-sm mb-4">
+              Business mode: manage your properties as an owner. Personal mode: use resident features (presence, guest invites) for units where you live.
+            </p>
+            <ModeSwitcher
+              contextMode={contextMode}
+              personalModeUnits={personalModeUnits}
+              onContextModeChange={onContextModeChange}
+              inline
+            />
+          </Card>
+        )}
+
+        {/* Subscription & Billing (owners only, hidden in Personal mode) */}
+        {isOwner && contextMode !== 'personal' && (
           <Card className="p-8 md:p-10">
             <h2 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-3 mb-6">Subscription & Billing</h2>
             {billingLoading ? (

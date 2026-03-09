@@ -96,9 +96,13 @@ export function getOwnerSignupErrorFriendly(
       redirectTo: null,
     };
   }
-  if (raw === "invalid request" || (raw.includes("invalid") && raw.includes("request"))) {
+  if (
+    raw.includes("verification session not found") ||
+    raw === "invalid request" ||
+    (raw.includes("invalid") && raw.includes("request"))
+  ) {
     return {
-      message: "We couldn't find your verification. Please go back to sign-up and register again, or use the link from your latest verification email.",
+      message: "Please go back to registration and sign up again.",
       redirectTo: "register",
     };
   }
@@ -106,7 +110,7 @@ export function getOwnerSignupErrorFriendly(
   // --- Phone number validation (must come AFTER verification code checks) ---
   if (raw.includes("phone") || (raw.includes("digits") && !raw.includes("verification") && !raw.includes("code"))) {
     return {
-      message: "Please enter a valid phone number (at least 10 digits, e.g. 5551234567 or +1 555 123 4567).",
+      message: "Please enter a valid phone number (digits only, optional + at start, e.g. 5551234567 or +15551234567).",
       redirectTo: null,
     };
   }

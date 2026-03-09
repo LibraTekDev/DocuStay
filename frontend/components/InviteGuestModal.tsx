@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Modal, Input, Button } from './UI';
-import { invitationsApi, propertiesApi, APP_ORIGIN } from '../services/api';
+import { invitationsApi, propertiesApi, dashboardApi, APP_ORIGIN } from '../services/api';
 import { copyToClipboard } from '../utils/clipboard';
+import { getTodayLocal } from '../utils/dateUtils';
+import { toUserFriendlyInvitationError } from '../utils/invitationErrors';
 import type { UserSession } from '../types';
 
 interface InviteGuestModalProps {
@@ -14,6 +16,15 @@ interface InviteGuestModalProps {
   navigate?: (v: string) => void;
   /** When opening from a property page, preselect this property */
   initialPropertyId?: number | null;
+  /** When provided (e.g. tenant or owner personal mode), use this unit and skip property selector */
+  unitId?: number | null;
+  /** When provided with unitId, show this label in modal title/body so invite is clearly "per property/stay" */
+  propertyOrStayLabel?: string | null;
+  /** When provided (tenant view), guest dates must fall within tenant's stay. Used for min/max on date inputs. */
+  tenantStayStartDate?: string | null;
+  tenantStayEndDate?: string | null;
+  /** When provided, on success we call this with the link and close the modal instead of showing link in-place. Use for parent to show link in a separate modal. */
+  onLinkGenerated?: (link: string) => void;
 }
 
 export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
@@ -25,12 +36,20 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
   onSuccess,
   navigate = (_: string) => {},
   initialPropertyId = null,
+  unitId = null,
+  propertyOrStayLabel = null,
+  tenantStayStartDate = null,
+  tenantStayEndDate = null,
+  onLinkGenerated,
 }) => {
   const [formData, setFormData] = useState({ guest_name: '', checkin_date: '', checkout_date: '' });
   const [inviteLink, setInviteLink] = useState('');
   const [showLinkResult, setShowLinkResult] = useState(false);
-  const [properties, setProperties] = useState<Array<{ id: number; name: string | null; street: string; city: string; state: string; zip_code: string | null }>>([]);
+  const [properties, setProperties] = useState<Array<{ id: number; name: string | null; street: string; city: string; state: string; zip_code: string | null; owner_occupied?: boolean; is_multi_unit?: boolean }>>([]);
   const [propertyId, setPropertyId] = useState<number | null>(null);
+  const [selectedUnitId, setSelectedUnitId] = useState<number | null>(null);
+  const [units, setUnits] = useState<Array<{ id: number; unit_label: string; occupancy_status: string }>>([]);
+  const [unitsLoading, setUnitsLoading] = useState(false);
   const [propertiesLoading, setPropertiesLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const linkGeneratedRef = useRef(false);
@@ -43,8 +62,16 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
         setInviteLink('');
       }
       setFormData({ guest_name: '', checkin_date: '', checkout_date: '' });
+      setSelectedUnitId(null);
+      setUnits([]);
       setPropertiesLoading(false);
+      setUnitsLoading(false);
       linkGeneratedRef.current = false;
+      return;
+    }
+    // When unitId is provided (tenant or owner personal mode), skip loading properties
+    if (unitId != null) {
+      setPropertiesLoading(false);
       return;
     }
     // When opening from a property page, preselect that property immediately so the form is usable
@@ -55,22 +82,28 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
     propertiesApi
       .list()
       .then((list) => {
-        setProperties(list);
-        if (list.length > 0) {
+        // Exclude primary residence: can't invite guests to live in owner's primary residence
+        const inviteable = list.filter((p) => !p.owner_occupied);
+        setProperties(inviteable);
+        if (inviteable.length > 0) {
           const preferred =
-            initialPropertyId != null && list.some((p) => p.id === initialPropertyId)
+            initialPropertyId != null && inviteable.some((p) => p.id === initialPropertyId)
               ? initialPropertyId
-              : list[0].id;
+              : inviteable[0].id;
           setPropertyId(preferred);
         } else if (initialPropertyId != null) {
-          // List empty but we came from a property page: fetch this property so the form can show it
+          // List empty but we came from a property page: fetch this property only if not primary residence
           propertiesApi
             .get(initialPropertyId)
             .then((prop) => {
-              setProperties([prop]);
-              setPropertyId(prop.id);
+              if (!prop.owner_occupied) {
+                setProperties([prop]);
+                setPropertyId(prop.id);
+              } else {
+                setPropertyId(null);
+              }
             })
-            .catch(() => {})
+            .catch(() => setPropertyId(null))
             .finally(() => setPropertiesLoading(false));
           return;
         } else {
@@ -83,23 +116,60 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
           propertiesApi
             .get(initialPropertyId)
             .then((prop) => {
-              setProperties([prop]);
-              setPropertyId(prop.id);
+              if (!prop.owner_occupied) {
+                setProperties([prop]);
+                setPropertyId(prop.id);
+              } else {
+                setPropertyId(null);
+              }
             })
-            .catch(() => {})
+            .catch(() => setPropertyId(null))
             .finally(() => setPropertiesLoading(false));
         } else {
           setPropertiesLoading(false);
         }
       });
-  }, [open, initialPropertyId]);
+  }, [open, initialPropertyId, unitId]);
+
+  // When property changes, fetch units if multi-unit
+  useEffect(() => {
+    if (unitId != null || !propertyId) {
+      setUnits([]);
+      setSelectedUnitId(null);
+      return;
+    }
+    const prop = properties.find((p) => p.id === propertyId);
+    if (!prop?.is_multi_unit) {
+      setUnits([]);
+      setSelectedUnitId(null);
+      return;
+    }
+    setUnitsLoading(true);
+    propertiesApi
+      .getUnits(propertyId)
+      .then((list) => {
+        const withRealIds = list.filter((u) => u.id > 0);
+        setUnits(withRealIds);
+        setSelectedUnitId(withRealIds.length > 0 ? withRealIds[0].id : null);
+      })
+      .catch(() => {
+        setUnits([]);
+        setSelectedUnitId(null);
+      })
+      .finally(() => setUnitsLoading(false));
+  }, [propertyId, unitId, properties]);
 
   const selectedProperty = properties.find((p) => p.id === propertyId);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!propertyId) {
+    if (unitId == null && !propertyId) {
       notify('error', 'Please add a property first, then create an invitation.');
+      return;
+    }
+    const prop = properties.find((p) => p.id === propertyId);
+    if (unitId == null && propertyId && prop?.is_multi_unit && (!selectedUnitId || selectedUnitId === 0)) {
+      notify('error', 'Please select which unit to invite the guest to.');
       return;
     }
     if (!formData.checkin_date || !formData.checkout_date) {
@@ -110,29 +180,63 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
       notify('error', 'End date must be after start date.');
       return;
     }
+    const todayStr = getTodayLocal();
+    if (formData.checkin_date < todayStr) {
+      notify('error', 'Check-in date cannot be in the past.');
+      return;
+    }
+    // Tenant: guest dates must fall within tenant's stay
+    if (tenantStayStartDate && formData.checkin_date < tenantStayStartDate) {
+      notify('error', `Guest check-in cannot be before your stay starts (${tenantStayStartDate}).`);
+      return;
+    }
+    if (tenantStayEndDate && formData.checkout_date > tenantStayEndDate) {
+      notify('error', `Guest check-out cannot be after your stay ends (${tenantStayEndDate}).`);
+      return;
+    }
     setSubmitting(true);
     try {
-      const result = await invitationsApi.create({
-        owner_id: user?.user_id ?? '',
-        property_id: propertyId ?? undefined,
-        guest_name: formData.guest_name,
-        checkin_date: formData.checkin_date,
-        checkout_date: formData.checkout_date,
-      });
+      const isTenant = (user?.user_type ?? '').toUpperCase() === 'TENANT';
+      const effectiveUnitId = unitId ?? (prop?.is_multi_unit && selectedUnitId && selectedUnitId > 0 ? selectedUnitId : undefined);
+      if (isTenant && !effectiveUnitId) {
+        notify('error', 'Could not determine your assigned unit for this invitation.');
+        setSubmitting(false);
+        return;
+      }
+      const result = isTenant
+        ? await dashboardApi.tenantCreateInvitation({
+            unit_id: effectiveUnitId as number,
+            guest_name: formData.guest_name,
+            checkin_date: formData.checkin_date,
+            checkout_date: formData.checkout_date,
+          })
+        : await invitationsApi.create({
+            owner_id: user?.user_id ?? undefined,
+            property_id: unitId == null ? (propertyId ?? undefined) : undefined,
+            unit_id: effectiveUnitId ?? undefined,
+            guest_name: formData.guest_name,
+            checkin_date: formData.checkin_date,
+            checkout_date: formData.checkout_date,
+          });
       if (result.status === 'success' && result.data?.invitation_code) {
         const base = APP_ORIGIN || (typeof window !== "undefined" ? window.location.origin : "");
         const link = `${base}${window.location.pathname}#invite/${result.data.invitation_code}`;
         linkGeneratedRef.current = true;
-        setInviteLink(link);
-        setShowLinkResult(true);
         notify('success', 'Invitation link generated.');
-        // Call onSuccess after state is set
-        setTimeout(() => onSuccess?.(), 100);
+        if (onLinkGenerated) {
+          onLinkGenerated(link);
+          handleClose();
+        } else {
+          setInviteLink(link);
+          setShowLinkResult(true);
+        }
       } else {
-        notify('error', result.message || 'Invitation failed.');
+        onClose();
+        notify('error', result.message || 'We couldn\'t create a valid invitation link. Please try again.');
       }
     } catch (err) {
-      notify('error', (err as Error)?.message || 'Invitation failed.');
+      onClose();
+      notify('error', toUserFriendlyInvitationError((err as Error)?.message ?? 'Invitation failed.'));
     } finally {
       setSubmitting(false);
     }
@@ -145,21 +249,30 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
   };
 
   const handleClose = () => {
+    const wasShowingLink = linkGeneratedRef.current;
     linkGeneratedRef.current = false;
     setShowLinkResult(false);
     setInviteLink('');
     onClose();
+    if (wasShowingLink && onSuccess) onSuccess();
   };
+
+  const modalTitle = propertyOrStayLabel
+    ? `Invite a guest to this property`
+    : 'Invite a guest';
 
   return (
     <Modal
       open={open}
       onClose={handleClose}
-      title="Invite a guest"
+      title={modalTitle}
       className="max-w-lg"
       disableBackdropClose={submitting || showLinkResult}
     >
-      <div className="p-6">
+      <div className="p-6" key={showLinkResult ? 'link' : 'form'}>
+        {propertyOrStayLabel && (
+          <p className="text-sm text-slate-600 mb-4 font-medium">{propertyOrStayLabel}</p>
+        )}
         {showLinkResult ? (
           <div className="space-y-4">
             <p className="text-sm text-slate-600">Share this link with your guest. They will sign in or create an account, then sign the agreement on their dashboard.</p>
@@ -172,7 +285,12 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
             </div>
           </div>
         ) : (
-          <form onSubmit={handleSubmit} className="space-y-5">
+          <form onSubmit={handleSubmit} className="space-y-5" noValidate>
+            {unitId != null ? (
+              <p className="text-sm text-slate-600">
+                {propertyOrStayLabel ? `Inviting a guest to ${propertyOrStayLabel}.` : 'Inviting a guest to your unit.'}
+              </p>
+            ) : (
             <div>
               <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Property</label>
               {propertiesLoading && properties.length === 0 ? (
@@ -197,9 +315,30 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
                   ) : (
                     <p className="text-sm text-slate-700 font-medium">{selectedProperty?.name || [selectedProperty?.street, selectedProperty?.city].filter(Boolean).join(', ') || 'Property'}</p>
                   )}
+                  {selectedProperty?.is_multi_unit && (
+                    <div className="mt-4">
+                      <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Unit</label>
+                      {unitsLoading ? (
+                        <p className="text-sm text-slate-500 py-2">Loading units…</p>
+                      ) : units.length > 0 ? (
+                        <select
+                          value={selectedUnitId ?? ''}
+                          onChange={(e) => setSelectedUnitId(Number(e.target.value))}
+                          className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg text-slate-800 text-sm"
+                        >
+                          {units.map((u) => (
+                            <option key={u.id} value={u.id}>Unit {u.unit_label}</option>
+                          ))}
+                        </select>
+                      ) : (
+                        <p className="text-sm text-slate-500">No units found.</p>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </div>
+            )}
 
             <Input
               label="Guest name"
@@ -211,13 +350,36 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
             />
 
             <div className="grid grid-cols-2 gap-4">
-              <Input label="Start date" name="checkin_date" type="date" value={formData.checkin_date} onChange={(e) => setFormData({ ...formData, checkin_date: e.target.value })} required />
-              <Input label="End date" name="checkout_date" type="date" value={formData.checkout_date} onChange={(e) => setFormData({ ...formData, checkout_date: e.target.value })} required />
+              <Input
+                label="Start date"
+                name="checkin_date"
+                type="date"
+                min={tenantStayStartDate ? (tenantStayStartDate > getTodayLocal() ? tenantStayStartDate : getTodayLocal()) : getTodayLocal()}
+                max={tenantStayEndDate ?? undefined}
+                value={formData.checkin_date}
+                onChange={(e) => setFormData({ ...formData, checkin_date: e.target.value })}
+                required
+              />
+              <Input
+                label="End date"
+                name="checkout_date"
+                type="date"
+                min={formData.checkin_date || getTodayLocal()}
+                max={tenantStayEndDate ?? undefined}
+                value={formData.checkout_date}
+                onChange={(e) => setFormData({ ...formData, checkout_date: e.target.value })}
+                required
+              />
             </div>
+            {unitId != null && tenantStayStartDate && (
+              <p className="text-xs text-slate-500">
+                Guests can only stay during your stay ({tenantStayStartDate} – {tenantStayEndDate ?? 'ongoing'}).
+              </p>
+            )}
 
             <div className="flex gap-3 pt-2">
               <Button variant="outline" type="button" onClick={handleClose} className="flex-1" disabled={submitting}>Cancel</Button>
-              <Button type="submit" className="flex-1" disabled={properties.length === 0 || submitting}>
+              <Button type="submit" className="flex-1" disabled={(unitId == null && properties.length === 0) || submitting}>
                 {submitting ? 'Generating…' : 'Generate invite link'}
               </Button>
             </div>

@@ -16,6 +16,8 @@ class PortfolioPropertyItem(BaseModel):
     region_code: str
     property_type_label: str | None = None
     bedrooms: str | None = None
+    is_multi_unit: bool = False
+    unit_count: int | None = None  # when is_multi_unit, number of units
 
 
 class PortfolioOwnerInfo(BaseModel):

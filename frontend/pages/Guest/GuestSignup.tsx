@@ -1,16 +1,20 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, Input, Button, ErrorModal } from '../../components/UI';
 import { HeroBackground } from '../../components/HeroBackground';
 import { authApiGuest } from '../../services/api';
+import { STATE_OPTIONS } from '../../services/jleService';
+import { validatePhone, sanitizePhoneInput } from '../../utils/validatePhone';
 import AgreementSignModal, { type GuestInviteFormData } from '../../components/AgreementSignModal';
 
 interface GuestSignupProps {
+  initialRole?: 'guest' | 'tenant';
   initialInviteCode?: string;
   setPendingVerification?: (data: { userId: string; type: 'email'; generatedAt: string }) => void;
   navigate: (v: string) => void;
   setLoading: (l: boolean) => void;
   notify: (t: 'success' | 'error', m: string) => void;
   onGuestLogin?: (user: any) => void;
+  onTenantLogin?: (user: any) => void;
 }
 
 const parseInviteCode = (raw: string): string => {
@@ -22,7 +26,11 @@ const parseInviteCode = (raw: string): string => {
   return code.trim().toUpperCase();
 };
 
-const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPendingVerification, navigate, setLoading, notify, onGuestLogin }) => {
+const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCode, setPendingVerification, navigate, setLoading, notify, onGuestLogin, onTenantLogin }) => {
+  const [role, setRole] = useState<'guest' | 'tenant'>(initialRole ?? 'guest');
+  useEffect(() => {
+    if (initialRole) setRole(initialRole);
+  }, [initialRole]);
   const [inviteAcceptModalOpen, setInviteAcceptModalOpen] = useState(false);
   const [inviteAcceptCode, setInviteAcceptCode] = useState('');
   const [pendingInviteFormData, setPendingInviteFormData] = useState<GuestInviteFormData | null>(null);
@@ -73,10 +81,16 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
       showError('Please fill in all required fields and accept all acknowledgments and agreements before continuing.');
       return;
     }
+    const phoneCheck = validatePhone(formData.phone);
+    if (!phoneCheck.valid) {
+      showError(phoneCheck.error ?? 'Invalid phone number.');
+      return;
+    }
 
     setLoading(true);
     try {
       const result = await authApiGuest.register({
+        role,
         invitation_id: inviteCode,
         invitation_code: inviteCode,
         full_name: formData.full_name,
@@ -106,9 +120,10 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
           navigate('verify');
           return;
         }
-        notify('success', inviteCode ? 'Account created. Sign the agreement on your dashboard to accept the invitation.' : 'Account created successfully.');
-        if (onGuestLogin) onGuestLogin(result.data);
-        navigate('guest-dashboard');
+        notify('success', role === 'tenant' ? 'Account created successfully.' : inviteCode ? 'Account created. Sign the agreement on your dashboard to accept the invitation.' : 'Account created successfully.');
+        if (role === 'tenant' && onTenantLogin) onTenantLogin(result.data);
+        else if (onGuestLogin) onGuestLogin(result.data);
+        navigate(role === 'tenant' ? 'tenant-dashboard' : 'guest-dashboard');
       } else {
         showError(result.message || 'Registration failed. Please correct the errors and try again.');
       }
@@ -126,16 +141,43 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
   return (
     <HeroBackground className="flex-grow flex flex-col items-center py-8">
       <div className="w-full max-w-4xl rounded-xl overflow-hidden shadow-xl border border-gray-200/60 bg-white/40 backdrop-blur-sm">
-        <div className="border-b border-gray-200/50 bg-white/30 px-8 py-6">
-            <h1 className="text-xl font-semibold text-gray-900">Guest Signup</h1>
-            <p className="text-gray-600 text-sm mt-1">Create your guest account.</p>
+          <div className="border-b border-gray-200/50 bg-white/30 px-8 py-6">
+            <h1 className="text-xl font-semibold text-gray-900">Tenant / Guest Signup</h1>
+            <p className="text-gray-600 text-sm mt-1">Create your account.</p>
           </div>
 
           <div className="p-8 md:p-10 bg-gradient-to-b from-blue-100/35 via-blue-50/30 to-sky-100/25">
             <form onSubmit={handleSubmit} className="grid md:grid-cols-2 gap-x-10 gap-y-6">
               <div className="md:col-span-2">
+                <label className="block text-sm font-medium text-gray-700 mb-2">Sign up as</label>
+                <div className="flex gap-4">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="role"
+                      value="tenant"
+                      checked={role === 'tenant'}
+                      onChange={() => setRole('tenant')}
+                      className="w-4 h-4 text-blue-700 focus:ring-blue-600"
+                    />
+                    <span className="font-medium text-gray-900">Tenant</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="role"
+                      value="guest"
+                      checked={role === 'guest'}
+                      onChange={() => setRole('guest')}
+                      className="w-4 h-4 text-blue-700 focus:ring-blue-600"
+                    />
+                    <span className="font-medium text-gray-900">Guest</span>
+                  </label>
+                </div>
+              </div>
+              <div className="md:col-span-2">
                 <Input
-                  label="Invitation link (optional)"
+                  label="Invitation link (optional, for guests)"
                   name="invitation_link"
                   value={formData.invitation_link}
                   onChange={e => setFormData({ ...formData, invitation_link: e.target.value })}
@@ -168,7 +210,7 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
                 <div className="space-y-4">
                   <Input label="Full name" name="full_name" value={formData.full_name} onChange={e => setFormData({ ...formData, full_name: e.target.value })} required />
                   <Input label="Email Address" name="email" type="email" value={formData.email} onChange={e => setFormData({ ...formData, email: e.target.value })} required />
-                  <Input label="Phone Number" name="phone" value={formData.phone} onChange={e => setFormData({ ...formData, phone: e.target.value })} placeholder="+1 555-000-0000" required />
+                  <Input label="Phone Number" name="phone" value={formData.phone} onChange={e => setFormData({ ...formData, phone: sanitizePhoneInput(e.target.value) })} placeholder="+15551234567 or 5551234567" required />
                   <div className="grid grid-cols-2 gap-4">
                     <Input label="Password" name="password" type="password" value={formData.password} onChange={e => setFormData({ ...formData, password: e.target.value })} required />
                     <Input label="Confirm" name="confirm_password" type="password" value={formData.confirm_password} onChange={e => setFormData({ ...formData, confirm_password: e.target.value })} required />
@@ -186,7 +228,7 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
                   <Input label="Street Address" name="permanent_address" value={formData.permanent_address} onChange={e => setFormData({ ...formData, permanent_address: e.target.value })} placeholder="Your actual home address" required />
                   <div className="grid grid-cols-2 gap-4">
                     <Input label="City" name="permanent_city" value={formData.permanent_city} onChange={e => setFormData({ ...formData, permanent_city: e.target.value })} required />
-                    <Input label="State" name="permanent_state" value={formData.permanent_state} onChange={e => setFormData({ ...formData, permanent_state: e.target.value })} required />
+                    <Input label="State" name="permanent_state" value={formData.permanent_state} onChange={e => setFormData({ ...formData, permanent_state: e.target.value })} options={STATE_OPTIONS} required />
                   </div>
                   <Input label="ZIP Code" name="permanent_zip" value={formData.permanent_zip} onChange={e => setFormData({ ...formData, permanent_zip: e.target.value })} required />
                 </div>
@@ -237,10 +279,11 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialInviteCode, setPending
                   </Button>
                   <p className="mt-4 text-center text-gray-500 text-sm">
                     Already have an account?{' '}
-                    <button type="button" onClick={() => navigate('guest-login')} className="text-blue-700 font-medium hover:text-blue-800 hover:underline underline-offset-2">Login instead</button>
-                  </p>
-                  <p className="mt-1 text-center">
-                    <button type="button" onClick={() => navigate('register')} className="text-blue-700 hover:text-blue-800 text-sm font-medium underline underline-offset-2">Sign up as Owner</button>
+                    {role === 'tenant' ? (
+                      <button type="button" onClick={() => navigate('login/tenant')} className="text-blue-700 font-medium hover:text-blue-800 hover:underline underline-offset-2">Tenant login</button>
+                    ) : (
+                      <button type="button" onClick={() => navigate('guest-login')} className="text-blue-700 font-medium hover:text-blue-800 hover:underline underline-offset-2">Guest login</button>
+                    )}
                   </p>
                 </div>
               </div>

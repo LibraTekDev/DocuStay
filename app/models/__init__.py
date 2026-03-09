@@ -13,9 +13,17 @@ from app.models.guest_pending_invite import GuestPendingInvite
 from app.models.agreement_signature import AgreementSignature
 from app.models.reference_option import ReferenceOption
 from app.models.audit_log import AuditLog
+from app.models.event_ledger import EventLedger
 from app.models.owner_poa_signature import OwnerPOASignature
 from app.models.pending_registration import PendingRegistration
 from app.models.property_utility import PropertyUtilityProvider, PropertyAuthorityLetter
+from app.models.unit import Unit
+from app.models.property_manager_assignment import PropertyManagerAssignment
+from app.models.tenant_assignment import TenantAssignment
+from app.models.resident_mode import ResidentMode
+from app.models.resident_presence import ResidentPresence
+from app.models.stay_presence import StayPresence, PresenceAwayPeriod
+from app.models.manager_invitation import ManagerInvitation
 
 __all__ = [
     "User",
@@ -32,8 +40,17 @@ __all__ = [
     "AgreementSignature",
     "ReferenceOption",
     "AuditLog",
+    "EventLedger",
     "OwnerPOASignature",
     "PendingRegistration",
     "PropertyUtilityProvider",
     "PropertyAuthorityLetter",
+    "Unit",
+    "PropertyManagerAssignment",
+    "TenantAssignment",
+    "ResidentMode",
+    "ResidentPresence",
+    "StayPresence",
+    "PresenceAwayPeriod",
+    "ManagerInvitation",
 ]

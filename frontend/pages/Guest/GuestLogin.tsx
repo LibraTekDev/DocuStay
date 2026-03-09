@@ -185,31 +185,27 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
             </form>
 
             <div className="mt-8 space-y-2 text-center text-gray-500 text-sm">
+              {inviteCode && inviteCheck?.valid === true && (
+                <p>
+                  First time?{' '}
+                  <button
+                    type="button"
+                    onClick={() => navigate(`register-from-invite/${inviteCode}`)}
+                    className="text-blue-700 font-medium hover:text-blue-800 hover:underline underline-offset-2"
+                  >
+                    Create account & accept invitation
+                  </button>
+                </p>
+              )}
+              {inviteCode && (!inviteCheck || inviteCheck.valid !== true) && (
+                <p>
+                  First time?{' '}
+                  <button type="button" onClick={() => navigate(`register-from-invite/${inviteCode}`)} className="text-blue-700 font-medium hover:text-blue-800 hover:underline underline-offset-2">Create account</button>
+                </p>
+              )}
               <p>
-                {inviteCode && inviteCheck?.valid === true && (
-                  <>
-                    First time?{' '}
-                    <button
-                      type="button"
-                      onClick={() => setInviteAcceptModalOpen(true)}
-                      className="text-blue-700 font-medium hover:text-blue-800 hover:underline underline-offset-2"
-                    >
-                      Create account & accept invitation
-                    </button>
-                    <span className="mx-1.5 text-gray-300">·</span>
-                  </>
-                )}
-                {inviteCode && (!inviteCheck || inviteCheck.valid !== true) && (
-                  <>
-                    First time?{' '}
-                    <button type="button" onClick={() => navigate(`guest-signup/${inviteCode}`)} className="text-blue-700 font-medium hover:text-blue-800 hover:underline underline-offset-2">Create account</button>
-                    <span className="mx-1.5 text-gray-300">·</span>
-                  </>
-                )}
                 Don't have an account?{' '}
                 <button type="button" onClick={() => navigate('guest-signup')} className="text-blue-700 font-medium hover:text-blue-800 hover:underline underline-offset-2">Guest Signup</button>
-                <span className="mx-1.5 text-gray-300">·</span>
-                <button type="button" onClick={() => navigate('register')} className="text-blue-700 font-medium hover:text-blue-800 hover:underline underline-offset-2">Sign up as Owner</button>
               </p>
             </div>
           </div>

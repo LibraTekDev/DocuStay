@@ -13,7 +13,9 @@ class Stay(Base):
     guest_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     property_id = Column(Integer, ForeignKey("properties.id"), nullable=False)
+    unit_id = Column(Integer, ForeignKey("units.id"), nullable=True, index=True)
     invitation_id = Column(Integer, ForeignKey("invitations.id"), nullable=True, index=True)  # links to invite token (invitation_code)
+    invited_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # owner or tenant who invited
 
     stay_start_date = Column(Date, nullable=False)
     stay_end_date = Column(Date, nullable=False)

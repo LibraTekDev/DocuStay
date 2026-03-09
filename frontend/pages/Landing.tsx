@@ -1,6 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { Button } from '../components/UI';
 
+/** Roles for signup flow */
+const SIGNUP_ROLES = [
+  { id: 'owner', label: 'Owner' },
+  { id: 'property_manager', label: 'Property Manager' },
+  { id: 'tenant', label: 'Tenant' },
+  { id: 'guest', label: 'Guest' },
+];
+
+/** Roles for login flow */
+const LOGIN_ROLES = [
+  { id: 'owner', label: 'Owner' },
+  { id: 'property_manager', label: 'Property Manager' },
+  { id: 'tenant', label: 'Tenant' },
+  { id: 'guest', label: 'Guest' },
+];
+
 /** High-quality property/home images (Unsplash – free to use, no watermark) */
 const HERO_IMAGES = [
   'https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?w=1920&q=80',
@@ -18,6 +34,11 @@ type LandingProps = {
 
 const Landing: React.FC<LandingProps> = ({ navigate }) => {
   const [activeIndex, setActiveIndex] = useState(0);
+  const [roleSelector, setRoleSelector] = useState<'signup' | 'login' | null>(null);
+
+  useEffect(() => {
+    if (roleSelector) window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [roleSelector]);
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -25,6 +46,22 @@ const Landing: React.FC<LandingProps> = ({ navigate }) => {
     }, CAROUSEL_INTERVAL_MS);
     return () => clearInterval(t);
   }, []);
+
+  const onRoleSelect = (roleId: string) => {
+    if (roleSelector === 'signup') {
+      if (roleId === 'owner') navigate('register');
+      else if (roleId === 'property_manager') navigate('register/manager');
+      else if (roleId === 'tenant') navigate('guest-signup/tenant');
+      else if (roleId === 'guest') navigate('guest-signup');
+    } else {
+      if (roleId === 'guest') navigate('guest-login');
+      else if (roleId === 'owner') navigate('login');
+      else if (roleId === 'property_manager') navigate('login/property_manager');
+      else if (roleId === 'tenant') navigate('login/tenant');
+    }
+  };
+
+  const roles = roleSelector === 'login' ? LOGIN_ROLES : SIGNUP_ROLES;
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -55,22 +92,49 @@ const Landing: React.FC<LandingProps> = ({ navigate }) => {
           <p className="text-lg sm:text-xl text-slate-200/95 max-w-2xl mx-auto mb-10 leading-relaxed">
             DocuStay is a neutral documentation platform: authorization records, identity verification, and an immutable audit trail for temporary stays.
           </p>
-          <div className="flex flex-col sm:flex-row justify-center gap-4">
-            <Button
-              variant="primary"
-              onClick={() => navigate('register')}
-              className="px-8 py-3.5 bg-sky-600 hover:bg-sky-700 border-0 text-white font-semibold shadow-lg shadow-sky-900/30"
-            >
-              Get started
-            </Button>
-            <button
-              type="button"
-              onClick={() => navigate('login')}
-              className="px-8 py-3.5 rounded-lg text-sm font-medium border-2 border-white/80 text-white bg-transparent hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/50 focus:ring-offset-2 focus:ring-offset-transparent transition-colors"
-            >
-              Sign in
-            </button>
-          </div>
+
+          {roleSelector ? (
+            <div className="bg-white/40 backdrop-blur-sm rounded-2xl p-8 max-w-md mx-auto border border-gray-200/60 shadow-xl">
+              <p className="text-lg font-semibold text-gray-900 mb-6">
+                {roleSelector === 'signup' ? 'Create an account as' : 'Sign in as'}
+              </p>
+              <div className="grid grid-cols-2 gap-4">
+                {roles.map((r) => (
+                  <button
+                    key={r.id}
+                    onClick={() => onRoleSelect(r.id)}
+                    className="px-6 py-4 rounded-xl border-2 border-gray-200/60 text-gray-900 font-medium bg-white/60 hover:bg-white/80 hover:border-gray-300 transition-colors"
+                  >
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => setRoleSelector(null)}
+                className="mt-6 text-sm text-gray-600 hover:text-gray-900 underline underline-offset-2"
+              >
+                Back
+              </button>
+            </div>
+          ) : (
+            <div className="flex flex-col sm:flex-row justify-center gap-4">
+              <Button
+                variant="primary"
+                onClick={() => setRoleSelector('signup')}
+                className="px-8 py-3.5 bg-sky-600 hover:bg-sky-700 border-0 text-white font-semibold shadow-lg shadow-sky-900/30"
+              >
+                Get started
+              </Button>
+              <button
+                type="button"
+                onClick={() => setRoleSelector('login')}
+                className="px-8 py-3.5 rounded-lg text-sm font-medium border-2 border-white/80 text-white bg-transparent hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/50 focus:ring-offset-2 focus:ring-offset-transparent transition-colors"
+              >
+                Already have an account?
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Carousel indicators */}
@@ -167,10 +231,10 @@ const Landing: React.FC<LandingProps> = ({ navigate }) => {
           </p>
           <Button
             variant="primary"
-            onClick={() => navigate('register')}
+            onClick={() => setRoleSelector('signup')}
             className="px-8 py-3.5 bg-sky-500 hover:bg-sky-600 border-0 text-white font-semibold"
           >
-            Get started free
+            Get started
           </Button>
         </div>
       </section>

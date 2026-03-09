@@ -18,10 +18,13 @@ from app.models import (  # noqa: F401
     User, OwnerProfile, Property, GuestProfile, Stay, RegionRule,
     Jurisdiction, JurisdictionStatute, JurisdictionZipMapping,
     Invitation, GuestPendingInvite, AgreementSignature, ReferenceOption,
-    AuditLog, OwnerPOASignature, PendingRegistration,
+    AuditLog, EventLedger, OwnerPOASignature, PendingRegistration,
     PropertyUtilityProvider, PropertyAuthorityLetter,
+    Unit, PropertyManagerAssignment, TenantAssignment, ResidentMode, ResidentPresence,
+    StayPresence, PresenceAwayPeriod,
+    ManagerInvitation,
 )
-from app.routers import auth, identity, owners, guests, stays, region_rules, jle, dashboard, notifications, agreements, billing_webhook, public, admin
+from app.routers import auth, identity, owners, guests, stays, region_rules, jle, dashboard, notifications, agreements, billing_webhook, public, admin, managers
 
 logger = logging.getLogger("app.startup")
 settings = get_settings()
@@ -63,7 +66,8 @@ app.include_router(agreements.router)
 app.include_router(billing_webhook.router)
 app.include_router(public.router)
 app.include_router(admin.router)
-logger.info("[startup] Routers registered (auth, identity, owners, guests, stays, region_rules, jle, dashboard, notifications, agreements, billing_webhook, public, admin)")
+app.include_router(managers.router)
+logger.info("[startup] Routers registered (auth, identity, owners, guests, stays, region_rules, jle, dashboard, notifications, agreements, billing_webhook, public, admin, managers)")
 
 
 @app.on_event("startup")
@@ -91,12 +95,13 @@ def startup():
         Base.metadata.create_all(bind=engine)
         logger.info("[startup] Database tables created/verified")
         from app.database import SessionLocal
-        from app.seed import seed_region_rules, seed_jurisdiction_sot
+        from app.seed import seed_region_rules, seed_jurisdiction_sot, seed_admin_user
         db = SessionLocal()
         try:
             seed_region_rules(db)
             seed_jurisdiction_sot(db)
-            logger.info("[startup] Region rules and jurisdiction SOT seeded")
+            seed_admin_user(db)
+            logger.info("[startup] Region rules, jurisdiction SOT, and admin user seeded")
         finally:
             db.close()
         logger.info("[startup] Step 2 done: database OK")
@@ -107,16 +112,19 @@ def startup():
     logger.info("[startup] Step 3: Background scheduler (invitation expire; DMS 2-min from accept_invite when test mode)")
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
-        from app.services.invitation_cleanup import run_invitation_cleanup_job
+        from app.services.invitation_cleanup import run_invitation_cleanup_job, run_manager_invitation_cleanup_job
 
         scheduler = BackgroundScheduler()
-        # Pending invites unaccepted after 12h (or 5 min in test_mode) -> status=expired, token_state=EXPIRED
+        # Guest invites: unaccepted after 12h (or 5 min in test_mode) -> status=expired, token_state=EXPIRED
         if getattr(settings, "test_mode", False):
             scheduler.add_job(run_invitation_cleanup_job, "cron", minute="*")  # every minute when test_mode
             logger.info("[startup] Scheduler: invitation expire job added (every minute, test_mode=5min expiry)")
         else:
             scheduler.add_job(run_invitation_cleanup_job, "cron", minute=0)  # every hour at :00
             logger.info("[startup] Scheduler: invitation expire job added (cron every hour at :00)")
+        # Manager invites: mark pending with expires_at < now as status=expired (3-day expiry)
+        scheduler.add_job(run_manager_invitation_cleanup_job, "cron", minute=5)  # every hour at :05
+        logger.info("[startup] Scheduler: manager invitation expire job added (cron every hour at :05)")
         if getattr(settings, "dms_test_mode", False):
             from app.services.stay_timer import run_dms_test_mode_catchup_job
             scheduler.add_job(run_dms_test_mode_catchup_job, "cron", minute="*")  # every minute: turn DMS on for stays that checked in >2 min ago

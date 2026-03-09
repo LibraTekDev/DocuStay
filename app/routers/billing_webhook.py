@@ -10,6 +10,7 @@ from app.database import get_db
 from app.models.owner import OwnerProfile
 from app.models.user import User
 from app.services.audit_log import create_log, CATEGORY_BILLING
+from app.services.event_ledger import create_ledger_event, ACTION_BILLING_INVOICE_PAID
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,12 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
             actor_user_id=user.id if user else None,
             actor_email=user.email if user else None,
             meta={"stripe_invoice_id": inv.id, "amount_paid_cents": amount_paid, "currency": currency},
+        )
+        create_ledger_event(
+            db,
+            ACTION_BILLING_INVOICE_PAID,
+            actor_user_id=user.id if user else None,
+            meta={"stripe_invoice_id": inv.id, "amount_paid_cents": amount_paid, "currency": currency, "invoice_number": getattr(inv, "number", str(inv.id))},
         )
         # If this is the onboarding invoice (metadata has onboarding_units), mark profile and create monthly subscription
         if meta.get("onboarding_units") and profile.onboarding_invoice_paid_at is None:

@@ -2,6 +2,8 @@
 import React, { useState, useEffect } from 'react';
 import { Card, Input, Button } from '../../components/UI';
 import { authApiGuest, invitationsApi, type InvitationDetails } from '../../services/api';
+import { STATE_OPTIONS } from '../../services/jleService';
+import { validatePhone, sanitizePhoneInput } from '../../utils/validatePhone';
 import { UserSession } from '../../types';
 import AgreementSignModal from '../../components/AgreementSignModal';
 
@@ -12,6 +14,7 @@ interface Props {
   notify: (t: 'success' | 'error', m: string) => void;
   setPendingVerification: (data: any) => void;
   onGuestLogin?: (user: UserSession) => void;
+  onTenantLogin?: (user: UserSession) => void;
 }
 
 function formatDate(s: string | undefined): string {
@@ -20,10 +23,11 @@ function formatDate(s: string | undefined): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoading, notify, setPendingVerification, onGuestLogin }) => {
+const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoading, notify, setPendingVerification, onGuestLogin, onTenantLogin }) => {
   const [inviteDetails, setInviteDetails] = useState<InvitationDetails | null>(null);
   const [inviteLoading, setInviteLoading] = useState(true);
   const normalizedCode = invitationId.trim().toUpperCase();
+  const isTenantInvite = inviteDetails?.invitation_kind === 'tenant' || Boolean(inviteDetails?.is_tenant_invite);
   const [agreementOpen, setAgreementOpen] = useState(false);
   const [agreementSignatureId, setAgreementSignatureId] = useState<number | null>(null);
   const [formData, setFormData] = useState({
@@ -43,18 +47,26 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
     vacate_acknowledged: false
   });
 
+  useEffect(() => {
+    if (inviteDetails?.is_tenant_invite && inviteDetails?.guest_email) {
+      setFormData((prev) => ({ ...prev, email: (inviteDetails.guest_email || '').trim() }));
+    }
+  }, [inviteDetails?.is_tenant_invite, inviteDetails?.guest_email]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const requiredFilled =
+    const baseRequired =
       formData.full_name.trim() &&
       formData.email.trim() &&
       formData.phone.trim() &&
       formData.password &&
-      formData.confirm_password &&
+      formData.confirm_password;
+    const addressRequired =
       formData.permanent_address.trim() &&
       formData.permanent_city.trim() &&
       formData.permanent_state.trim() &&
       formData.permanent_zip.trim();
+    const requiredFilled = isTenantInvite ? baseRequired : baseRequired && addressRequired;
     const allCheckboxesChecked =
       formData.terms_agreed &&
       formData.privacy_agreed &&
@@ -62,7 +74,9 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
       formData.no_tenancy_acknowledged &&
       formData.vacate_acknowledged;
     if (!requiredFilled || !allCheckboxesChecked) {
-      notify('error', 'Please fill in all required fields and accept all acknowledgments and agreements before continuing.');
+      notify('error', isTenantInvite
+        ? 'Please fill in all required fields and accept all acknowledgments and agreements before continuing.'
+        : 'Please fill in all required fields and accept all acknowledgments and agreements before continuing.');
       return;
     }
     if (!agreementSignatureId) {
@@ -70,9 +84,15 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
       setAgreementOpen(true);
       return;
     }
+    const phoneCheck = validatePhone(formData.phone);
+    if (!phoneCheck.valid) {
+      notify('error', phoneCheck.error ?? 'Invalid phone number.');
+      return;
+    }
     setLoading(true);
     try {
       const result = await authApiGuest.register({
+        role: isTenantInvite ? 'tenant' : 'guest',
         invitation_id: normalizedCode,
         invitation_code: normalizedCode,
         full_name: formData.full_name,
@@ -80,10 +100,10 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
         phone: formData.phone,
         password: formData.password,
         confirm_password: formData.confirm_password,
-        permanent_address: formData.permanent_address,
-        permanent_city: formData.permanent_city,
-        permanent_state: formData.permanent_state,
-        permanent_zip: formData.permanent_zip,
+        permanent_address: formData.permanent_address || '',
+        permanent_city: formData.permanent_city || '',
+        permanent_state: formData.permanent_state || '',
+        permanent_zip: formData.permanent_zip || '',
         terms_agreed: formData.terms_agreed,
         privacy_agreed: formData.privacy_agreed,
         guest_status_acknowledged: formData.guest_status_acknowledged,
@@ -101,8 +121,15 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
           return;
         }
         notify('success', 'Registration successful!');
-        if (onGuestLogin) onGuestLogin(result.data);
-        navigate('guest-dashboard');
+        if (isTenantInvite && onTenantLogin) {
+          onTenantLogin(result.data);
+          navigate('tenant-dashboard');
+        } else if (onGuestLogin) {
+          onGuestLogin(result.data);
+          navigate('guest-dashboard');
+        } else {
+          navigate(isTenantInvite ? 'tenant-dashboard' : 'guest-dashboard');
+        }
       } else {
         notify('error', result.message || 'Registration failed.');
       }
@@ -154,7 +181,7 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
                 ? 'This invitation link has already been used and cannot be used again.'
                 : 'This invitation could not be loaded.'}
           </p>
-          <button onClick={() => navigate('guest-signup')} className="text-blue-600 hover:underline font-medium">Enter a different code</button>
+          <button onClick={() => navigate(isTenantInvite ? 'guest-signup/tenant' : 'guest-signup')} className="text-blue-600 hover:underline font-medium">Enter a different code</button>
         </Card>
       </div>
     );
@@ -168,8 +195,8 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
            <div className="absolute top-0 right-0 w-64 h-full bg-blue-500/10 blur-[60px] rounded-full"></div>
            <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8">
               <div>
-                 <span className="inline-block px-3 py-1 rounded-full bg-blue-500/20 text-blue-400 text-xs font-bold uppercase tracking-widest mb-4">Official Invitation</span>
-                 <h1 className="text-4xl font-extrabold mb-2">You're Invited to Stay.</h1>
+                 <span className="inline-block px-3 py-1 rounded-full bg-blue-500/20 text-blue-400 text-xs font-bold uppercase tracking-widest mb-4">{isTenantInvite ? 'Tenant Invitation' : 'Official Invitation'}</span>
+                 <h1 className="text-4xl font-extrabold mb-2">{isTenantInvite ? "You're Invited as a Tenant." : "You're Invited to Stay."}</h1>
                  <p className="text-blue-200 text-lg">Hosted by <span className="text-white font-bold">{inviteDetails?.host_name || 'Your host'}</span></p>
               </div>
               <div className="bg-white/10 backdrop-blur-md rounded-2xl p-6 border border-white/10 min-w-[280px]">
@@ -196,12 +223,12 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
             <div>
               <h3 className="text-2xl font-bold text-slate-800 mb-6 flex items-center gap-2">
                  <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 text-sm font-bold">1</div>
-                 Guest Profile
+                 {isTenantInvite ? 'Your details' : 'Guest Profile'}
               </h3>
               <div className="space-y-4">
                 <Input label="Full name" name="full_name" value={formData.full_name} onChange={e => setFormData({...formData, full_name: e.target.value})} required />
                 <Input label="Email Address" name="email" type="email" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} required />
-                <Input label="Phone Number" name="phone" value={formData.phone} onChange={e => setFormData({...formData, phone: e.target.value})} placeholder="+1 555-000-0000" required />
+                <Input label="Phone Number" name="phone" value={formData.phone} onChange={e => setFormData({...formData, phone: sanitizePhoneInput(e.target.value)})} placeholder="+15551234567 or 5551234567" required />
                 <div className="grid grid-cols-2 gap-4">
                    <Input label="Password" name="password" type="password" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} required />
                    <Input label="Confirm" name="confirm_password" type="password" value={formData.confirm_password} onChange={e => setFormData({...formData, confirm_password: e.target.value})} required />
@@ -209,6 +236,7 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
               </div>
             </div>
 
+            {!isTenantInvite && (
             <div>
               <h3 className="text-2xl font-bold text-slate-800 mb-6 flex items-center gap-2">
                  <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 text-sm font-bold">2</div>
@@ -219,16 +247,17 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
                 <Input label="Street Address" name="permanent_address" value={formData.permanent_address} onChange={e => setFormData({...formData, permanent_address: e.target.value})} placeholder="Your actual home address" required />
                 <div className="grid grid-cols-2 gap-4">
                    <Input label="City" name="permanent_city" value={formData.permanent_city} onChange={e => setFormData({...formData, permanent_city: e.target.value})} required />
-                   <Input label="State" name="permanent_state" value={formData.permanent_state} onChange={e => setFormData({...formData, permanent_state: e.target.value})} required />
+                   <Input label="State" name="permanent_state" value={formData.permanent_state} onChange={e => setFormData({...formData, permanent_state: e.target.value})} options={STATE_OPTIONS} required />
                 </div>
                 <Input label="ZIP Code" name="permanent_zip" value={formData.permanent_zip} onChange={e => setFormData({...formData, permanent_zip: e.target.value})} required />
               </div>
             </div>
+            )}
 
-            <div className="md:col-span-2 mt-12">
+            <div className={isTenantInvite ? 'mt-12' : 'md:col-span-2 mt-12'}>
               <h3 className="text-2xl font-bold text-slate-800 mb-8 flex items-center gap-2">
-                 <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 text-sm font-bold">3</div>
-                 Stay acknowledgments
+                 <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 text-sm font-bold">{isTenantInvite ? 2 : 3}</div>
+                 {isTenantInvite ? 'Agreement & acknowledgments' : 'Stay acknowledgments'}
               </h3>
               
               <div className="grid md:grid-cols-3 gap-6 mb-12">
@@ -280,10 +309,10 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
                   ) : null}
                 </div>
                 <div className="flex flex-col items-center mt-6">
-                  <Button type="submit" disabled={!agreementSignatureId} className="w-full md:w-auto px-20 py-5 text-xl">Create Account & Accept Invitation</Button>
+                  <Button type="submit" disabled={!agreementSignatureId} className="w-full md:w-auto px-20 py-5 text-xl">{isTenantInvite ? 'Create Account & Accept Tenant Invitation' : 'Create Account & Accept Invitation'}</Button>
                   <p className="text-sm text-slate-600 mt-6">
                     Already have an account?{' '}
-                    <button type="button" onClick={() => navigate(`guest-login/${normalizedCode}`)} className="text-blue-600 font-semibold hover:text-blue-700 underline underline-offset-4">
+                    <button type="button" onClick={() => navigate(isTenantInvite ? `login/tenant` : `guest-login/${normalizedCode}`)} className="text-blue-600 font-semibold hover:text-blue-700 underline underline-offset-4">
                       Sign in
                     </button>
                   </p>
@@ -302,6 +331,13 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
         onClose={() => setAgreementOpen(false)}
         onSigned={(id) => setAgreementSignatureId(id)}
         notify={notify}
+        inviteAcceptMode
+        prefilledGuestInfo={agreementOpen ? {
+          full_name: formData.full_name.trim(),
+          email: formData.email.trim(),
+          phone: formData.phone.trim(),
+          permanent_address: [formData.permanent_address, formData.permanent_city, formData.permanent_state, formData.permanent_zip].filter(Boolean).join(', '),
+        } : undefined}
       />
     </div>
   );

@@ -1,0 +1,1951 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Button, Input, Modal } from '../../components/UI';
+import { InviteGuestModal } from '../../components/InviteGuestModal';
+import AgreementSignModal, { type PrefilledGuestInfo } from '../../components/AgreementSignModal';
+import PendingSignatureModal from '../../components/PendingSignatureModal';
+import HelpCenter from '../Support/HelpCenter';
+import { UserSession } from '../../types';
+import { dashboardApi, authApi, agreementsApi, APP_ORIGIN } from '../../services/api';
+import type { OwnerInvitationView, OwnerAuditLogEntry, GuestPendingInviteView, GuestStayView } from '../../services/api';
+import { copyToClipboard } from '../../utils/clipboard';
+import { PENDING_INVITE_STORAGE_KEY } from '../Guest/GuestLogin';
+
+type TenantTab = 'stays' | 'invitations' | 'logs' | 'help';
+
+const DROPBOX_REDIRECT_INVITATION_CODE = 'docustay_dropbox_redirect_invitation_code';
+const DROPBOX_REDIRECT_SIGNATURE_ID = 'docustay_dropbox_redirect_signature_id';
+
+/** One "stay" for tenant = their assigned unit (here/away is per property/unit). */
+type TenantUnitCard = {
+  unit_id: number;
+  unit_label: string;
+  property_name: string;
+  property_address: string;
+};
+
+type StayFilter = 'all' | 'ongoing' | 'future' | 'completed' | 'future_invites';
+
+function parseInviteCode(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  const fromHash = trimmed.includes('#invite/') ? trimmed.split('#invite/').pop() || '' : '';
+  const fromPath = trimmed.includes('invite/') ? trimmed.split('invite/').pop() || '' : '';
+  const code = (fromHash || fromPath || trimmed).split(/[?#]/)[0];
+  return code.trim().toUpperCase();
+}
+
+function formatDate(s: string): string {
+  return new Date(s).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+/** Today as YYYY-MM-DD for date comparisons. */
+function getTodayStr(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function daysLeft(endDateStr: string): number {
+  const end = new Date(endDateStr);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  end.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.ceil((end.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)));
+}
+
+/** List of YYYY-MM-DD strings from start (inclusive) to end (inclusive). */
+function dateRange(startStr: string, endStr: string): string[] {
+  const out: string[] = [];
+  const start = new Date(startStr);
+  const end = new Date(endStr);
+  const cur = new Date(start);
+  while (cur <= end) {
+    const y = cur.getFullYear();
+    const m = String(cur.getMonth() + 1).padStart(2, '0');
+    const d = String(cur.getDate()).padStart(2, '0');
+    out.push(`${y}-${m}-${d}`);
+    cur.setDate(cur.getDate() + 1);
+  }
+  return out;
+}
+
+/** True if [start1, end1] overlaps [start2, end2] (dates as YYYY-MM-DD or parseable strings). */
+function datesOverlap(start1: string, end1: string, start2: string, end2: string): boolean {
+  const a1 = new Date(start1).getTime();
+  const a2 = new Date(end1).getTime();
+  const b1 = new Date(start2).getTime();
+  const b2 = new Date(end2).getTime();
+  return a1 < b2 && a2 > b1;
+}
+
+const TenantDashboard: React.FC<{
+  user: UserSession;
+  navigate: (v: string) => void;
+  setLoading?: (l: boolean) => void;
+  notify?: (t: 'success' | 'error', m: string) => void;
+}> = ({ user, navigate, setLoading = () => {}, notify = (_t: 'success' | 'error', _m: string) => {} }) => {
+  const [unitData, setUnitData] = useState<{ unit: { id: number; unit_label: string; occupancy_status: string } | null; property: { id: number; name: string; address: string } | null } | null>(null);
+  const [loading, setLoadingState] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedUnit, setSelectedUnit] = useState<TenantUnitCard | null>(null);
+  const [invitations, setInvitations] = useState<OwnerInvitationView[]>([]);
+  const [stays, setStays] = useState<GuestStayView[]>([]);
+  const [guestHistory, setGuestHistory] = useState<Array<{ stay_id: number; guest_name: string; property_name: string; stay_start_date: string; stay_end_date: string; checked_out_at?: string | null }>>([]);
+  const [inviteLinkInput, setInviteLinkInput] = useState('');
+  const [inviteModalOpen, setInviteModalOpen] = useState(false);
+  // Presence per selected unit (here/away per property)
+  const [presence, setPresence] = useState<'present' | 'away'>('present');
+  const [awayStartedAt, setAwayStartedAt] = useState<string | null>(null);
+  const [guestsAuthorizedDuringAway, setGuestsAuthorizedDuringAway] = useState(false);
+  const [presenceUpdating, setPresenceUpdating] = useState(false);
+  const [showAwayConfirm, setShowAwayConfirm] = useState(false);
+  const [awayGuestsAuthorized, setAwayGuestsAuthorized] = useState(false);
+  const [propertyLogs, setPropertyLogs] = useState<OwnerAuditLogEntry[]>([]);
+  const [propertyLogsLoading, setPropertyLogsLoading] = useState(false);
+  const [propertyLogsLoadedOnce, setPropertyLogsLoadedOnce] = useState(false);
+  const [logsFromDate, setLogsFromDate] = useState('');
+  const [logsToDate, setLogsToDate] = useState('');
+  const [logsCategory, setLogsCategory] = useState('');
+  const [logsSearch, setLogsSearch] = useState('');
+  const [logMessageModalEntry, setLogMessageModalEntry] = useState<OwnerAuditLogEntry | null>(null);
+  const [agreementModalCode, setAgreementModalCode] = useState<string | null>(null);
+  const [prefilledGuestInfoForModal, setPrefilledGuestInfoForModal] = useState<PrefilledGuestInfo | null>(null);
+  const [addingInvite, setAddingInvite] = useState(false);
+  const [showLiveLinkModal, setShowLiveLinkModal] = useState(false);
+  const [liveLinkSlug, setLiveLinkSlug] = useState<string | null>(null);
+  const [showVerifyQRModal, setShowVerifyQRModal] = useState(false);
+  const [verifyQRInviteId, setVerifyQRInviteId] = useState<string | null>(null);
+  const [copyToast, setCopyToast] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<TenantTab>('stays');
+  const [stayFilter, setStayFilter] = useState<StayFilter>('all');
+  const [showCancelStayConfirm, setShowCancelStayConfirm] = useState(false);
+  const [cancellingStay, setCancellingStay] = useState(false);
+  const [showEndStayConfirm, setShowEndStayConfirm] = useState(false);
+  const [endingStay, setEndingStay] = useState(false);
+  const [pendingInvites, setPendingInvites] = useState<GuestPendingInviteView[]>([]);
+  const [pendingSignatureModalInvite, setPendingSignatureModalInvite] = useState<GuestPendingInviteView | null>(null);
+  const [selectedStay, setSelectedStay] = useState<GuestStayView | null>(null);
+  const [checkingInStay, setCheckingInStay] = useState<GuestStayView | null>(null);
+  const [endStayConfirm, setEndStayConfirm] = useState<GuestStayView | null>(null);
+  const [endingGuestStay, setEndingGuestStay] = useState(false);
+  const [cancelStayConfirm, setCancelStayConfirm] = useState<GuestStayView | null>(null);
+  const [cancellingGuestStay, setCancellingGuestStay] = useState(false);
+  const [generatedInviteLink, setGeneratedInviteLink] = useState<string | null>(null);
+  const acceptFailedRef = useRef<Set<string>>(new Set());
+
+  const openAgreementModal = useCallback((code: string) => {
+    // Clear any stale Dropbox redirect state so we don't accept an invite from a previous attempt
+    try {
+      sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
+      sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
+    } catch { /* ignore */ }
+    setPrefilledGuestInfoForModal({
+      full_name: (user?.user_name || '').trim(),
+      email: (user?.email || '').trim(),
+      phone: (user as { phone?: string })?.phone ?? '',
+      permanent_address: '',
+    });
+    setAgreementModalCode(code);
+  }, [user]);
+
+  const loadData = useCallback(async () => {
+    setError(null);
+    try {
+      const data = await dashboardApi.tenantUnit();
+      setUnitData(data);
+      const [invites, history, pendingData, staysData] = await Promise.all([
+        dashboardApi.tenantInvitations().catch(() => []),
+        dashboardApi.tenantGuestHistory().then((s) =>
+          s.map((x) => ({
+            stay_id: x.stay_id,
+            guest_name: x.guest_name,
+            property_name: x.property_name,
+            stay_start_date: x.stay_start_date,
+            stay_end_date: x.stay_end_date,
+            checked_out_at: x.checked_out_at,
+          }))
+        ).catch(() => []),
+        dashboardApi.guestPendingInvites().catch(() => [] as GuestPendingInviteView[]),
+        dashboardApi.guestStays().catch(() => [] as GuestStayView[]),
+      ]);
+      setInvitations(invites);
+      setGuestHistory(history);
+      setPendingInvites(pendingData);
+      const uniqueStays = [...new Map(staysData.map((s) => [s.stay_id, s])).values()];
+      setStays(uniqueStays);
+    } catch (e) {
+      const msg = (e as Error)?.message || 'Failed to load dashboard.';
+      setError(msg);
+      notify('error', msg);
+    } finally {
+      setLoadingState(false);
+    }
+  }, [notify]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  // After redirect back from Dropbox: poll signature until completed, then accept invite so unit/stay appears
+  useEffect(() => {
+    const code = sessionStorage.getItem(DROPBOX_REDIRECT_INVITATION_CODE);
+    const sigIdStr = sessionStorage.getItem(DROPBOX_REDIRECT_SIGNATURE_ID);
+    if (!code || !sigIdStr) return;
+    const sigId = parseInt(sigIdStr, 10);
+    if (!Number.isFinite(sigId)) {
+      sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
+      sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
+      return;
+    }
+    const POLL_INTERVAL_MS = 3000;
+    const MAX_POLLS = 40;
+    let pollCount = 0;
+    const t = setInterval(() => {
+      pollCount += 1;
+      agreementsApi.getSignatureStatus(sigId).then((res) => {
+        if (res.completed) {
+          clearInterval(t);
+          sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
+          sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
+          authApi.acceptInvite(code, sigId).then(async () => {
+            await loadData();
+            notify('success', 'Your stay is confirmed. It will appear in your current or upcoming stays.');
+          }).catch((e) => {
+            notify('error', (e as Error)?.message ?? 'Could not confirm your stay.');
+            loadData();
+          });
+        }
+      }).catch(() => {});
+
+      if (pollCount >= MAX_POLLS) {
+        clearInterval(t);
+        sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
+        sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
+      }
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(t);
+  }, [loadData, notify]);
+
+  // When backend reports signature complete but not yet accepted, accept so stay appears
+  useEffect(() => {
+    if (!pendingInvites.length) return;
+    const toAccept = pendingInvites.filter(
+      (inv): inv is GuestPendingInviteView & { accept_now_signature_id: number } => {
+        const sid = (inv as GuestPendingInviteView).accept_now_signature_id;
+        if (typeof sid !== 'number') return false;
+        const key = `${inv.invitation_code}:${sid}`;
+        if (acceptFailedRef.current.has(key)) return false;
+        return true;
+      }
+    );
+    if (toAccept.length === 0) return;
+    Promise.all(
+      toAccept.map((inv) => authApi.acceptInvite(inv.invitation_code, inv.accept_now_signature_id))
+    ).then(() => {
+      loadData();
+      notify('success', 'Your stay is confirmed. It will appear in your dashboard.');
+    }).catch((e) => {
+      toAccept.forEach((inv) => acceptFailedRef.current.add(`${inv.invitation_code}:${inv.accept_now_signature_id}`));
+      notify('error', (e as Error)?.message ?? 'Could not confirm your stay.');
+      loadData();
+    });
+  }, [pendingInvites, loadData, notify]);
+
+  // When user returns to the tab (e.g. after signing in Dropbox in another tab), refetch
+  useEffect(() => {
+    const hasPendingDropbox = () => pendingInvites.some((inv) => inv.needs_dropbox_signature);
+    if (!hasPendingDropbox()) return;
+    const onFocus = () => loadData();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [pendingInvites, loadData]);
+
+  // Delayed refetch when there are pending Dropbox invites
+  useEffect(() => {
+    const hasPendingDropbox = pendingInvites.some((inv) => inv.needs_dropbox_signature);
+    if (!hasPendingDropbox) return;
+    const t = setTimeout(() => loadData(), 5000);
+    return () => clearTimeout(t);
+  }, [pendingInvites, loadData]);
+
+  // When "Complete signing" modal is open: poll signature status; when completed, accept invite and close modal
+  useEffect(() => {
+    const inv = pendingSignatureModalInvite;
+    const sigId = inv?.pending_signature_id;
+    if (!inv || sigId == null || typeof sigId !== 'number') return;
+    const POLL_MS = 3000;
+    const MAX_POLLS = 80;
+    let count = 0;
+    const t = setInterval(() => {
+      count += 1;
+      agreementsApi.getSignatureStatus(sigId).then((res) => {
+        if (res.completed) {
+          clearInterval(t);
+          authApi.acceptInvite(inv.invitation_code, sigId).then(() => {
+            setPendingSignatureModalInvite(null);
+            loadData();
+            notify('success', 'Your stay is confirmed. It will appear in your dashboard.');
+          }).catch((e) => {
+            notify('error', (e as Error)?.message ?? 'Could not confirm your stay.');
+            loadData();
+          });
+        }
+      }).catch(() => {});
+      if (count >= MAX_POLLS) clearInterval(t);
+    }, POLL_MS);
+    return () => clearInterval(t);
+  }, [pendingSignatureModalInvite, loadData, notify]);
+
+  // Process invite code stored during login/signup (same as GuestDashboard)
+  useEffect(() => {
+    const code = sessionStorage.getItem(PENDING_INVITE_STORAGE_KEY);
+    if (!code) return;
+    sessionStorage.removeItem(PENDING_INVITE_STORAGE_KEY);
+    dashboardApi.guestAddPendingInvite(code)
+      .then(() => {
+        loadData();
+        openAgreementModal(code);
+      })
+      .catch((e) => {
+        loadData();
+        notify('error', (e as Error)?.message ?? 'Invalid or expired invitation.');
+      });
+  }, [loadData, notify, openAgreementModal]);
+
+  // When unit data loads, set selected unit to the only one if we have it
+  useEffect(() => {
+    if (unitData?.unit && unitData?.property && !selectedUnit) {
+      setSelectedUnit({
+        unit_id: unitData.unit.id,
+        unit_label: unitData.unit.unit_label,
+        property_name: unitData.property.name || 'Property',
+        property_address: unitData.property.address || '',
+      });
+    }
+  }, [unitData, selectedUnit]);
+
+  // Fetch presence for the selected unit (here/away per property)
+  useEffect(() => {
+    if (!selectedUnit?.unit_id) {
+      setPresence('present');
+      setAwayStartedAt(null);
+      setGuestsAuthorizedDuringAway(false);
+      setShowAwayConfirm(false);
+      return;
+    }
+    dashboardApi.getPresence(selectedUnit.unit_id).then((p) => {
+      setPresence((p.status as 'present' | 'away') || 'present');
+      setAwayStartedAt(p.away_started_at || null);
+      setGuestsAuthorizedDuringAway(p.guests_authorized_during_away ?? false);
+    }).catch(() => {});
+  }, [selectedUnit?.unit_id]);
+
+  const loadPropertyLogs = useCallback(() => {
+    setPropertyLogsLoading(true);
+    const from_ts = logsFromDate ? `${logsFromDate}T00:00:00.000Z` : undefined;
+    const to_ts = logsToDate ? `${logsToDate}T23:59:59.999Z` : undefined;
+    dashboardApi.tenantLogs({
+      from_ts,
+      to_ts,
+      category: logsCategory.trim() || undefined,
+      search: logsSearch.trim() || undefined,
+    })
+      .then(setPropertyLogs)
+      .catch(() => setPropertyLogs([]))
+      .finally(() => {
+        setPropertyLogsLoading(false);
+        setPropertyLogsLoadedOnce(true);
+      });
+  }, [logsFromDate, logsToDate, logsCategory, logsSearch]);
+
+  useEffect(() => {
+    if (activeTab === 'logs') loadPropertyLogs();
+  }, [activeTab, loadPropertyLogs]);
+
+  const doSetPresence = useCallback(async (status: 'present' | 'away', guestsAuthorized?: boolean) => {
+    if (!selectedUnit?.unit_id) return;
+    setPresenceUpdating(true);
+    setShowAwayConfirm(false);
+    try {
+      const res = await dashboardApi.setPresence(selectedUnit.unit_id, status, guestsAuthorized);
+      setPresence((res.presence as 'present' | 'away') || status);
+      setAwayStartedAt(res.away_started_at ?? null);
+      setGuestsAuthorizedDuringAway(res.guests_authorized_during_away ?? false);
+      notify('success', `Status set to ${status}`);
+    } catch (e) {
+      notify('error', (e as Error)?.message || 'Failed to update status');
+    } finally {
+      setPresenceUpdating(false);
+    }
+  }, [selectedUnit?.unit_id, notify]);
+
+  const handlePresenceToggle = useCallback(() => {
+    if (!selectedUnit?.unit_id) return;
+    if (presence === 'present') {
+      setShowAwayConfirm(true);
+      setAwayGuestsAuthorized(false);
+      return;
+    }
+    doSetPresence('present');
+  }, [selectedUnit?.unit_id, presence, doSetPresence]);
+
+  const handleAddInviteLink = useCallback(() => {
+    const code = parseInviteCode(inviteLinkInput);
+    if (!code) {
+      notify('error', 'Please enter a valid invitation link or code.');
+      return;
+    }
+    setAddingInvite(true);
+    dashboardApi.guestAddPendingInvite(code)
+      .then(() => {
+        setInviteLinkInput('');
+        loadData();
+        openAgreementModal(code);
+        notify('success', 'Invitation added. Review and sign the agreement below.');
+      })
+      .catch((e) => {
+        notify('error', (e as Error)?.message ?? 'Invalid or expired invitation. Please check the link.');
+      })
+      .finally(() => setAddingInvite(false));
+  }, [inviteLinkInput, loadData, notify, openAgreementModal]);
+
+  const handleAgreementSigned = useCallback(async (signatureId: number) => {
+    if (!agreementModalCode) return;
+    try {
+      await authApi.acceptInvite(agreementModalCode, signatureId);
+      notify('success', 'Invitation accepted.');
+      setAgreementModalCode(null);
+      loadData();
+    } catch (e) {
+      notify('error', (e as Error)?.message ?? 'Could not accept invitation.');
+    }
+  }, [agreementModalCode, loadData, notify]);
+
+  const handleCancelStay = useCallback(async () => {
+    setCancellingStay(true);
+    try {
+      await dashboardApi.tenantCancelFutureAssignment();
+      notify('success', 'Future stay cancelled. Your assignment has been removed.');
+      setShowCancelStayConfirm(false);
+      loadData();
+    } catch (e) {
+      notify('error', (e as Error)?.message ?? 'Could not cancel stay.');
+    } finally {
+      setCancellingStay(false);
+    }
+  }, [loadData, notify]);
+
+  const handleEndStay = useCallback(async () => {
+    setEndingStay(true);
+    try {
+      await dashboardApi.tenantEndAssignment();
+      notify('success', 'Checkout complete. Your stay has ended and status has been updated.');
+      setShowEndStayConfirm(false);
+      loadData();
+    } catch (e) {
+      notify('error', (e as Error)?.message ?? 'Could not end stay.');
+    } finally {
+      setEndingStay(false);
+    }
+  }, [loadData, notify]);
+
+  const handleGuestCheckIn = useCallback(async (s: GuestStayView) => {
+    setCheckingInStay(s);
+    try {
+      await dashboardApi.guestCheckIn(s.stay_id);
+      notify('success', 'You are checked in. Your stay is now active.');
+      loadData();
+    } catch (e) {
+      notify('error', (e as Error)?.message ?? 'Could not check in.');
+    } finally {
+      setCheckingInStay(null);
+    }
+  }, [loadData, notify]);
+
+  const handleGuestEndStay = useCallback(async () => {
+    if (!endStayConfirm) return;
+    setEndingGuestStay(true);
+    try {
+      await dashboardApi.guestEndStay(endStayConfirm.stay_id);
+      notify('success', 'Checkout complete. Your stay has ended.');
+      setEndStayConfirm(null);
+      setSelectedStay(null);
+      loadData();
+    } catch (e) {
+      notify('error', (e as Error)?.message ?? 'Could not end stay.');
+    } finally {
+      setEndingGuestStay(false);
+    }
+  }, [endStayConfirm, loadData, notify]);
+
+  const handleGuestCancelStay = useCallback(async () => {
+    if (!cancelStayConfirm) return;
+    setCancellingGuestStay(true);
+    try {
+      await dashboardApi.guestCancelStay(cancelStayConfirm.stay_id);
+      notify('success', 'Stay cancelled. Your upcoming stay has been removed.');
+      setCancelStayConfirm(null);
+      setSelectedStay(null);
+      loadData();
+    } catch (e) {
+      notify('error', (e as Error)?.message ?? 'Could not cancel stay.');
+    } finally {
+      setCancellingGuestStay(false);
+    }
+  }, [cancelStayConfirm, loadData, notify]);
+
+  if (loading) {
+    return (
+      <div className="flex-grow w-full max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-8 flex items-center justify-center min-h-[200px]">
+        <p className="text-slate-500 text-sm">Loading…</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex-grow w-full max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-8">
+        <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
+          <p className="text-slate-600 text-sm mb-4">Something went wrong loading your dashboard.</p>
+          <Button variant="primary" className="rounded-lg font-medium" onClick={() => { setError(null); setLoadingState(true); loadData(); }}>Try again</Button>
+        </div>
+      </div>
+    );
+  }
+
+  const isEmpty = !unitData?.unit && stays.length === 0 && pendingInvites.length === 0;
+  const unitCards: TenantUnitCard[] = unitData?.unit && unitData?.property
+    ? [{
+        unit_id: unitData.unit.id,
+        unit_label: unitData.unit.unit_label,
+        property_name: unitData.property.name || 'Property',
+        property_address: unitData.property.address || '',
+      }]
+    : [];
+  const today = getTodayStr();
+  const startDate = unitData?.stay_start_date ?? null;
+  const endDate = unitData?.stay_end_date ?? null;
+  const isUnitRevoked = unitData?.token_state === 'REVOKED';
+  const isUnitFuture = !!(startDate && today < startDate && !isUnitRevoked);
+  const isUnitCompleted = !!((endDate && today > endDate) || isUnitRevoked);
+  const isUnitOngoing = !isUnitFuture && !isUnitCompleted;
+
+  const ongoingStays = stays.filter(
+    (s) => s.checked_in_at && !s.checked_out_at && !s.cancelled_at && s.approved_stay_start_date <= today && s.approved_stay_end_date >= today
+  );
+  const futureStays = stays.filter(
+    (s) => !s.checked_out_at && !s.cancelled_at && s.approved_stay_start_date > today
+  );
+  const completedStays = stays.filter(
+    (s) => s.checked_out_at != null || s.cancelled_at != null || (s.approved_stay_end_date < today && s.checked_in_at)
+  );
+
+  const ongoingCount = unitCards.filter(() => isUnitOngoing).length + ongoingStays.length;
+  const futureCount = unitCards.filter(() => isUnitFuture).length + futureStays.length;
+  const completedCount = unitCards.filter(() => isUnitCompleted).length + completedStays.length;
+  const futureInvites = pendingInvites.filter((inv) =>
+    !stays.some((s) => datesOverlap(inv.stay_start_date, inv.stay_end_date, s.approved_stay_start_date, s.approved_stay_end_date))
+  );
+  const futureInvitesCount = futureInvites.length;
+  const filteredStays: GuestStayView[] =
+    stayFilter === 'all'
+      ? stays
+      : stayFilter === 'ongoing'
+        ? ongoingStays
+        : stayFilter === 'future'
+          ? futureStays
+          : stayFilter === 'completed'
+            ? completedStays
+            : [];
+  const filteredUnitCards: TenantUnitCard[] =
+    stayFilter === 'all'
+      ? unitCards
+      : stayFilter === 'ongoing'
+        ? unitCards.filter(() => isUnitOngoing)
+        : stayFilter === 'future'
+          ? unitCards.filter(() => isUnitFuture)
+          : stayFilter === 'completed'
+            ? unitCards.filter(() => isUnitCompleted)
+            : [];
+  const filterButtons: { id: StayFilter; label: string; count: number }[] = [
+    { id: 'all', label: 'All stays', count: unitCards.length + stays.length },
+    { id: 'ongoing', label: 'Ongoing stay', count: ongoingCount },
+    { id: 'future', label: 'Future stay', count: futureCount },
+    { id: 'completed', label: 'Completed', count: completedCount },
+    { id: 'future_invites', label: 'Future invites', count: futureInvitesCount },
+  ];
+  const selected = selectedUnit ?? (stayFilter === 'future_invites' ? null : filteredUnitCards[0] ?? unitCards[0]) ?? null;
+  const dLeft = selected && startDate && endDate && today <= endDate ? daysLeft(endDate) : 0;
+  const totalDays = selected && startDate && endDate ? Math.max(1, Math.ceil((new Date(endDate).getTime() - new Date(startDate).getTime()) / (1000 * 60 * 60 * 24))) : 1;
+  const elapsedDays = Math.max(0, totalDays - dLeft);
+  const progressPercent = selected && startDate && endDate ? Math.min(100, (elapsedDays / totalDays) * 100) : 0;
+
+  return (
+    <div className="flex h-[calc(100vh-80px)] overflow-hidden bg-[#f0f4ff]/50">
+      {/* Sidebar */}
+      <aside className="hidden lg:flex w-64 min-w-[16rem] flex-shrink-0 flex-col bg-white/80 backdrop-blur-xl border-r border-slate-200 p-5">
+        <nav className="space-y-1">
+          {[
+            { id: 'stays' as TenantTab, label: 'My stays', icon: 'M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' },
+            { id: 'invitations' as TenantTab, label: 'Add invitation', icon: 'M12 6v6m0 0v6m0-6h6m-6 0H6' },
+            { id: 'logs' as TenantTab, label: 'Event ledger', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+            { id: 'help' as TenantTab, label: 'Help Center', icon: 'M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
+          ].map((item) => (
+            <button
+              key={item.id}
+              onClick={() => setActiveTab(item.id)}
+              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-medium ${activeTab === item.id ? 'bg-slate-100 text-slate-800 border border-slate-300' : 'text-slate-600 hover:text-slate-800 hover:bg-slate-50'}`}
+            >
+              <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={item.icon} /></svg>
+              {item.label}
+            </button>
+          ))}
+        </nav>
+      </aside>
+
+      {/* Main content */}
+      <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+        <div className="lg:hidden mb-4">
+          <select
+            value={activeTab}
+            onChange={(e) => setActiveTab(e.target.value as TenantTab)}
+            className="w-full max-w-xs rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm"
+          >
+            <option value="stays">My stays</option>
+            <option value="invitations">Add invitation</option>
+            <option value="logs">Event ledger</option>
+            <option value="help">Help Center</option>
+          </select>
+        </div>
+
+        {/* Invitations tab */}
+        {activeTab === 'invitations' && (
+          <div className="space-y-6 w-full">
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-slate-900 mb-1">Add invitation</h2>
+              <p className="text-sm text-slate-600 mb-4">
+                {isEmpty ? 'Paste an invitation link from your host to view and sign the agreement.' : 'Have another link? Add it below to review and sign.'}
+              </p>
+              <div className="flex flex-col sm:flex-row gap-3">
+                <div className="flex-1 min-w-0">
+                  <Input
+                    label="Invitation link or code"
+                    name="invite_link"
+                    value={inviteLinkInput}
+                    onChange={(e) => setInviteLinkInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddInviteLink(); } }}
+                    placeholder="Paste link or code (e.g. INV-XXXX)"
+                  />
+                </div>
+                <Button
+                  type="button"
+                  className="shrink-0 self-stretch sm:self-auto sm:mt-7 h-10 px-5 rounded-lg font-medium text-white border-0 bg-[#6B90F2] hover:bg-[#5a7ed9]"
+                  onClick={handleAddInviteLink}
+                  disabled={addingInvite || !parseInviteCode(inviteLinkInput)}
+                >
+                  {addingInvite ? 'Adding…' : 'View & sign'}
+                </Button>
+              </div>
+            </div>
+            {pendingInvites.filter((inv) => inv.needs_dropbox_signature).length > 0 && (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-6 shadow-sm">
+                <h2 className="text-base font-semibold text-slate-900 mb-1">Pending actions</h2>
+                <p className="text-sm text-slate-600 mb-2">Complete signing in Dropbox to confirm these stays.</p>
+                <p className="text-sm text-slate-500 mb-4">
+                  Already signed? <button type="button" onClick={() => loadData()} className="text-blue-600 hover:text-blue-800 font-medium underline">Check again</button>
+                </p>
+                <ul className="space-y-3">
+                  {pendingInvites.filter((inv) => inv.needs_dropbox_signature).map((inv) => (
+                    <li key={inv.invitation_code} className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl border border-amber-100 bg-white">
+                      <div className="min-w-0 flex-1">
+                        <p className="font-semibold text-slate-900">{inv.property_name}{inv.unit_label ? ` — Unit ${inv.unit_label}` : ''}</p>
+                        <p className="text-sm text-slate-500 mt-0.5">{formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</p>
+                        <p className="text-xs text-amber-700 font-medium mt-1">Awaiting your signature in Dropbox</p>
+                      </div>
+                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => setPendingSignatureModalInvite(inv)}>Complete signing</Button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-base font-semibold text-slate-900 mb-1">Future invites</h2>
+              <p className="text-sm text-slate-500 mb-4">Invitations that don&apos;t overlap your existing stays.</p>
+              {futureInvites.length === 0 ? (
+                <p className="text-slate-500 text-sm">No future invites. Add an invitation link above.</p>
+              ) : (
+                <ul className="space-y-3">
+                  {futureInvites.map((inv) => (
+                    <li key={inv.invitation_code} className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl border border-slate-200 bg-slate-50/50">
+                      <div className="min-w-0 flex-1">
+                        <p className="font-semibold text-slate-900">{inv.property_name}{inv.unit_label ? ` — Unit ${inv.unit_label}` : ''}</p>
+                        <p className="text-sm text-slate-500 mt-0.5">{formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</p>
+                      </div>
+                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => (inv.needs_dropbox_signature ? setPendingSignatureModalInvite(inv) : openAgreementModal(inv.invitation_code))}>
+                        {inv.needs_dropbox_signature ? 'Complete signing' : 'Review & sign'}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Event ledger tab */}
+        {activeTab === 'logs' && (
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h2 className="text-lg font-semibold text-slate-900 mb-2">Event ledger</h2>
+            <p className="text-sm text-slate-500 mb-4">Activity for your property, your actions, and invitations you created.</p>
+            <div className="flex flex-wrap gap-3 items-center mb-4">
+              <input type="date" value={logsFromDate} onChange={(e) => setLogsFromDate(e.target.value)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              <input type="date" value={logsToDate} onChange={(e) => setLogsToDate(e.target.value)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm" />
+              <select value={logsCategory} onChange={(e) => setLogsCategory(e.target.value)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm min-w-[10rem]">
+                <option value="">All categories</option>
+                <option value="status_change">Status change</option>
+                <option value="presence">Presence / Away</option>
+                <option value="guest_signature">Guest signature</option>
+                <option value="billing">Billing</option>
+              </select>
+              <input type="text" placeholder="Search…" value={logsSearch} onChange={(e) => setLogsSearch(e.target.value)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm w-40" />
+              <Button variant="outline" onClick={loadPropertyLogs} disabled={propertyLogsLoading}>{propertyLogsLoading ? 'Loading…' : 'Apply filters'}</Button>
+            </div>
+            {propertyLogsLoading && propertyLogs.length === 0 ? (
+              <p className="p-6 text-slate-500 text-center text-sm">Loading…</p>
+            ) : propertyLogsLoadedOnce && propertyLogs.length === 0 ? (
+              <p className="p-6 text-slate-500 text-center text-sm">No events.</p>
+            ) : propertyLogs.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead className="bg-slate-100 text-slate-500 uppercase text-[10px] tracking-widest font-extrabold border-b border-slate-200">
+                    <tr>
+                      <th className="px-4 py-3">Time</th>
+                      <th className="px-4 py-3">Category</th>
+                      <th className="px-4 py-3">Title</th>
+                      <th className="px-4 py-3">Actor</th>
+                      <th className="px-4 py-3">Message</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200">
+                    {propertyLogs.map((entry) => (
+                      <tr key={entry.id} className="hover:bg-slate-50">
+                        <td className="px-4 py-2 text-slate-600 text-sm whitespace-nowrap">{entry.created_at ? new Date(entry.created_at).toISOString().replace('T', ' ').slice(0, 19) + 'Z' : '—'}</td>
+                        <td className="px-4 py-2">
+                          <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
+                            entry.category === 'failed_attempt' ? 'bg-red-100 text-red-800' :
+                            entry.category === 'guest_signature' ? 'bg-emerald-100 text-emerald-800' :
+                            entry.category === 'shield_mode' ? 'bg-violet-100 text-violet-800' :
+                            entry.category === 'dead_mans_switch' ? 'bg-amber-100 text-amber-800' :
+                            entry.category === 'billing' ? 'bg-slate-200 text-slate-800' :
+                            entry.category === 'presence' ? 'bg-teal-100 text-teal-800' : 'bg-sky-100 text-sky-800'
+                          }`}>
+                            {entry.category === 'shield_mode' ? 'Shield Mode' : entry.category === 'dead_mans_switch' ? "Dead Man's Switch" : entry.category === 'billing' ? 'Billing' : entry.category === 'presence' ? 'Presence' : entry.category.replace('_', ' ')}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 font-medium text-slate-800 text-sm">{entry.title}</td>
+                        <td className="px-4 py-2 text-slate-600 text-sm">{entry.actor_email ?? '—'}</td>
+                        <td className="px-4 py-2 text-slate-600 text-sm max-w-xs">
+                          <span className="truncate block">{entry.message}</span>
+                          <button type="button" onClick={() => setLogMessageModalEntry(entry)} className="text-sky-600 hover:text-sky-800 text-xs mt-0.5 focus:outline-none focus:underline">View full message</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </div>
+        )}
+
+        {/* Help tab */}
+        {activeTab === 'help' && (
+          <div className="max-w-3xl">
+            <HelpCenter navigate={() => {}} embedded />
+          </div>
+        )}
+
+        {/* Stays tab */}
+        {activeTab === 'stays' && (
+        <div className="flex flex-col lg:flex-row gap-6 lg:gap-8">
+          <div className="lg:w-80 xl:w-96 flex-shrink-0 space-y-4">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Filter</h3>
+              <div className="flex flex-wrap gap-2">
+                {filterButtons.map(({ id, label, count }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => { setStayFilter(id); if (id !== 'future_invites') { setSelectedUnit(null); setSelectedStay(null); } }}
+                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${stayFilter === id ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                  >
+                    {label} ({count})
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden max-h-[calc(100vh-20rem)] overflow-y-auto">
+              <div className="p-4">
+              {stayFilter === 'future_invites' ? (
+                futureInvites.length === 0 ? (
+                  <p className="text-slate-500 text-sm py-4">No future invites. Add an invitation link in the Add invitation tab.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {futureInvites.map((inv) => (
+                      <li key={inv.invitation_code} className="rounded-lg border border-slate-200 bg-slate-50/50 p-3">
+                        <p className="font-semibold text-slate-900 text-sm">{inv.property_name}{inv.unit_label ? ` — Unit ${inv.unit_label}` : ''}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">{formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</p>
+                        <Button variant="primary" className="mt-2 w-full text-xs h-8 py-1.5" onClick={() => (inv.needs_dropbox_signature ? setPendingSignatureModalInvite(inv) : openAgreementModal(inv.invitation_code))}>
+                          {inv.needs_dropbox_signature ? 'Complete signing' : 'Review & sign'}
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                )
+              ) : (filteredUnitCards.length === 0 && filteredStays.length === 0) ? (
+                <p className="text-slate-600 text-sm py-4">
+                  {stayFilter === 'all' ? 'No stays yet.' : stayFilter === 'completed' ? 'No completed stays.' : `No ${stayFilter} stays.`} Add an invitation link in the Add invitation tab.
+                </p>
+              ) : (
+            <div className="flex flex-col gap-2">
+              {filteredUnitCards.length > 0 && (
+                <>
+                  {filteredUnitCards.map((card) => {
+                    const td = getTodayStr();
+                    const sd = unitData?.stay_start_date ?? null;
+                    const ed = unitData?.stay_end_date ?? null;
+                    const isRevoked = unitData?.token_state === 'REVOKED';
+                    const isFuture = sd && td < sd && !isRevoked;
+                    const isUpcoming = sd && ed && td >= sd && td <= ed && !isRevoked;
+                    const isOngoing = !isFuture && !isUpcoming && (!ed || td <= ed) && !isRevoked;
+                    const isCancelled = isRevoked;
+                    const statusLabel = isCancelled ? 'CANCELLED' : isFuture ? 'FUTURE' : isUpcoming ? 'UPCOMING' : 'ONGOING';
+                    const statusClass = isCancelled
+                      ? 'bg-slate-100 text-slate-600 border border-slate-200'
+                      : isFuture
+                        ? 'bg-sky-200 text-white border-0'
+                        : isUpcoming
+                          ? 'bg-[#FFC107] text-white border-0'
+                          : 'bg-emerald-50 text-emerald-700 border border-emerald-100';
+                    const isSelected = !selectedStay && selected?.unit_id === card.unit_id;
+                    const addressDisplay = card.property_address || `${card.property_name}${card.unit_label ? ` — Unit ${card.unit_label}` : ''}`;
+                    return (
+                      <div
+                        key={card.unit_id}
+                        className={`rounded-xl border bg-white text-left transition-all ${
+                          isSelected
+                            ? 'border-slate-300 border-l-4 border-l-[#6B90F2] bg-[#6B90F2]/10 shadow-sm'
+                            : 'border-slate-200 hover:border-slate-300'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedUnit(isSelected ? null : card); setSelectedStay(null); }}
+                          className="w-full text-left p-4"
+                        >
+                          <div className="flex items-center gap-2 mb-2 flex-wrap">
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide ${statusClass}`}>
+                              {statusLabel}
+                            </span>
+                            {unitData?.region_code && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium text-slate-600 bg-slate-100 border border-slate-200">
+                                {unitData.region_code}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-sm font-semibold text-slate-900">{addressDisplay}</p>
+                          <p className="text-sm text-slate-500 mt-0.5">
+                            {sd && ed ? `${formatDate(sd)} – ${formatDate(ed)}` : sd ? `${formatDate(sd)} – Ongoing` : 'Your assigned unit'}
+                          </p>
+                        </button>
+                        {isUpcoming && (
+                          <div className="px-4 pb-4 pt-0">
+                            <button type="button" disabled className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-white bg-[#6F42C1] disabled:opacity-50 transition-colors flex items-center justify-center gap-2" onClick={(e) => e.stopPropagation()}>
+                              Check in
+                            </button>
+                          </div>
+                        )}
+                        {isFuture && !isCancelled && (
+                          <div className="px-4 pb-4 pt-0">
+                            <button type="button" className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2" onClick={(e) => { e.stopPropagation(); setShowCancelStayConfirm(true); }}>
+                              <span className="text-red-500 font-semibold">X</span> Cancel stay
+                            </button>
+                          </div>
+                        )}
+                        {isOngoing && !isUpcoming && (
+                          <div className="px-4 pb-4 pt-0">
+                            <button type="button" disabled className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-white bg-[#6F42C1] disabled:opacity-50 transition-colors flex items-center justify-center gap-2" onClick={(e) => e.stopPropagation()}>
+                              Check in
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+              {filteredStays.length > 0 && (
+                <>
+                  {filteredStays.map((s) => {
+                    const isStayOngoing = !!(s.checked_in_at && s.approved_stay_start_date <= today && s.approved_stay_end_date >= today);
+                    const isStayFuture = s.approved_stay_start_date > today;
+                    const isStayUpcoming = !s.checked_in_at && !s.checked_out_at && !s.cancelled_at && s.approved_stay_start_date <= today && s.approved_stay_end_date >= today;
+                    const canCheckIn = isStayUpcoming;
+                    const hasCheckedIn = !!(s.checked_in_at != null && s.checked_in_at !== '');
+                    const canCheckout = (hasCheckedIn || s.revoked_at != null) && !s.checked_out_at && !s.cancelled_at && s.approved_stay_end_date >= today;
+                    const canCancel = isStayFuture && !s.cancelled_at;
+                    const isSelected = selectedStay?.stay_id === s.stay_id;
+                    return (
+                      <div
+                        key={s.stay_id}
+                        className={`rounded-xl border bg-white text-left transition-all ${
+                          isSelected
+                            ? 'border-slate-300 border-l-4 border-l-[#6B90F2] bg-[#6B90F2]/10 shadow-sm'
+                            : 'border-slate-200 hover:border-slate-300'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedStay(isSelected ? null : s); setSelectedUnit(null); }}
+                          className="w-full text-left p-4"
+                        >
+                          <div className="flex items-center gap-2 mb-2 flex-wrap">
+                            {(s.revoked_at || s.vacate_by) && (
+                              <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide bg-red-50 text-red-700 border border-red-100">Revoked</span>
+                            )}
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide ${
+                              s.cancelled_at ? 'bg-amber-50 text-amber-700 border border-amber-100' : s.checked_out_at ? 'bg-slate-100 text-slate-600 border border-slate-200' : isStayOngoing ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : isStayUpcoming ? 'bg-[#FFC107] text-slate-900 border-0' : isStayFuture ? 'bg-slate-200 text-slate-700 border-0' : 'bg-slate-100 text-slate-600'
+                            }`}>
+                              {s.cancelled_at ? 'Cancelled' : s.checked_out_at ? 'Completed' : isStayOngoing ? 'Ongoing' : isStayUpcoming ? 'UPCOMING' : isStayFuture ? 'FUTURE' : 'Previous'}
+                            </span>
+                            <span className="text-slate-400 text-xs">{s.region_code}</span>
+                          </div>
+                          <p className="text-sm text-slate-600">
+                            {s.property_name}{s.unit_label ? ` — Unit ${s.unit_label}` : ''}
+                          </p>
+                          <p className="text-sm text-slate-500 mt-0.5">
+                            {formatDate(s.approved_stay_start_date)} – {formatDate(s.approved_stay_end_date)}
+                          </p>
+                        </button>
+                        {canCheckIn && (
+                          <div className="px-4 pb-4 pt-0">
+                            <button
+                              type="button"
+                              disabled={!!checkingInStay}
+                              className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-white bg-[#6F42C1] hover:bg-[#5e35a8] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                              onClick={(e) => { e.stopPropagation(); handleGuestCheckIn(s); }}
+                            >
+                              {checkingInStay?.stay_id === s.stay_id ? 'Checking in…' : 'Check in'}
+                            </button>
+                          </div>
+                        )}
+                        {canCheckout && (
+                          <div className="px-4 pb-4 pt-0">
+                            <button
+                              type="button"
+                              className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 transition-colors flex items-center justify-center gap-2"
+                              onClick={(e) => { e.stopPropagation(); setEndStayConfirm(s); }}
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                              Checkout
+                            </button>
+                          </div>
+                        )}
+                        {canCancel && (
+                          <div className="px-4 pb-4 pt-0">
+                            <button
+                              type="button"
+                              className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
+                              onClick={(e) => { e.stopPropagation(); setCancelStayConfirm(s); }}
+                            >
+                              <span className="text-red-500 font-semibold">X</span> Cancel stay
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+              )}
+              </div>
+            </div>
+          </div>
+
+          {/* Detail panel placeholder */}
+          {!selected && !selectedStay && stayFilter !== 'future_invites' && (
+            <div className="flex-1 min-w-0 flex items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50/50 p-12">
+              <p className="text-slate-500 text-sm text-center">Select your unit or a guest stay to view details and actions.</p>
+            </div>
+          )}
+
+      {/* Full-width detail when a guest stay is selected (My stays → other properties) */}
+      {selectedStay && stayFilter !== 'future_invites' && (() => {
+        const stay = selectedStay;
+        const detailHasCheckedIn = !!(stay.checked_in_at != null && stay.checked_in_at !== '');
+        const stayDLeft = daysLeft(stay.approved_stay_end_date);
+        const stayTotalDays = Math.max(1, Math.ceil((new Date(stay.approved_stay_end_date).getTime() - new Date(stay.approved_stay_start_date).getTime()) / (1000 * 60 * 60 * 24)));
+        const stayElapsedDays = Math.max(0, stayTotalDays - stayDLeft);
+        const stayProgressPercent = Math.min(100, (stayElapsedDays / stayTotalDays) * 100);
+        return (
+        <div className="flex-1 min-w-0 space-y-6 overflow-y-auto">
+          {stay.revoked_at || stay.vacate_by ? (
+            <div className="rounded-2xl border border-red-200 bg-red-50/80 p-5">
+              <div className="flex items-start gap-4">
+                <div className="w-10 h-10 rounded-lg bg-red-100 flex items-center justify-center flex-shrink-0">
+                  <svg className="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-base font-semibold text-red-900">Authorization Revoked</h3>
+                  {stay.revoked_at && (
+                    <p className="text-xs text-red-700 mt-1 font-medium">Effective date: {new Date(stay.revoked_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</p>
+                  )}
+                  <p className="text-sm text-red-800 mt-2">The Property Owner has revoked your authorization to occupy the property. You are required to vacate the premises immediately.</p>
+                  {stay.vacate_by && (
+                    <p className="text-sm text-red-700 mt-2 font-medium">Vacate by: {new Date(stay.vacate_by).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : null}
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
+            <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-8">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 mb-4 flex-wrap">
+                  <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide ${
+                    stay.cancelled_at
+                      ? 'bg-amber-50 text-amber-700 border border-amber-100'
+                      : stay.checked_out_at
+                        ? 'bg-slate-100 text-slate-600'
+                        : detailHasCheckedIn && stay.approved_stay_start_date <= today && stay.approved_stay_end_date >= today
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                          : !detailHasCheckedIn && stay.approved_stay_start_date <= today && stay.approved_stay_end_date >= today
+                            ? 'bg-[#FFC107] text-slate-900 border-0'
+                            : stay.approved_stay_start_date > today
+                              ? 'bg-slate-200 text-slate-700 border-0'
+                              : 'bg-slate-100 text-slate-600'
+                  }`}>
+                    {stay.cancelled_at
+                      ? 'Cancelled'
+                      : stay.checked_out_at
+                        ? 'Completed'
+                        : detailHasCheckedIn && stay.approved_stay_start_date <= today && stay.approved_stay_end_date >= today
+                          ? 'Ongoing'
+                          : !detailHasCheckedIn && stay.approved_stay_start_date <= today && stay.approved_stay_end_date >= today
+                            ? 'UPCOMING'
+                            : stay.approved_stay_start_date > today
+                              ? 'FUTURE'
+                              : 'Ended'}
+                  </span>
+                  <span className="text-slate-400">·</span>
+                  <span className="text-slate-500 text-sm">{stay.property_name}{stay.unit_label ? ` — Unit ${stay.unit_label}` : ''}</span>
+                  <span className="text-slate-400 text-sm">({stay.region_code})</span>
+                  {stay.invite_id && (
+                    <>
+                      <span className="text-slate-400">·</span>
+                      <span className="text-slate-500 text-sm font-mono">Invite ID: {stay.invite_id}</span>
+                      {stay.token_state && (
+                        <span className={`ml-1 px-1.5 py-0.5 rounded text-xs font-medium ${
+                          stay.token_state === 'BURNED' ? 'bg-[#28A745] text-white' :
+                          stay.token_state === 'EXPIRED' ? 'bg-slate-100 text-slate-600' :
+                          stay.token_state === 'REVOKED' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-600'
+                        }`}>
+                          {stay.token_state}
+                        </span>
+                      )}
+                    </>
+                  )}
+                </div>
+                <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight">
+                  {stay.cancelled_at ? 'Stay cancelled' : stay.checked_out_at ? 'Stay completed' : stay.approved_stay_end_date < today ? 'Stay ended' : stay.approved_stay_start_date > today ? 'Upcoming stay' : 'Current stay'}
+                </h1>
+                <div className="flex gap-6 mt-4">
+                  <div>
+                    <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">CHECK-IN</p>
+                    <p className="text-slate-900 font-medium mt-0.5">{formatDate(stay.approved_stay_start_date)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">CHECK-OUT</p>
+                    <p className="text-slate-900 font-medium mt-0.5">{formatDate(stay.approved_stay_end_date)}</p>
+                  </div>
+                </div>
+              </div>
+              <div className="md:w-56 flex flex-col gap-4 shrink-0">
+                <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-slate-800 rounded-full transition-all duration-500" style={{ width: `${stayProgressPercent}%` }} />
+                </div>
+                <p className="text-xs text-slate-400 font-medium">Stay progress</p>
+                {stay.property_live_slug && (
+                  <Button
+                    type="button"
+                    className="w-full h-11 rounded-lg font-medium text-white border-0 bg-[#007BFF] hover:bg-[#006ee6] focus:ring-[#007BFF]"
+                    onClick={() => { setLiveLinkSlug(stay.property_live_slug ?? null); setShowLiveLinkModal(true); }}
+                  >
+                    Open live link
+                  </Button>
+                )}
+                {stay.invite_id && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full h-11 rounded-lg font-medium bg-white border border-slate-300 text-slate-700 hover:bg-slate-50"
+                    onClick={() => { setVerifyQRInviteId(stay.invite_id ?? null); setShowVerifyQRModal(true); }}
+                  >
+                    Verify with QR code
+                  </Button>
+                )}
+                {!stay.checked_out_at && !stay.cancelled_at && stay.approved_stay_end_date >= today && stay.approved_stay_start_date <= today && !detailHasCheckedIn && (
+                  <button
+                    type="button"
+                    disabled={!!checkingInStay}
+                    className="w-full h-11 rounded-lg font-medium text-white bg-[#6F42C1] hover:bg-[#5e35a8] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                    onClick={() => handleGuestCheckIn(stay)}
+                  >
+                    {checkingInStay?.stay_id === stay.stay_id ? 'Checking in…' : 'Check in'}
+                  </button>
+                )}
+                {!stay.checked_out_at && !stay.cancelled_at && stay.approved_stay_end_date >= today && (detailHasCheckedIn || stay.revoked_at != null) && (
+                  <button
+                    type="button"
+                    className="w-full h-11 rounded-lg font-medium text-white bg-emerald-600 hover:bg-emerald-700 transition-colors flex items-center justify-center gap-2"
+                    onClick={() => setEndStayConfirm(stay)}
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                    Complete checkout
+                  </button>
+                )}
+                {!stay.cancelled_at && stay.approved_stay_start_date > today && (
+                  <button
+                    type="button"
+                    className="w-full h-11 rounded-lg font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
+                    onClick={() => setCancelStayConfirm(stay)}
+                  >
+                    <span className="text-red-500 font-semibold">X</span> Cancel stay
+                  </button>
+                )}
+              </div>
+            </div>
+          </section>
+          {!stay.checked_out_at && !stay.cancelled_at && stay.approved_stay_end_date >= today && (() => {
+            const allDays = dateRange(stay.approved_stay_start_date, stay.approved_stay_end_date);
+            const total = allDays.length;
+            const maxShow = 42;
+            const showDays = total <= maxShow ? allDays : allDays.slice(-maxShow);
+            return (
+              <section className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-700 mb-4">TIME LEFT ON YOUR STAY</h3>
+                <div className="flex flex-col sm:flex-row sm:items-center gap-8">
+                  <div className="flex-shrink-0">
+                    <div className="inline-flex flex-col items-center justify-center rounded-2xl bg-white border border-slate-200 shadow-inner px-8 py-6 min-w-[140px]">
+                      <span className="text-4xl md:text-5xl font-bold tabular-nums text-slate-900">
+                        {stayDLeft}
+                      </span>
+                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-600 mt-1">
+                        {stayDLeft === 0 ? 'DAY (CHECK-OUT TODAY)' : stayDLeft === 1 ? 'DAY LEFT' : 'DAYS LEFT'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-slate-500 mb-2">
+                      Stay timeline – {formatDate(stay.approved_stay_start_date)} → {formatDate(stay.approved_stay_end_date)}
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {showDays.map((dayStr) => {
+                        const isToday = dayStr === today;
+                        const isEnd = dayStr === stay.approved_stay_end_date;
+                        const isPast = dayStr < today;
+                        const dayNum = new Date(dayStr + 'T12:00:00').getDate();
+                        return (
+                          <div
+                            key={dayStr}
+                            title={`${dayStr}${isToday ? ' (today)' : ''}${isEnd ? ' (check-out)' : ''}`}
+                            className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-medium transition-all ${
+                              isToday
+                                ? 'bg-[#6F42C1] text-white ring-2 ring-[#6F42C1]/30 ring-offset-1'
+                                : isEnd
+                                  ? 'bg-[#FFC107] text-slate-900 font-semibold'
+                                  : isPast
+                                    ? 'bg-slate-200 text-slate-500'
+                                    : 'bg-slate-100 text-slate-700 border border-slate-200'
+                            }`}
+                          >
+                            {dayNum}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {total > maxShow && (
+                      <p className="text-xs text-slate-400 mt-2">Showing last {maxShow} days of stay</p>
+                    )}
+                  </div>
+                </div>
+              </section>
+            );
+          })()}
+        </div>
+        );
+      })()}
+
+      {/* Unit detail when a unit is selected */}
+      {selected && unitData && !selectedStay && stayFilter !== 'future_invites' && (
+        <div className="flex-1 min-w-0 space-y-6 overflow-y-auto">
+          {/* Hero: Current stay card - same layout as reference (badge, address, Invite ID, BURNED, CHECK-IN/OUT, Stay progress, Open live link, Verify QR, Check in) */}
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
+            {(() => {
+              const today = getTodayStr();
+              const startDate = unitData.stay_start_date ?? null;
+              const endDate = unitData.stay_end_date ?? null;
+              const isRevoked = unitData.token_state === 'REVOKED';
+              const isUpcoming = startDate && today < startDate && !isRevoked;
+              const isOngoing = startDate && endDate && today >= startDate && today <= endDate && !isRevoked;
+              const isPast = endDate && today > endDate;
+              const isCancelled = isRevoked;
+              const progressPercent = startDate && endDate
+                ? (() => {
+                    const start = new Date(startDate).getTime();
+                    const end = new Date(endDate).getTime();
+                    const now = new Date().getTime();
+                    if (now <= start) return 0;
+                    if (now >= end) return 100;
+                    return Math.round(((now - start) / (end - start)) * 100);
+                  })()
+                : 100;
+              return (
+                <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-8">
+                  <div className="min-w-0">
+                    {/* Target: single horizontal line — UPCOMING / Cancelled · address (FL) · Invite ID: INV-XXX · REVOKED */}
+                    <div className="flex items-center gap-2 mb-4 flex-nowrap overflow-x-hidden min-h-[2rem]">
+                      <span className={`inline-flex items-center shrink-0 px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide ${
+                        isCancelled ? 'bg-slate-100 text-slate-600 border border-slate-200' :
+                        isUpcoming ? 'bg-amber-200 text-amber-900' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                      }`}>
+                        {isCancelled ? 'CANCELLED' : isUpcoming ? 'UPCOMING' : 'Ongoing'}
+                      </span>
+                      <span className="text-slate-400 shrink-0">·</span>
+                      <span className="text-slate-500 text-sm shrink-0 min-w-0 truncate">
+                        {selected.property_address || selected.property_name}{selected.unit_label ? ` — Unit ${selected.unit_label}` : ''}{unitData.region_code ? ` (${unitData.region_code})` : ''}
+                      </span>
+                      {unitData.invite_id && (
+                        <>
+                          <span className="text-slate-400 shrink-0">·</span>
+                          <span className="text-slate-500 text-sm shrink-0">
+                            <span className="text-slate-500">Invite ID: </span>
+                            <span className="text-slate-600 font-medium font-mono">{unitData.invite_id}</span>
+                          </span>
+                          {unitData.token_state && (
+                            <span className={`shrink-0 ml-0.5 px-1.5 py-0.5 rounded text-xs font-medium ${
+                              unitData.token_state === 'BURNED' ? 'bg-emerald-100 text-emerald-800' :
+                              unitData.token_state === 'EXPIRED' ? 'bg-slate-100 text-slate-600' :
+                              unitData.token_state === 'REVOKED' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-600'
+                            }`}>
+                              {unitData.token_state}
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                    <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight">
+                      Current stay
+                    </h1>
+                    <div className="flex gap-6 mt-4">
+                      <div>
+                        <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">CHECK-IN</p>
+                        <p className="text-slate-900 font-medium mt-0.5">{startDate ? formatDate(startDate) : '—'}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">CHECK-OUT</p>
+                        <p className="text-slate-900 font-medium mt-0.5">{endDate ? formatDate(endDate) : 'Ongoing'}</p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="md:w-56 flex flex-col gap-4 shrink-0">
+                    <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-slate-800 rounded-full transition-all duration-500" style={{ width: `${progressPercent}%` }} />
+                    </div>
+                    <p className="text-xs text-slate-400 font-medium">Stay progress</p>
+                    {unitData.live_slug && (
+                      <Button
+                        type="button"
+                        className="w-full h-11 rounded-lg font-medium text-white border-0 bg-[#007BFF] hover:bg-[#006ee6] focus:ring-[#007BFF]"
+                        onClick={() => { setLiveLinkSlug(unitData.live_slug ?? null); setShowLiveLinkModal(true); }}
+                      >
+                        Open live link
+                      </Button>
+                    )}
+                    {unitData.invite_id && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="w-full h-11 rounded-lg font-medium bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed"
+                        onClick={() => { setVerifyQRInviteId(unitData.invite_id ?? null); setShowVerifyQRModal(true); }}
+                      >
+                        Verify with QR code
+                      </Button>
+                    )}
+                    {!unitData.invite_id && (
+                      <Button type="button" variant="outline" disabled className="w-full h-11 rounded-lg font-medium bg-white border border-slate-300 text-slate-400">
+                        Verify with QR code
+                      </Button>
+                    )}
+                    {isOngoing && (
+                      <button
+                        type="button"
+                        className="w-full h-11 rounded-lg font-medium text-white bg-emerald-600 hover:bg-emerald-700 transition-colors flex items-center justify-center gap-2"
+                        onClick={() => setShowEndStayConfirm(true)}
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                        Complete checkout
+                      </button>
+                    )}
+                    {isUpcoming && (
+                      <button
+                        type="button"
+                        disabled
+                        className="w-full h-11 rounded-lg font-medium text-white bg-[#6F42C1] hover:bg-[#5e35a8] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                      >
+                        Check in
+                      </button>
+                    )}
+                    {isPast && !isCancelled && (
+                      <p className="text-sm text-slate-500 font-medium">Stay ended</p>
+                    )}
+                    {isCancelled && (
+                      <p className="text-sm text-slate-600 font-medium">This stay was cancelled. The invitation was revoked by the host.</p>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+          </section>
+
+          {/* Time left on your stay - target: countdown + timeline (when we have dates); else ongoing fallback */}
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-700 mb-4">TIME LEFT ON YOUR STAY</h3>
+            {unitData?.stay_start_date && unitData?.stay_end_date ? (
+              (() => {
+                const startDate = unitData.stay_start_date;
+                const endDate = unitData.stay_end_date;
+                const today = getTodayStr();
+                const dLeft = daysLeft(endDate);
+                const allDays = dateRange(startDate, endDate);
+                const total = allDays.length;
+                const maxShow = 42;
+                const showDays = total <= maxShow ? allDays : allDays.slice(-maxShow);
+                return (
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-8">
+                    <div className="flex-shrink-0">
+                      <div className="inline-flex flex-col items-center justify-center rounded-2xl bg-white border border-slate-200 shadow-inner px-8 py-6 min-w-[140px]">
+                        <span className="text-4xl md:text-5xl font-bold tabular-nums text-[#6F42C1]">
+                          {dLeft}
+                        </span>
+                        <span className="text-xs font-semibold uppercase tracking-wider text-[#6F42C1] mt-1">
+                          {dLeft === 0 && endDate >= today
+                            ? 'DAY (CHECK-OUT TODAY)'
+                            : dLeft === 1
+                              ? 'DAY LEFT'
+                              : 'DAYS LEFT'}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium text-slate-500 mb-2">
+                        Stay timeline – {formatDate(startDate)} → {formatDate(endDate)}
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {showDays.map((dayStr) => {
+                          const isToday = dayStr === today;
+                          const isEnd = dayStr === endDate;
+                          const isPast = dayStr < today;
+                          const dayNum = new Date(dayStr + 'T12:00:00').getDate();
+                          return (
+                            <div
+                              key={dayStr}
+                              title={`${dayStr}${isToday ? ' (today)' : ''}${isEnd ? ' (check-out)' : ''}`}
+                              className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-medium transition-all ${
+                                isToday
+                                  ? 'bg-[#6F42C1] text-white ring-2 ring-[#6F42C1]/30 ring-offset-1'
+                                  : isEnd
+                                    ? 'bg-[#FFC107] text-slate-900 font-semibold'
+                                    : isPast
+                                      ? 'bg-slate-200 text-slate-500'
+                                      : 'bg-slate-100 text-slate-700 border border-slate-200'
+                              }`}
+                            >
+                              {dayNum}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      {total > maxShow && (
+                        <p className="text-xs text-slate-400 mt-2">Showing last {maxShow} days of stay</p>
+                      )}
+                      <div className="flex flex-wrap gap-4 mt-3 text-xs text-slate-500">
+                        <span className="flex items-center gap-1.5">
+                          <span className="w-3 h-3 rounded-full bg-[#6F42C1]" /> Today
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <span className="w-3 h-3 rounded-full bg-[#FFC107]" /> Check-out day
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <span className="w-3 h-3 rounded-full bg-slate-200" /> Past
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()
+            ) : (
+              <div className="flex flex-col sm:flex-row sm:items-center gap-8">
+                <div className="flex-shrink-0">
+                  <div className="inline-flex flex-col items-center justify-center rounded-2xl bg-white border border-slate-200 shadow-inner px-8 py-6 min-w-[140px]">
+                    <span className="text-4xl md:text-5xl font-bold tabular-nums text-slate-900">—</span>
+                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-600 mt-1">Ongoing</span>
+                  </div>
+                </div>
+                <p className="text-sm text-slate-500">Your assigned unit has no fixed end date. Stay progress is shown above.</p>
+              </div>
+            )}
+          </section>
+
+          {/* Guests & stays for this property - under property display */}
+          {(invitations.length > 0 || guestHistory.length > 0) && (
+            <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h3 className="text-base font-semibold text-slate-900 mb-4">Guests & stays for this property</h3>
+              <p className="text-sm text-slate-500 mb-4">Invitations you sent and stays that are pending, accepted, or completed.</p>
+              <div className="space-y-6">
+                {invitations.filter((inv) => inv.status === 'pending' || inv.status === 'ongoing').length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Pending / ongoing invitations</h4>
+                    <ul className="space-y-2">
+                      {invitations
+                        .filter((inv) => inv.status === 'pending' || inv.status === 'ongoing')
+                        .map((inv) => (
+                          <li key={inv.id} className="flex flex-wrap items-center justify-between gap-2 py-2 border-b border-slate-100 last:border-0 text-sm">
+                            <span className="text-slate-700">
+                              {inv.guest_name || inv.guest_email || '—'} · {inv.status}
+                              {inv.stay_start_date && inv.stay_end_date && (
+                                <span className="text-slate-500 text-xs block"> {formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</span>
+                              )}
+                            </span>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="rounded-lg text-xs h-8 px-3"
+                                onClick={async (e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  const url = `${APP_ORIGIN || (typeof window !== 'undefined' ? window.location.origin : '')}${typeof window !== 'undefined' ? window.location.pathname : ''}#invite/${inv.invitation_code}`;
+                                  const ok = await copyToClipboard(url);
+                                  if (ok) notify('success', 'Invitation link copied.');
+                                  else notify('error', 'Could not copy.');
+                                }}
+                              >
+                                Copy link
+                              </Button>
+                              <Button variant="outline" className="rounded-lg text-xs h-8 px-3" onClick={async () => { try { await dashboardApi.cancelInvitation(inv.id); notify('success', 'Invitation cancelled.'); loadData(); } catch (e) { notify('error', (e as Error)?.message ?? 'Failed to cancel.'); } }}>Cancel</Button>
+                            </div>
+                          </li>
+                        ))}
+                    </ul>
+                  </div>
+                )}
+                {guestHistory.filter((h) => !h.checked_out_at).length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Accepted / ongoing stays</h4>
+                    <ul className="space-y-2">
+                      {guestHistory
+                        .filter((h) => !h.checked_out_at)
+                        .map((h) => (
+                          <li key={h.stay_id} className="py-2 border-b border-slate-100 last:border-0 text-sm">
+                            <span className="font-medium text-slate-900">{h.guest_name}</span>
+                            <span className="text-slate-500"> · {formatDate(h.stay_start_date)} – {formatDate(h.stay_end_date)}</span>
+                            <span className="ml-1.5 px-1.5 py-0.5 rounded text-xs font-medium bg-emerald-50 text-emerald-700">Accepted</span>
+                          </li>
+                        ))}
+                    </ul>
+                  </div>
+                )}
+                {guestHistory.filter((h) => h.checked_out_at).length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Completed stays</h4>
+                    <ul className="space-y-2">
+                      {guestHistory
+                        .filter((h) => h.checked_out_at)
+                        .map((h) => (
+                          <li key={h.stay_id} className="py-2 border-b border-slate-100 last:border-0 text-sm">
+                            <span className="font-medium text-slate-900">{h.guest_name}</span>
+                            <span className="text-slate-500"> · {formatDate(h.stay_start_date)} – {formatDate(h.stay_end_date)}</span>
+                            <span className="ml-1.5 px-1.5 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600">Checked out</span>
+                          </li>
+                        ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          <div className="grid lg:grid-cols-3 gap-6">
+            {/* Left: Signed agreement (match Guest) + Presence (here/away) + Invite guest */}
+            <div className="lg:col-span-2 space-y-6">
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h3 className="text-base font-semibold text-slate-900 mb-4">Signed agreement</h3>
+                <p className="text-sm text-slate-600 mb-4">Your signed tenant agreement is associated with this unit. Contact your host for a copy if needed.</p>
+              </div>
+              {/* Presence - same UI as Guest: here/away for this property (tenant keeps this) */}
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h4 className="font-semibold text-slate-900 mb-3">Presence at this property</h4>
+                <p className="text-sm text-slate-600 mb-4">Let your host know if you are at the property or away.</p>
+                <div className="flex flex-wrap items-center gap-4">
+                  <div className={`px-4 py-2 rounded-lg ${presence === 'present' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                    {presence === 'present' ? 'You are here' : awayStartedAt ? `Away since ${new Date(awayStartedAt).toLocaleDateString()}` : 'Away'}
+                  </div>
+                  {presence === 'away' && guestsAuthorizedDuringAway && (
+                    <span className="text-sm text-slate-600">Guests authorized during this period</span>
+                  )}
+                  <Button variant="outline" onClick={handlePresenceToggle} disabled={presenceUpdating} className="rounded-lg">
+                    Set to {presence === 'present' ? 'Away' : 'Present'}
+                  </Button>
+                </div>
+                {showAwayConfirm && (
+                  <div className="mt-4 p-4 rounded-lg bg-slate-50 border border-slate-200">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={awayGuestsAuthorized} onChange={(e) => setAwayGuestsAuthorized(e.target.checked)} className="rounded" />
+                      <span className="text-sm text-slate-700">Guests authorized during this period</span>
+                    </label>
+                    <div className="flex gap-2 mt-3">
+                      <Button onClick={() => doSetPresence('away', awayGuestsAuthorized)} disabled={presenceUpdating}>Confirm Away</Button>
+                      <Button variant="outline" onClick={() => setShowAwayConfirm(false)}>Cancel</Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h3 className="text-base font-semibold text-slate-900 mb-1">Invite a guest to this property</h3>
+                <p className="text-sm text-slate-500 mb-2">{selected.property_name}{selected.unit_label ? ` — Unit ${selected.unit_label}` : ''}</p>
+                <p className="text-sm text-slate-600 mb-4">Generate an invitation link for a guest to sign and stay at this property.</p>
+                <Button variant="primary" className="rounded-lg font-medium" onClick={() => setInviteModalOpen(true)}>
+                  Invite guest to this property
+                </Button>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h3 className="text-base font-semibold text-slate-900 mb-4">Guest history</h3>
+                <p className="text-sm text-slate-500 mb-3">Guests you invited and their stays.</p>
+                {guestHistory.length === 0 ? (
+                  <p className="text-sm text-slate-500 py-2">No guest stays yet. Invite a guest to see their stays here.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {guestHistory.map((h) => (
+                      <li key={h.stay_id} className="py-2 border-b border-slate-100 last:border-0 text-sm">
+                        <span className="font-medium text-slate-900">{h.guest_name}</span>
+                        <span className="text-slate-500"> · {h.property_name}</span>
+                        <span className="text-slate-500 text-xs block sm:inline sm:ml-1">
+                          {formatDate(h.stay_start_date)} – {formatDate(h.stay_end_date)}
+                          {h.checked_out_at ? ' (checked out)' : ''}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+
+            {/* Right: Your invitations + Need help (same as Guest) */}
+            <div className="space-y-6">
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h3 className="text-base font-semibold text-slate-900 mb-3">Your invitations</h3>
+                <p className="text-sm text-slate-500 mb-3">Manage guest invitations you created.</p>
+                {invitations.length === 0 ? (
+                  <p className="text-sm text-slate-500 py-2">No invitations yet. Use &quot;Invite guest to this property&quot; above to create one.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {invitations.map((inv) => {
+                      const inviteUrl = `${APP_ORIGIN || (typeof window !== 'undefined' ? window.location.origin : '')}${typeof window !== 'undefined' ? window.location.pathname : ''}#invite/${inv.invitation_code}`;
+                      return (
+                        <li key={inv.id} className="flex flex-wrap items-center justify-between gap-2 py-2 border-b border-slate-100 last:border-0">
+                          <span className="text-sm text-slate-700">
+                            {inv.guest_name || inv.guest_email || '—'} · {inv.status}
+                            {inv.stay_start_date && inv.stay_end_date && (
+                              <span className="text-slate-500 text-xs block"> {formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</span>
+                            )}
+                          </span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="rounded-lg text-xs h-8 px-3"
+                              onClick={async (e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                const ok = await copyToClipboard(inviteUrl);
+                                if (ok) notify('success', 'Invitation link copied to clipboard.');
+                                else notify('error', 'Could not copy. Copy the link manually.');
+                              }}
+                            >
+                              Copy link
+                            </Button>
+                            {(inv.status === 'pending' || inv.status === 'ongoing') && (
+                              <Button
+                                variant="outline"
+                                className="rounded-lg text-xs h-8 px-3"
+                                onClick={async () => {
+                                  try {
+                                    await dashboardApi.cancelInvitation(inv.id);
+                                    notify('success', 'Invitation cancelled.');
+                                    loadData();
+                                  } catch (e) {
+                                    notify('error', (e as Error)?.message ?? 'Failed to cancel.');
+                                  }
+                                }}
+                              >
+                                Cancel
+                              </Button>
+                            )}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h4 className="font-semibold text-slate-900 mb-3">Need help?</h4>
+                <div className="flex flex-col gap-2">
+                  <Button type="button" variant="outline" className="w-full justify-center h-10 rounded-lg text-sm font-medium">Message host</Button>
+                  <Button type="button" variant="outline" className="w-full justify-center h-10 rounded-lg text-sm font-medium">Contact support</Button>
+                </div>
+              </div>
+              {/* Applicable law from Jurisdiction SOT (same as guest dashboard and live property page) */}
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-700 mb-2">
+                  APPLICABLE LAW {unitData?.jurisdiction_state_name || unitData?.region_code ? `(${(unitData?.jurisdiction_state_name ?? unitData?.region_code ?? 'State').toUpperCase()})` : ''}
+                </p>
+                {(unitData?.jurisdiction_statutes && unitData.jurisdiction_statutes.length > 0) ? (
+                  <>
+                    <ul className="mt-2 space-y-2">
+                      {unitData.jurisdiction_statutes.map((s, i) => (
+                        <li key={i} className="text-sm text-slate-700">
+                          <span className="font-medium text-slate-900">{s.citation}</span>
+                          {s.plain_english && <span className="block text-slate-600 mt-0.5">{s.plain_english}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                    {unitData.removal_guest_text && (
+                      <p className="text-slate-600 text-sm mt-2">
+                        <span className="font-medium text-slate-700">Guest removal: </span>{unitData.removal_guest_text}
+                      </p>
+                    )}
+                    {unitData.removal_tenant_text && (
+                      <p className="text-slate-600 text-sm mt-0.5">
+                        <span className="font-medium text-slate-700">Tenant eviction: </span>{unitData.removal_tenant_text}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-sm text-slate-500">Jurisdiction and statutes for this property are available from your host or on the live property page.</p>
+                )}
+              </div>
+            </div>
+          </div>
+
+        </div>
+      )}
+        </div>
+        )}
+
+      </main>
+
+      {pendingSignatureModalInvite && (
+        <PendingSignatureModal
+          open={!!pendingSignatureModalInvite}
+          onClose={() => setPendingSignatureModalInvite(null)}
+          invitationCode={pendingSignatureModalInvite.invitation_code}
+          propertyName={pendingSignatureModalInvite.property_name}
+          stayStartDate={pendingSignatureModalInvite.stay_start_date}
+          stayEndDate={pendingSignatureModalInvite.stay_end_date}
+          guestEmail={user?.email ?? ''}
+          guestFullName={user?.user_name ?? ''}
+        />
+      )}
+
+      {/* Log message modal */}
+      <Modal
+        open={!!logMessageModalEntry}
+        onClose={() => setLogMessageModalEntry(null)}
+        title={logMessageModalEntry?.title ?? 'Log entry'}
+        className="max-w-lg"
+      >
+        {logMessageModalEntry && (
+          <div className="p-6">
+            <p className="text-slate-700 whitespace-pre-wrap text-sm">{logMessageModalEntry.message}</p>
+            <p className="text-slate-500 text-xs mt-4">
+              {logMessageModalEntry.created_at ? new Date(logMessageModalEntry.created_at).toLocaleString() : ''}
+              {logMessageModalEntry.actor_email && ` · ${logMessageModalEntry.actor_email}`}
+            </p>
+          </div>
+        )}
+      </Modal>
+
+      {/* Live link modal – same as Guest */}
+      {showLiveLinkModal && liveLinkSlug && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="max-w-sm w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200 relative">
+            <button type="button" onClick={() => { setShowLiveLinkModal(false); setLiveLinkSlug(null); setCopyToast(null); }} className="absolute top-4 right-4 text-slate-400 hover:text-slate-700">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+            <h3 className="text-lg font-semibold text-slate-900 mb-1 text-center">Live link page</h3>
+            <p className="text-slate-500 text-sm mb-4 text-center">Scan or share this link to open the property info page (no login).</p>
+            <div className="flex justify-center mb-4">
+              <div className="bg-slate-50 p-4 rounded-xl">
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#live/${liveLinkSlug}`)}`}
+                  alt="QR code for live link"
+                  className="w-40 h-40 rounded-lg"
+                />
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <Button
+                type="button"
+                variant="primary"
+                className="w-full"
+                onClick={() => window.open(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#live/${liveLinkSlug}`, '_blank', 'noopener,noreferrer')}
+              >
+                Open live page
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={async (e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const url = `${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#live/${liveLinkSlug}`;
+                  const ok = await copyToClipboard(url);
+                  setCopyToast(ok ? 'Live link copied to clipboard.' : 'Could not copy.');
+                  setTimeout(() => setCopyToast(null), 3000);
+                }}
+              >
+                Copy live link
+              </Button>
+            </div>
+            {copyToast && (
+              <p className={`text-sm text-center mt-2 ${copyToast.startsWith('Live link') ? 'text-emerald-600' : 'text-amber-600'}`}>
+                {copyToast}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Verify with QR code modal – same as Guest */}
+      {showVerifyQRModal && verifyQRInviteId && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="max-w-sm w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200 relative">
+            <button type="button" onClick={() => { setShowVerifyQRModal(false); setVerifyQRInviteId(null); setCopyToast(null); }} className="absolute top-4 right-4 text-slate-400 hover:text-slate-700">
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>
+            <h3 className="text-lg font-semibold text-slate-900 mb-1 text-center">Verify with QR code</h3>
+            <p className="text-slate-500 text-sm mb-4 text-center">Scan to open the Verify page with this stay&apos;s token pre-filled.</p>
+            <div className="flex justify-center mb-4">
+              <div className="bg-slate-50 p-4 rounded-xl">
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#check?token=${encodeURIComponent(verifyQRInviteId)}`)}`}
+                  alt="QR code for verify page"
+                  className="w-40 h-40 rounded-lg"
+                />
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <Button
+                type="button"
+                variant="primary"
+                className="w-full"
+                onClick={() => window.open(`${typeof window !== 'undefined' ? window.location.origin : APP_ORIGIN}/#check?token=${encodeURIComponent(verifyQRInviteId)}`, '_blank', 'noopener,noreferrer')}
+              >
+                Open verify page
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Checkout confirmation */}
+      {showEndStayConfirm && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="max-w-md w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200">
+            <h3 className="text-lg font-semibold text-slate-900 mb-2">Checkout</h3>
+            <p className="text-sm text-slate-600 mb-4">
+              Have you vacated the unit? Completing checkout will end your stay and set your checkout date to today ({unitData?.stay_start_date && unitData?.stay_end_date ? formatDate(getTodayStr()) : getTodayStr()}). This cannot be undone.
+            </p>
+            {unitData?.property && (
+              <p className="text-sm font-medium text-slate-700 mb-6">
+                {unitData.property.address || unitData.property.name}
+                {unitData?.unit?.unit_label ? ` — Unit ${unitData.unit.unit_label}` : ''}
+              </p>
+            )}
+            <div className="flex gap-3">
+              <Button variant="outline" className="flex-1 h-11 rounded-lg font-medium" onClick={() => setShowEndStayConfirm(false)} disabled={endingStay}>
+                Cancel
+              </Button>
+              <button
+                type="button"
+                disabled={endingStay}
+                className="flex-1 h-11 rounded-lg font-medium text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 flex items-center justify-center"
+                onClick={handleEndStay}
+              >
+                {endingStay ? 'Completing…' : 'Complete checkout'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel stay confirmation */}
+      {showCancelStayConfirm && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="max-w-md w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200">
+            <h3 className="text-lg font-semibold text-slate-900 mb-2">Cancel stay</h3>
+            <p className="text-sm text-slate-600 mb-4">
+              Cancel your upcoming stay? This will remove the stay from your dashboard and notify the host. This cannot be undone.
+            </p>
+            {unitData?.property && (
+              <p className="text-sm font-medium text-slate-700 mb-6">
+                {unitData.property.address || unitData.property.name}
+                {unitData?.unit?.unit_label ? ` — Unit ${unitData.unit.unit_label}` : ''}
+              </p>
+            )}
+            <div className="flex gap-3">
+              <Button variant="outline" className="flex-1 h-11 rounded-lg font-medium" onClick={() => setShowCancelStayConfirm(false)} disabled={cancellingStay}>
+                Keep stay
+              </Button>
+              <button
+                type="button"
+                disabled={cancellingStay}
+                className="flex-1 h-11 rounded-lg font-medium text-white bg-slate-700 hover:bg-slate-800 disabled:opacity-60 flex items-center justify-center"
+                onClick={handleCancelStay}
+              >
+                {cancellingStay ? 'Cancelling…' : 'Cancel stay'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {endStayConfirm && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="max-w-md w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200">
+            <h3 className="text-lg font-bold text-slate-900 mb-2">Checkout of this stay?</h3>
+            <p className="text-slate-600 text-sm mb-6">
+              This will end your stay at <strong>{endStayConfirm.property_name}</strong>. This action cannot be undone.
+            </p>
+            <div className="flex gap-3">
+              <button type="button" className="flex-1 h-11 rounded-lg font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50" onClick={() => setEndStayConfirm(null)}>
+                Go back
+              </button>
+              <button
+                type="button"
+                disabled={endingGuestStay}
+                className="flex-1 h-11 rounded-lg font-medium text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 flex items-center justify-center"
+                onClick={handleGuestEndStay}
+              >
+                {endingGuestStay ? 'Ending…' : 'Checkout'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {cancelStayConfirm && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="max-w-md w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200">
+            <h3 className="text-lg font-bold text-slate-900 mb-2">Cancel this stay?</h3>
+            <p className="text-slate-600 text-sm mb-6">
+              This will cancel your upcoming stay at <strong>{cancelStayConfirm.property_name}</strong>. This action cannot be undone.
+            </p>
+            <div className="flex gap-3">
+              <button type="button" className="flex-1 h-11 rounded-lg font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50" onClick={() => setCancelStayConfirm(null)}>
+                Go back
+              </button>
+              <button
+                type="button"
+                disabled={cancellingGuestStay}
+                className="flex-1 h-11 rounded-lg font-medium text-white bg-slate-700 hover:bg-slate-800 disabled:opacity-60 flex items-center justify-center"
+                onClick={handleGuestCancelStay}
+              >
+                {cancellingGuestStay ? 'Cancelling…' : 'Cancel stay'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {agreementModalCode && (
+        <AgreementSignModal
+          open={!!agreementModalCode}
+          invitationCode={agreementModalCode}
+          guestEmail={user?.email ?? ''}
+          guestFullName={user?.user_name ?? ''}
+          onClose={() => {
+            setAgreementModalCode(null);
+            setPrefilledGuestInfoForModal(null);
+            loadData();
+          }}
+          onSigned={handleAgreementSigned}
+          notify={notify}
+          onRedirectToDropbox={(invitationCode, signatureId, signUrl) => {
+            sessionStorage.setItem(DROPBOX_REDIRECT_INVITATION_CODE, invitationCode);
+            sessionStorage.setItem(DROPBOX_REDIRECT_SIGNATURE_ID, String(signatureId));
+            window.location.href = signUrl;
+          }}
+          inviteAcceptMode
+          onContinueToSign={() => {}}
+          prefilledGuestInfo={prefilledGuestInfoForModal}
+        />
+      )}
+
+      <InviteGuestModal
+        open={inviteModalOpen}
+        onClose={() => setInviteModalOpen(false)}
+        user={user}
+        setLoading={setLoading}
+        notify={notify}
+        navigate={navigate}
+        onSuccess={() => loadData()}
+        unitId={unitData?.unit?.id ?? null}
+        propertyOrStayLabel={selected ? `${selected.property_name}${selected.unit_label ? ` — Unit ${selected.unit_label}` : ''}` : null}
+        tenantStayStartDate={unitData?.stay_start_date ?? null}
+        tenantStayEndDate={unitData?.stay_end_date ?? null}
+        onLinkGenerated={(link) => {
+          setInviteModalOpen(false);
+          setGeneratedInviteLink(link);
+        }}
+      />
+
+      {generatedInviteLink && (
+        <Modal
+          open={!!generatedInviteLink}
+          onClose={() => { setGeneratedInviteLink(null); loadData(); }}
+          title="Invitation link generated"
+          className="max-w-lg"
+        >
+          <div className="p-6 space-y-4">
+            <p className="text-sm text-slate-600">Share this link with your guest. They will sign in or create an account, then sign the agreement on their dashboard.</p>
+            <div className="bg-slate-100 border border-slate-200 rounded-xl p-4 text-sm text-slate-700 break-all">
+              {generatedInviteLink}
+            </div>
+            <div className="flex gap-3">
+              <Button variant="outline" onClick={async () => { const ok = await copyToClipboard(generatedInviteLink); notify(ok ? 'success' : 'error', ok ? 'Link copied to clipboard.' : 'Copy failed.'); }} className="flex-1">Copy link</Button>
+              <Button onClick={() => { setGeneratedInviteLink(null); loadData(); }} className="flex-1">Done</Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+};
+
+export default TenantDashboard;

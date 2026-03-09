@@ -14,13 +14,13 @@ type AdminTab = 'users' | 'logs' | 'properties' | 'stays' | 'invitations';
 
 const SIDEBAR_ITEMS: { id: AdminTab; label: string; icon: string }[] = [
   { id: 'users', label: 'Users', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' },
-  { id: 'logs', label: 'Audit logs', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+  { id: 'logs', label: 'Event ledger', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
   { id: 'properties', label: 'Properties', icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' },
   { id: 'stays', label: 'Stays', icon: 'M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z' },
   { id: 'invitations', label: 'Invitations', icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' },
 ];
 
-/** Audit log categories (value, label) for dropdown */
+/** Audit log categories (value, label) for dropdown - matches backend _CATEGORY_TO_ACTION_TYPES */
 const AUDIT_LOG_CATEGORIES: { value: string; label: string }[] = [
   { value: '', label: 'All categories' },
   { value: 'status_change', label: 'Status change' },
@@ -29,6 +29,9 @@ const AUDIT_LOG_CATEGORIES: { value: string; label: string }[] = [
   { value: 'shield_mode', label: 'Shield mode' },
   { value: 'dead_mans_switch', label: 'Dead Man\'s Switch' },
   { value: 'billing', label: 'Billing' },
+  { value: 'presence', label: 'Presence / Away' },
+  { value: 'verify_attempt', label: 'Verify attempt' },
+  { value: 'tenant_assignment', label: 'Tenant assignment' },
 ];
 
 /** Supported states for admin filters (Florida, New York, California, Texas) */
@@ -60,6 +63,8 @@ export const AdminDashboard: React.FC<{
   const [propertyStateFilter, setPropertyStateFilter] = useState('');
   const [stayStateFilter, setStayStateFilter] = useState('');
   const [logMessageModalEntry, setLogMessageModalEntry] = useState<AdminAuditLogEntry | null>(null);
+  const [logPropertyId, setLogPropertyId] = useState<number | ''>('');
+  const [logActorUserId, setLogActorUserId] = useState<number | ''>('');
 
   const loadUsers = useCallback(async () => {
     setLoading(true);
@@ -87,6 +92,8 @@ export const AdminDashboard: React.FC<{
         to_ts,
         category: logCategory.trim() || undefined,
         search: logSearch.trim() || undefined,
+        property_id: typeof logPropertyId === 'number' ? logPropertyId : undefined,
+        actor_user_id: typeof logActorUserId === 'number' ? logActorUserId : undefined,
         limit: 200,
       });
       setLogs(data);
@@ -95,7 +102,7 @@ export const AdminDashboard: React.FC<{
     } finally {
       setLoading(false);
     }
-  }, [logCategory, logSearch, logFromDate, logToDate, notify]);
+  }, [logCategory, logSearch, logFromDate, logToDate, logPropertyId, logActorUserId, notify]);
 
   const loadProperties = useCallback(async () => {
     setLoading(true);
@@ -141,22 +148,25 @@ export const AdminDashboard: React.FC<{
 
   useEffect(() => {
     if (tab === 'users') loadUsers();
-    else if (tab === 'logs') loadLogs();
-    else if (tab === 'properties') loadProperties();
+    else if (tab === 'logs') {
+      loadLogs();
+      loadProperties();
+      loadUsers();
+    } else if (tab === 'properties') loadProperties();
     else if (tab === 'stays') loadStays();
     else if (tab === 'invitations') loadInvitations();
   }, [tab, loadUsers, loadLogs, loadProperties, loadStays, loadInvitations]);
 
   const tabTitles: Record<AdminTab, string> = {
     users: 'Users',
-    logs: 'Audit logs',
+    logs: 'Event ledger',
     properties: 'Properties',
     stays: 'Stays',
     invitations: 'Invitations',
   };
   const tabDescriptions: Record<AdminTab, string> = {
     users: 'All platform users. Filter by role or search by email or name.',
-    logs: 'Global audit trail. Filter by category or search in title and message.',
+    logs: 'Global event ledger. Filter by category or search in title and message.',
     properties: 'All registered properties across owners.',
     stays: 'All stays. Filter by property, owner, or guest in API.',
     invitations: 'All invitations and their status.',
@@ -290,6 +300,26 @@ export const AdminDashboard: React.FC<{
                     <option key={c.value || 'all'} value={c.value}>{c.label}</option>
                   ))}
                 </select>
+                <select
+                  value={logPropertyId}
+                  onChange={(e) => setLogPropertyId(e.target.value === '' ? '' : Number(e.target.value))}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 min-w-[10rem]"
+                >
+                  <option value="">All properties</option>
+                  {properties.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name ?? p.id}</option>
+                  ))}
+                </select>
+                <select
+                  value={logActorUserId}
+                  onChange={(e) => setLogActorUserId(e.target.value === '' ? '' : Number(e.target.value))}
+                  className="rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-700 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 min-w-[10rem]"
+                >
+                  <option value="">All actors</option>
+                  {users.map((u) => (
+                    <option key={u.id} value={u.id}>{u.email}</option>
+                  ))}
+                </select>
                 <input
                   type="text"
                   placeholder="Search title/message"
@@ -307,6 +337,7 @@ export const AdminDashboard: React.FC<{
                 <thead className="sticky top-0 bg-slate-100 text-slate-500 uppercase text-[10px] tracking-widest font-extrabold border-b border-slate-200 z-10">
                   <tr>
                     <th className="py-3 px-4">Time</th>
+                    <th className="py-3 px-4">Property</th>
                     <th className="py-3 px-4">Category</th>
                     <th className="py-3 px-4">Title</th>
                     <th className="py-3 px-4">Message</th>
@@ -317,6 +348,7 @@ export const AdminDashboard: React.FC<{
                   {logs.map((r) => (
                     <tr key={r.id} className="bg-white hover:bg-slate-50/80">
                       <td className="py-3 px-4 whitespace-nowrap text-slate-600">{formatDate(r.created_at)}</td>
+                      <td className="py-3 px-4 text-slate-700">{r.property_name ?? (r.property_id != null ? `#${r.property_id}` : '—')}</td>
                       <td className="py-3 px-4 text-slate-700">{r.category}</td>
                       <td className="py-3 px-4 text-slate-700">{r.title}</td>
                       <td className="py-3 px-4 text-slate-700 max-w-xs">

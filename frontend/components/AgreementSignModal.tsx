@@ -1,6 +1,9 @@
 import React, { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Button, Input, Modal } from "./UI";
 import { agreementsApi, invitationsApi, API_URL, type AgreementDocResponse, type InvitationDetails } from "../services/api";
+import { STATE_OPTIONS } from "../services/jleService";
+import { validatePhone, sanitizePhoneInput } from "../utils/validatePhone";
+import { toUserFriendlyInvitationError } from "../utils/invitationErrors";
 
 /** Form data for guest invite accept (step 1). Exported for parent to call register after sign. Password not collected in modal. */
 export interface GuestInviteFormData {
@@ -142,6 +145,10 @@ export default function AgreementSignModal(props: {
   const [inviteDetailsLoading, setInviteDetailsLoading] = useState(false);
   const [step1FormData, setStep1FormData] = useState<GuestInviteFormData>(INITIAL_GUEST_FORM);
   const [step1Error, setStep1Error] = useState<string | null>(null);
+  /** Track which invite we opened so we only reset to step 1 when modal opens or code changes, not on every re-render (avoids Dropbox error loop). */
+  const lastInviteDetailsKeyRef = useRef<string | null>(null);
+  /** Once user has gone to step "sign", don't reset to "details" until modal closes (avoids reverting to Accept invitation after Sign with Dropbox error). */
+  const hasReachedSignStepRef = useRef(false);
 
   const allAcks = useMemo(() => Object.values(acks).every(Boolean), [acks]);
 
@@ -175,9 +182,19 @@ export default function AgreementSignModal(props: {
     return () => clearInterval(t);
   }, [open, signatureIdToPoll]);
 
-  /** Fetch invite details when in invite-accept mode step 1 */
+  /** Fetch invite details when in invite-accept mode step 1. Only reset to step 1 when modal opens or code changes (not on every re-render) to avoid reverting to "Accept invitation" after e.g. Sign with Dropbox error. */
   useEffect(() => {
-    if (!open || !inviteAcceptMode || !normalizedCode) return;
+    if (!open || !inviteAcceptMode || !normalizedCode) {
+      if (!open) {
+        lastInviteDetailsKeyRef.current = null;
+        hasReachedSignStepRef.current = false;
+      }
+      return;
+    }
+    const key = `${normalizedCode}`;
+    if (lastInviteDetailsKeyRef.current === key) return;
+    if (hasReachedSignStepRef.current) return;
+    lastInviteDetailsKeyRef.current = key;
     setInviteStep("details");
     setStep1FormData(INITIAL_GUEST_FORM);
     setInviteDetails(null);
@@ -219,13 +236,11 @@ export default function AgreementSignModal(props: {
       .then((d) => {
         setDoc(d);
         setLoadError(null);
-        // Only treat as "signed" for accept when Dropbox PDF is available (stay confirmation)
-        if (d?.already_signed && d?.signature_id != null && d?.has_dropbox_signed_pdf) onSignedRef.current(d.signature_id);
+        // Do NOT auto-call onSigned here: stay must only be created when the user completes the sign flow in this session (in-app sign or return from Dropbox). Auto-calling caused stays to be created and token burned despite the user seeing an error (e.g. stale Dropbox redirect state).
       })
       .catch((e) => {
         const msg = (e as Error)?.message ?? "";
-        const expiredOrInvalid = msg.toLowerCase().includes("expired") || msg.toLowerCase().includes("not found") || msg.toLowerCase().includes("not pending");
-        const userMsg = expiredOrInvalid ? "This invitation has expired or is invalid. You can’t use this link to sign." : msg || "Could not load agreement.";
+        const userMsg = toUserFriendlyInvitationError(msg) || "Could not load agreement.";
         setLoadError(userMsg);
         setDoc(null);
         notifyRef.current("error", userMsg);
@@ -233,7 +248,9 @@ export default function AgreementSignModal(props: {
       .finally(() => setLoading(false));
   }, [open, normalizedCode, guestFullName, guestEmail, inviteAcceptMode, inviteStep, step1FormData.email, step1FormData.full_name, prefilledGuestInfo?.email, prefilledGuestInfo?.full_name]);
 
-  const handleStep1Continue = () => {
+  const handleStep1Continue = (e?: React.MouseEvent) => {
+    e?.preventDefault();
+    e?.stopPropagation();
     setStep1Error(null);
     if (prefilledGuestInfo) {
       const d = step1FormData;
@@ -242,6 +259,7 @@ export default function AgreementSignModal(props: {
         notify("error", "Please agree to the Terms of Service and Privacy Policy to continue.");
         return;
       }
+      hasReachedSignStepRef.current = true;
       setInviteStep("sign");
       return;
     }
@@ -260,7 +278,14 @@ export default function AgreementSignModal(props: {
       notify("error", msg);
       return;
     }
+    const phoneCheck = validatePhone(d.phone);
+    if (!phoneCheck.valid) {
+      setStep1Error(phoneCheck.error ?? "Invalid phone number.");
+      notify("error", phoneCheck.error ?? "Invalid phone number.");
+      return;
+    }
     onContinueToSign?.(step1FormData);
+    hasReachedSignStepRef.current = true;
     setInviteStep("sign");
   };
 
@@ -349,7 +374,11 @@ export default function AgreementSignModal(props: {
     const d = step1FormData;
     const isReadOnly = !!prefilledGuestInfo;
     return (
-      <div className="p-6 md:p-8 space-y-6 bg-slate-50/50 max-h-[85vh] overflow-y-auto">
+      <form
+        className="p-6 md:p-8 space-y-6 bg-slate-50/50 max-h-[85vh] overflow-y-auto"
+        onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        noValidate
+      >
         <div className="rounded-xl border border-slate-200 bg-white p-5">
           <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Property (reference only)</p>
           <p className="text-slate-800 font-medium">{inviteDetails?.property_address || inviteDetails?.property_name || "—"}</p>
@@ -374,14 +403,14 @@ export default function AgreementSignModal(props: {
               <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Your information</p>
               <Input label="Full name" value={d.full_name} onChange={(e) => setStep1FormData({ ...d, full_name: e.target.value })} required />
               <Input label="Email" type="email" value={d.email} onChange={(e) => setStep1FormData({ ...d, email: e.target.value })} required />
-              <Input label="Phone" value={d.phone} onChange={(e) => setStep1FormData({ ...d, phone: e.target.value })} placeholder="+1 555-000-0000" required />
+              <Input label="Phone" value={d.phone} onChange={(e) => setStep1FormData({ ...d, phone: sanitizePhoneInput(e.target.value) })} placeholder="+15551234567 or 5551234567" required />
             </div>
             <div className="space-y-4">
               <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Permanent residence</p>
               <Input label="Street address" value={d.permanent_address} onChange={(e) => setStep1FormData({ ...d, permanent_address: e.target.value })} required />
               <div className="grid grid-cols-2 gap-3">
                 <Input label="City" value={d.permanent_city} onChange={(e) => setStep1FormData({ ...d, permanent_city: e.target.value })} required />
-                <Input label="State" value={d.permanent_state} onChange={(e) => setStep1FormData({ ...d, permanent_state: e.target.value })} required />
+                <Input label="State" name="permanent_state" value={d.permanent_state} onChange={(e) => setStep1FormData({ ...d, permanent_state: e.target.value })} options={STATE_OPTIONS} required />
               </div>
               <Input label="ZIP" value={d.permanent_zip} onChange={(e) => setStep1FormData({ ...d, permanent_zip: e.target.value })} required />
             </div>
@@ -408,10 +437,10 @@ export default function AgreementSignModal(props: {
 
         {step1Error && <p className="text-sm text-red-600 font-medium" role="alert">{step1Error}</p>}
         <div className="flex gap-3">
-          <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={handleStep1Continue}>Continue to review & sign</Button>
+          <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+          <Button type="button" onClick={(e) => handleStep1Continue(e)}>Continue to review & sign</Button>
         </div>
-      </div>
+      </form>
     );
   };
 
@@ -594,6 +623,7 @@ export default function AgreementSignModal(props: {
                         Cancel
                       </Button>
                       <Button
+                        type="button"
                         onClick={handleSign}
                         disabled={signing || loading || !allAcks}
                         className="flex-1 py-3"

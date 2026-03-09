@@ -23,11 +23,6 @@ function authDisplay(auth: string): string {
   return 'NONE';
 }
 
-function tokenDisplay(token: string): string {
-  const t = (token || 'staged').toLowerCase();
-  return t === 'released' ? 'RELEASED' : 'STAGED';
-}
-
 export const LivePropertyPage: React.FC<{ slug: string }> = ({ slug }) => {
   const [data, setData] = useState<LivePropertyPagePayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -95,7 +90,6 @@ export const LivePropertyPage: React.FC<{ slug: string }> = ({ slug }) => {
   const address = [prop.street, prop.city, prop.state, prop.zip_code].filter(Boolean).join(', ');
   const statusLabel = statusDisplay(prop.occupancy_status);
   const authLabel = authDisplay(authorization_state);
-  const tokenLabel = tokenDisplay(prop.token_state ?? 'staged');
   const isVacant = (prop.occupancy_status || '').toLowerCase() === 'vacant' && !has_current_guest;
   const liveLink = typeof window !== 'undefined' ? window.location.href : `#live/${slug}`;
   const poaPdfUrl = publicApi.getLivePoaPdfUrl(slug);
@@ -211,12 +205,6 @@ export const LivePropertyPage: React.FC<{ slug: string }> = ({ slug }) => {
                   }`}
                 >
                   {authLabel}
-                </span>
-              </div>
-              <div>
-                <p className="text-xs font-medium text-slate-500 mb-0.5">Token</p>
-                <span className="inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-semibold uppercase bg-slate-100 text-slate-700">
-                  {tokenLabel}
                 </span>
               </div>
             </div>

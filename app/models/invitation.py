@@ -14,6 +14,8 @@ class Invitation(Base):
 
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     property_id = Column(Integer, ForeignKey("properties.id"), nullable=False)
+    unit_id = Column(Integer, ForeignKey("units.id"), nullable=True, index=True)
+    invited_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # owner or tenant who created invite
     guest_name = Column(String(255), nullable=True)  # name owner entered when creating invite
     guest_email = Column(String(255), nullable=True)
 
@@ -29,6 +31,9 @@ class Invitation(Base):
     # STAGED=created, BURNED=guest accepted+signed MoA, EXPIRED=stay ended/checked out, REVOKED=cancelled by owner/guest
     token_state = Column(String(20), nullable=False, default="STAGED", server_default="STAGED")
 
+    # Whether this invite is for a guest stay or a tenant signup; enforced on verify/signup so links are not interchangeable
+    invitation_kind = Column(String(20), nullable=False, default="guest", server_default="guest")
+
     # Dead Man's Switch: auto-protect when stay end passes without owner response
     dead_mans_switch_enabled = Column(Integer, nullable=False, default=0)  # 0 | 1 (SQLite-friendly)
     dead_mans_switch_alert_email = Column(Integer, nullable=False, default=1)
@@ -38,5 +43,6 @@ class Invitation(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    owner = relationship("User", backref="invitations_sent")
+    owner = relationship("User", foreign_keys=[owner_id], backref="invitations_sent")
+    invited_by = relationship("User", foreign_keys=[invited_by_user_id])
     property_ref = relationship("Property", backref="invitations")

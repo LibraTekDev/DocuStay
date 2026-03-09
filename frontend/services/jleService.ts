@@ -79,6 +79,13 @@ export const JURISDICTION_RULES: Record<JurisdictionState, any> = {
   }
 };
 
+/** State options for dropdowns (e.g. Tenant/Guest signup permanent address). Value = 2-letter code, label = full name. */
+export const STATE_OPTIONS: { value: string; label: string }[] = (
+  Object.entries(JURISDICTION_RULES) as [JurisdictionState, (typeof JURISDICTION_RULES)[JurisdictionState]][]
+)
+  .map(([code, rule]) => ({ value: code, label: rule.name }))
+  .sort((a, b) => a.label.localeCompare(b.label));
+
 export const analyzeStay = (state: JurisdictionState, details: StayDetails) => {
   const rules = JURISDICTION_RULES[state];
   if (!rules) throw new Error("Unsupported jurisdiction");

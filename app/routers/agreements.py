@@ -1,8 +1,10 @@
 """Agreement generation + signing endpoints for invite flows and owner Master POA."""
+import logging
 from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 
 from app.database import get_db
 from app.models.invitation import Invitation
@@ -31,6 +33,7 @@ from app.services.agreements import (
     agreement_content_to_pdf,
 )
 from app.services.audit_log import create_log, CATEGORY_GUEST_SIGNATURE, CATEGORY_STATUS_CHANGE, CATEGORY_FAILED_ATTEMPT
+from app.services.event_ledger import create_ledger_event, ACTION_AGREEMENT_SIGNED, ACTION_MASTER_POA_SIGNED, ACTION_AGREEMENT_SIGN_FAILED
 from app.services.notifications import send_email
 from app.services.dropbox_sign import send_signature_request, get_signed_pdf, get_embedded_sign_url
 from app.dependencies import require_owner
@@ -45,8 +48,20 @@ def get_invitation_agreement(
     guest_email: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
+    code = (invitation_code or "").strip().upper()
+    if code:
+        inv = db.query(Invitation).filter(Invitation.invitation_code == code).first()
+        is_tenant_inv = (getattr(inv, "invitation_kind", None) or "").strip().lower() == "tenant" if inv else False
+        if inv and not is_tenant_inv and (getattr(inv, "token_state", None) or "").upper() == "BURNED":
+            raise HTTPException(status_code=400, detail="Invitation already used")
+        if inv and not is_tenant_inv and (getattr(inv, "status", None) or "").lower() == "accepted":
+            raise HTTPException(status_code=400, detail="Invitation already used")
     doc = build_invitation_agreement(db, invitation_code=invitation_code, guest_full_name=guest_full_name)
     if not doc:
+        logging.getLogger("uvicorn.error").warning(
+            "Agreement lookup 404: invitation_code=%r (check: code exists, status pending/ongoing, guest=STAGED or tenant)",
+            (invitation_code or "").strip().upper(),
+        )
         raise HTTPException(status_code=404, detail="Invitation not found or not pending")
 
     content = doc.content
@@ -149,7 +164,10 @@ def sign_invitation_agreement(
     inv = db.query(Invitation).filter(
         Invitation.invitation_code == code,
         Invitation.status.in_(["pending", "ongoing"]),
-        Invitation.token_state != "BURNED",
+        or_(
+            Invitation.invitation_kind == "tenant",
+            Invitation.token_state != "BURNED",
+        ),
     ).first()
     if not inv:
         create_log(
@@ -163,6 +181,13 @@ def sign_invitation_agreement(
             ip_address=req.client.host if req.client else None,
             user_agent=(req.headers.get("user-agent") or "").strip() or None,
             meta={"invitation_code_attempted": code},
+        )
+        create_ledger_event(
+            db,
+            ACTION_AGREEMENT_SIGN_FAILED,
+            meta={"invitation_code_attempted": code, "reason": "invalid_or_expired_invitation"},
+            ip_address=req.client.host if req.client else None,
+            user_agent=(req.headers.get("user-agent") or "").strip() or None,
         )
         db.commit()
         raise HTTPException(status_code=400, detail="Invalid or expired invitation code")
@@ -182,6 +207,17 @@ def sign_invitation_agreement(
             ip_address=req.client.host if req.client else None,
             user_agent=(req.headers.get("user-agent") or "").strip() or None,
             meta={"invitation_code": code, "expected_hash": doc.document_hash},
+        )
+        create_ledger_event(
+            db,
+            ACTION_AGREEMENT_SIGN_FAILED,
+            target_object_type="Invitation",
+            target_object_id=inv.id,
+            property_id=inv.property_id,
+            invitation_id=inv.id,
+            meta={"invitation_code": code, "expected_hash": doc.document_hash, "reason": "document_hash_mismatch"},
+            ip_address=req.client.host if req.client else None,
+            user_agent=(req.headers.get("user-agent") or "").strip() or None,
         )
         db.commit()
         raise HTTPException(status_code=409, detail="Agreement has changed. Please reopen and sign again.")
@@ -227,6 +263,17 @@ def sign_invitation_agreement(
         ip_address=ip,
         user_agent=ua,
         meta={"signature_id": sig.id, "invitation_code": code, "document_id": doc.document_id},
+    )
+    create_ledger_event(
+        db,
+        ACTION_AGREEMENT_SIGNED,
+        target_object_type="AgreementSignature",
+        target_object_id=sig.id,
+        property_id=inv.property_id,
+        invitation_id=inv.id,
+        meta={"signature_id": sig.id, "invitation_code": code, "document_id": doc.document_id, "guest_email": sig.guest_email},
+        ip_address=ip,
+        user_agent=ua,
     )
     db.commit()
 
@@ -277,7 +324,10 @@ def sign_invitation_agreement_with_dropbox(
     inv = db.query(Invitation).filter(
         Invitation.invitation_code == code,
         Invitation.status.in_(["pending", "ongoing"]),
-        Invitation.token_state != "BURNED",
+        or_(
+            Invitation.invitation_kind == "tenant",
+            Invitation.token_state != "BURNED",
+        ),
     ).first()
     if not inv:
         create_log(
@@ -291,6 +341,13 @@ def sign_invitation_agreement_with_dropbox(
             ip_address=req.client.host if req.client else None,
             user_agent=(req.headers.get("user-agent") or "").strip() or None,
             meta={"invitation_code_attempted": code},
+        )
+        create_ledger_event(
+            db,
+            ACTION_AGREEMENT_SIGN_FAILED,
+            meta={"invitation_code_attempted": code, "reason": "invalid_or_expired_invitation", "method": "dropbox"},
+            ip_address=req.client.host if req.client else None,
+            user_agent=(req.headers.get("user-agent") or "").strip() or None,
         )
         db.commit()
         raise HTTPException(status_code=400, detail="Invalid or expired invitation code")
@@ -310,6 +367,17 @@ def sign_invitation_agreement_with_dropbox(
             ip_address=req.client.host if req.client else None,
             user_agent=(req.headers.get("user-agent") or "").strip() or None,
             meta={"invitation_code": code, "expected_hash": doc.document_hash},
+        )
+        create_ledger_event(
+            db,
+            ACTION_AGREEMENT_SIGN_FAILED,
+            target_object_type="Invitation",
+            target_object_id=inv.id,
+            property_id=inv.property_id,
+            invitation_id=inv.id,
+            meta={"invitation_code": code, "expected_hash": doc.document_hash, "reason": "document_hash_mismatch", "method": "dropbox"},
+            ip_address=req.client.host if req.client else None,
+            user_agent=(req.headers.get("user-agent") or "").strip() or None,
         )
         db.commit()
         raise HTTPException(status_code=409, detail="Agreement has changed. Please reopen and sign again.")
@@ -350,6 +418,17 @@ def sign_invitation_agreement_with_dropbox(
         ip_address=ip,
         user_agent=ua,
         meta={"signature_id": sig.id, "invitation_code": code, "document_id": doc.document_id},
+    )
+    create_ledger_event(
+        db,
+        ACTION_AGREEMENT_SIGNED,
+        target_object_type="AgreementSignature",
+        target_object_id=sig.id,
+        property_id=inv.property_id,
+        invitation_id=inv.id,
+        meta={"signature_id": sig.id, "invitation_code": code, "document_id": doc.document_id, "guest_email": sig.guest_email, "method": "dropbox"},
+        ip_address=ip,
+        user_agent=ua,
     )
     db.commit()
 
@@ -523,6 +602,15 @@ def sign_owner_poa_with_dropbox(
         ip_address=ip,
         user_agent=ua,
         meta={"signature_id": sig.id, "document_id": doc_id},
+    )
+    create_ledger_event(
+        db,
+        ACTION_MASTER_POA_SIGNED,
+        target_object_type="OwnerPOASignature",
+        target_object_id=sig.id,
+        meta={"signature_id": sig.id, "document_id": doc_id, "owner_email": sig.owner_email},
+        ip_address=ip,
+        user_agent=ua,
     )
     db.commit()
 

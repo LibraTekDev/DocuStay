@@ -1,4 +1,6 @@
-"""Module D: Seed region rules (NYC, FL, CA, TX) and jurisdiction SOT."""
+"""Module D: Seed region rules (NYC, FL, CA, TX), jurisdiction SOT, and optional admin user."""
+import os
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.models.region_rule import RegionRule, StayClassification, RiskLevel
 from app.models.jurisdiction import Jurisdiction, JurisdictionStatute, JurisdictionZipMapping
@@ -178,4 +180,38 @@ def seed_jurisdiction_sot(db: Session) -> None:
     for zip_code, region_code in zip_mappings:
         db.add(JurisdictionZipMapping(zip_code=zip_code, region_code=region_code))
 
+    db.commit()
+
+
+def seed_admin_user(db: Session) -> None:
+    """Create default admin user for fresh installs (admin@docustay.com). Uses ADMIN_EMAIL/ADMIN_PASSWORD if set."""
+    from app.models.user import User, UserRole
+    from app.services.auth import get_password_hash
+
+    admin_email = (os.environ.get("ADMIN_EMAIL") or "admin@docustay.com").strip().lower()
+    admin_password = os.environ.get("ADMIN_PASSWORD") or "DreamsOfDreams89"
+    admin_full_name = os.environ.get("ADMIN_FULL_NAME", "Admin").strip() or "Admin"
+
+    existing = db.query(User).filter(User.email == admin_email, User.role == UserRole.admin).first()
+    hashed = get_password_hash(admin_password)
+    now = datetime.now(timezone.utc)
+
+    if existing:
+        existing.hashed_password = hashed
+        existing.email_verified = True
+        existing.identity_verified_at = now
+        existing.poa_waived_at = now
+        db.commit()
+        return
+
+    user = User(
+        email=admin_email,
+        hashed_password=hashed,
+        role=UserRole.admin,
+        full_name=admin_full_name,
+        email_verified=True,
+        identity_verified_at=now,
+        poa_waived_at=now,
+    )
+    db.add(user)
     db.commit()

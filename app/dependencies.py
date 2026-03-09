@@ -1,6 +1,6 @@
 """Shared dependencies: DB session, current user."""
 import logging
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError, OperationalError as SQLOperationalError
@@ -144,8 +144,52 @@ def require_guest(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+def require_property_manager(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role != UserRole.property_manager:
+        raise HTTPException(status_code=403, detail="Property manager role required")
+    return current_user
+
+
+def require_property_manager_identity_verified(
+    current_user: User = Depends(require_property_manager),
+) -> User:
+    """Property manager must have completed Stripe Identity verification (KYC) before dashboard access."""
+    if not getattr(current_user, "identity_verified_at", None):
+        raise HTTPException(
+            status_code=403,
+            detail="Complete identity verification to continue. You cannot access the dashboard until your identity is verified.",
+        )
+    return current_user
+
+
+def require_tenant(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role != UserRole.tenant:
+        raise HTTPException(status_code=403, detail="Tenant role required")
+    return current_user
+
+
+def require_guest_or_tenant(current_user: User = Depends(get_current_user)) -> User:
+    """Guest or tenant: e.g. for adding/viewing pending guest invites (tenant can paste guest invite link to sign as guest)."""
+    if current_user.role not in (UserRole.guest, UserRole.tenant):
+        raise HTTPException(status_code=403, detail="Guest or tenant role required")
+    return current_user
+
+
+def require_owner_or_manager(current_user: User = Depends(get_current_user)) -> User:
+    """Owner or Property Manager. Use with can_access_property for property-scoped actions."""
+    if current_user.role not in (UserRole.owner, UserRole.property_manager):
+        raise HTTPException(status_code=403, detail="Owner or property manager role required")
+    return current_user
+
+
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
     """Only users with role=admin can access admin routes. Returns 403 for non-admin."""
     if current_user.role != UserRole.admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user
+
+
+def get_context_mode(request: Request) -> str:
+    """Read X-Context-Mode header: business | personal. Defaults to business."""
+    mode = (request.headers.get("X-Context-Mode") or "").strip().lower()
+    return mode if mode in ("business", "personal") else "business"

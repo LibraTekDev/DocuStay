@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.models.owner import OwnerProfile, Property
 from app.models.user import User
 from app.services.audit_log import create_log, CATEGORY_BILLING
+from app.services.event_ledger import create_ledger_event, ACTION_BILLING_INVOICE_CREATED
 
 logger = logging.getLogger(__name__)
 
@@ -401,6 +402,12 @@ def charge_onboarding_fee(
         property_id=None,
         actor_user_id=user.id,
         actor_email=user.email,
+        meta={"stripe_invoice_id": inv.id, "amount_cents": fee.amount_cents, "unit_count": total_units},
+    )
+    create_ledger_event(
+        db,
+        ACTION_BILLING_INVOICE_CREATED,
+        actor_user_id=user.id,
         meta={"stripe_invoice_id": inv.id, "amount_cents": fee.amount_cents, "unit_count": total_units},
     )
     db.commit()

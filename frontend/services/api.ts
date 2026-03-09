@@ -3,6 +3,8 @@
  * Replaces Gemini service for auth, properties, and invitations.
  * All URLs from .env; no hardcoded localhost (set VITE_API_URL and VITE_APP_ORIGIN in .env for deployment).
  */
+import { toUserFriendlyInvitationError } from "../utils/invitationErrors";
+
 export const API_URL = (import.meta as any).env?.VITE_API_URL ?? (typeof window !== "undefined" ? "/api" : "");
 /** Frontend app origin for Stripe return_url, invite links, etc. From .env VITE_APP_ORIGIN, or window.location.origin in browser. */
 export const APP_ORIGIN =
@@ -19,6 +21,33 @@ export function setToken(token: string | null) {
   else localStorage.removeItem("docustay_token");
 }
 
+const CONTEXT_MODE_KEY = "docustay_context_mode";
+
+export function getContextMode(): "business" | "personal" {
+  if (typeof window === "undefined") return "business";
+  const m = (localStorage.getItem(CONTEXT_MODE_KEY) || "").toLowerCase();
+  return m === "personal" ? "personal" : "business";
+}
+
+export function setContextMode(mode: "business" | "personal") {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(CONTEXT_MODE_KEY, mode);
+}
+
+/** Custom event fired when properties are added/edited/bulk-uploaded. OwnerDashboard listens to refetch personal mode units. */
+const PROPERTIES_CHANGED_EVENT = "docustay:properties-changed";
+
+export function emitPropertiesChanged() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(PROPERTIES_CHANGED_EVENT));
+}
+
+export function onPropertiesChanged(callback: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(PROPERTIES_CHANGED_EVENT, callback);
+  return () => window.removeEventListener(PROPERTIES_CHANGED_EVENT, callback);
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers: HeadersInit = {
@@ -27,6 +56,8 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     ...(options.headers as Record<string, string>),
   };
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  const contextMode = getContextMode();
+  if (contextMode) (headers as Record<string, string>)["X-Context-Mode"] = contextMode;
   let res: Response;
   try {
     res = await fetch(`${API_URL}${path}`, { ...options, headers });
@@ -51,9 +82,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       typeof window !== "undefined" &&
       (window.location.hash.includes("onboarding/identity") ||
         window.location.hash.includes("onboarding/poa") ||
+        window.location.hash.includes("onboarding/identity-complete") ||
         window.location.pathname.includes("onboarding/identity") ||
         window.location.pathname.includes("onboarding/poa"));
-    if (!isLoginRequest && typeof window !== "undefined" && !isOnboardingPage) {
+    const isManagerInviteSignup =
+      typeof window !== "undefined" &&
+      (window.location.hash.includes("register/manager") || window.location.pathname.includes("register/manager"));
+    if (!isLoginRequest && typeof window !== "undefined" && !isOnboardingPage && !isManagerInviteSignup) {
       setToken(null);
       window.location.hash = "login";
       window.location.reload();
@@ -112,7 +147,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 // --- Auth (match reference app expected shapes) ---
-export type UserType = "PROPERTY_OWNER" | "GUEST" | "ADMIN";
+export type UserType = "PROPERTY_OWNER" | "PROPERTY_MANAGER" | "TENANT" | "GUEST" | "ADMIN";
 export type AccountStatus = "PENDING_VERIFICATION" | "ACTIVE" | "FULLY_VERIFIED";
 
 export interface UserSession {
@@ -129,7 +164,7 @@ export interface UserSession {
 interface BackendUser {
   id: number;
   email: string;
-  role: "owner" | "guest" | "admin";
+  role: "owner" | "property_manager" | "tenant" | "guest" | "admin";
   full_name?: string | null;
   phone?: string | null;
   state?: string | null;
@@ -147,7 +182,11 @@ export interface TokenResponse {
 export function toUserSession(t: TokenResponse): UserSession {
   const u = t.user;
   const user_type: UserType =
-    u.role === "owner" ? "PROPERTY_OWNER" : u.role === "admin" ? "ADMIN" : "GUEST";
+    u.role === "owner" ? "PROPERTY_OWNER"
+    : u.role === "property_manager" ? "PROPERTY_MANAGER"
+    : u.role === "tenant" ? "TENANT"
+    : u.role === "admin" ? "ADMIN"
+    : "GUEST";
   return {
     user_id: String(u.id),
     user_type,
@@ -164,7 +203,7 @@ export const authApi = {
   async login(
     email: string,
     password: string,
-    role?: "owner" | "guest" | "admin",
+    role?: "owner" | "property_manager" | "tenant" | "guest" | "admin",
   ): Promise<{ status: string; data: UserSession; message?: string }> {
     const body = await request<TokenResponse>("/auth/login", {
       method: "POST",
@@ -174,6 +213,9 @@ export const authApi = {
     return { status: "success", data: toUserSession(body) };
   },
   async register(data: {
+    account_type?: 'individual';
+    first_name?: string;
+    last_name?: string;
     full_name: string;
     email: string;
     phone: string;
@@ -196,6 +238,9 @@ export const authApi = {
       const body = await request<{ user_id?: number; message?: string } & Partial<TokenResponse>>("/auth/register", {
         method: "POST",
         body: JSON.stringify({
+          account_type: data.account_type ?? "individual",
+          first_name: data.first_name,
+          last_name: data.last_name,
           full_name: data.full_name,
           email: data.email,
           phone: data.phone,
@@ -281,6 +326,19 @@ export const authApi = {
     }
   },
 
+  /** Get manager invite details for pre-filling signup form. */
+  async getManagerInvite(token: string): Promise<{ email: string; property_name: string; property_id: number }> {
+    return request<{ email: string; property_name: string; property_id: number }>(`/auth/manager-invite/${encodeURIComponent(token)}`);
+  },
+  /** Property manager signup via invite link. */
+  async registerManager(data: { invite_token: string; full_name: string; email: string; phone: string; password: string; confirm_password: string }): Promise<{ status: string; data: UserSession; message?: string }> {
+    const body = await request<TokenResponse>("/auth/register/manager", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    setToken(body.access_token);
+    return { status: "success", data: toUserSession(body) };
+  },
   /** Resend verification code to the user's email. */
   async resendVerification(userId: string): Promise<{ status: string; message?: string }> {
     try {
@@ -300,9 +358,15 @@ export const authApi = {
       const body = await request<BackendUser>("/auth/me");
       const token = getToken();
       if (!token) return null;
+      const user_type: UserType =
+        body.role === "owner" ? "PROPERTY_OWNER"
+        : body.role === "property_manager" ? "PROPERTY_MANAGER"
+        : body.role === "tenant" ? "TENANT"
+        : body.role === "admin" ? "ADMIN"
+        : "GUEST";
       return {
         user_id: String(body.id),
-        user_type: body.role === "owner" ? "PROPERTY_OWNER" : "GUEST",
+        user_type,
         user_name: body.full_name || body.email,
         email: body.email,
         account_status: "ACTIVE",
@@ -339,6 +403,10 @@ export const identityApi = {
       method: "POST",
       body: JSON.stringify({ verification_session_id: verificationSessionId }),
     });
+  },
+  /** Get the verification_session_id we stored when creating the session. Use when Stripe redirect omits session_id in URL (manager/owner flow). */
+  async getLatestIdentitySession(): Promise<{ verification_session_id: string }> {
+    return request<{ verification_session_id: string }>("/auth/identity/latest-session");
   },
 };
 
@@ -442,6 +510,8 @@ export interface GuestStayView {
   /** Slug for live property page URL (#live/<slug>). */
   property_live_slug?: string | null;
   property_name: string;
+  /** Unit the guest is invited to (e.g. "5" for multi-unit building). */
+  unit_label?: string | null;
   approved_stay_start_date: string;
   approved_stay_end_date: string;
   region_code: string;
@@ -467,6 +537,8 @@ export interface GuestStayView {
 export interface GuestPendingInviteView {
   invitation_code: string;
   property_name: string;
+  /** Unit the guest is invited to (e.g. "5" for multi-unit building). */
+  unit_label?: string | null;
   stay_start_date: string;
   stay_end_date: string;
   host_name: string | null;
@@ -606,6 +678,8 @@ export interface PortfolioPropertyItem {
   region_code: string;
   property_type_label?: string | null;
   bedrooms?: string | null;
+  is_multi_unit?: boolean;
+  unit_count?: number | null;
 }
 
 export interface PortfolioOwnerInfo {
@@ -656,8 +730,33 @@ export interface BillingResponse {
 }
 
 export const dashboardApi = {
+  ownerPersonalModeUnits: () => request<{ unit_ids: number[] }>("/dashboard/owner/personal-mode-units"),
+  ownerPropertyPersonalModeUnit: (propertyId: number) =>
+    request<{ unit_id: number | null }>(`/dashboard/owner/properties/${propertyId}/personal-mode-unit`),
   ownerStays: () => request<OwnerStayView[]>("/dashboard/owner/stays"),
   ownerInvitations: () => request<OwnerInvitationView[]>("/dashboard/owner/invitations"),
+  managerPersonalModeUnits: () => request<{ unit_ids: number[] }>("/dashboard/manager/personal-mode-units"),
+  managerStays: () => request<OwnerStayView[]>("/dashboard/manager/stays"),
+  managerLogs: (params?: { from_ts?: string; to_ts?: string; category?: string; search?: string; property_id?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.from_ts) sp.set("from_ts", params.from_ts);
+    if (params?.to_ts) sp.set("to_ts", params.to_ts);
+    if (params?.property_id != null) sp.set("property_id", String(params.property_id));
+    if (params?.category) sp.set("category", params.category);
+    if (params?.search) sp.set("search", params.search);
+    const q = sp.toString();
+    return request<OwnerAuditLogEntry[]>(`/dashboard/manager/logs${q ? `?${q}` : ""}`);
+  },
+  managerBilling: () => request<BillingResponse>("/dashboard/manager/billing"),
+  managerProperties: () => request<{ id: number; name: string | null; address: string; occupancy_status: string; unit_count: number; occupied_count: number }[]>("/managers/properties"),
+  getManagerProperty: (propertyId: number) =>
+    request<{ id: number; name: string | null; address: string; street?: string | null; city?: string | null; state?: string | null; zip_code?: string | null; occupancy_status: string; unit_count: number; occupied_count: number; region_code?: string | null; property_type_label?: string | null; is_multi_unit?: boolean; shield_mode_enabled?: boolean }>(`/managers/properties/${propertyId}`),
+  managerUnits: (propertyId: number) => request<{ id: number; unit_label: string; occupancy_status: string; occupied_by?: string | null; invite_id?: string | null }[]>(`/managers/properties/${propertyId}/units`),
+  managerInviteTenant: (unitId: number, data: { tenant_name: string; tenant_email: string; lease_start_date: string; lease_end_date: string }) =>
+    request<{ invitation_code: string }>(`/managers/units/${unitId}/invite-tenant`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
   /** Invoices and payments for owner billing section. */
   billing: () => request<BillingResponse>("/dashboard/owner/billing"),
   /** Create Stripe Billing Portal session; redirect user to returned URL to pay. After payment (e.g. Klarna) they return to our app. */
@@ -669,16 +768,109 @@ export const dashboardApi = {
   /** Cancel a pending invitation (owner only). */
   cancelInvitation: (invitationId: number) =>
     request<{ status: string; message?: string }>(`/dashboard/owner/invitations/${invitationId}/cancel`, { method: "POST" }),
-  /** Append-only audit logs for owner's properties. Filter by time (ISO UTC), category, search. */
-  ownerLogs: (params?: { from_ts?: string; to_ts?: string; category?: string; search?: string }) => {
+  /** Append-only audit logs for owner's properties. Filter by time (ISO UTC), category, search, property_id. */
+  ownerLogs: (params?: { from_ts?: string; to_ts?: string; category?: string; search?: string; property_id?: number }) => {
     const sp = new URLSearchParams();
     if (params?.from_ts) sp.set("from_ts", params.from_ts);
     if (params?.to_ts) sp.set("to_ts", params.to_ts);
     if (params?.category) sp.set("category", params.category);
     if (params?.search) sp.set("search", params.search);
+    if (params?.property_id != null) sp.set("property_id", String(params.property_id));
     const q = sp.toString();
     return request<OwnerAuditLogEntry[]>(`/dashboard/owner/logs${q ? `?${q}` : ""}`);
   },
+  tenantUnit: () => request<{
+    unit: { id: number; unit_label: string; occupancy_status: string } | null;
+    property: { id: number; name: string; address: string } | null;
+    invite_id: string | null;
+    token_state: string | null;
+    stay_start_date: string | null;
+    stay_end_date: string | null;
+    live_slug: string | null;
+    region_code: string | null;
+    jurisdiction_state_name: string | null;
+    jurisdiction_statutes: Array<{ citation: string; plain_english?: string | null }>;
+    removal_guest_text: string | null;
+    removal_tenant_text: string | null;
+  }>("/dashboard/tenant/unit"),
+  /** Cancel the tenant's future unit assignment (before start date). */
+  tenantCancelFutureAssignment: () =>
+    request<{ status: string; message?: string }>("/dashboard/tenant/cancel-future-assignment", { method: "POST" }),
+  /** End the tenant's ongoing assignment (checkout): set end_date to today. */
+  tenantEndAssignment: () =>
+    request<{ status: string; message?: string }>("/dashboard/tenant/end-assignment", { method: "POST" }),
+  tenantCreateInvitation: async (data: {
+    unit_id: number;
+    guest_name: string;
+    checkin_date: string;
+    checkout_date: string;
+  }): Promise<{ status: string; data?: { invitation_code: string }; message?: string }> => {
+    try {
+      const res = await request<{ invitation_code?: string; data?: { invitation_code?: string } }>("/dashboard/tenant/invitations", {
+        method: "POST",
+        body: JSON.stringify(data),
+      });
+      const code = (res as any)?.invitation_code ?? (res as any)?.data?.invitation_code;
+      if (!code || typeof code !== "string") {
+        return {
+          status: "error",
+          message: "We couldn't create a valid invitation link. Please try again.",
+        };
+      }
+      return { status: "success", data: { invitation_code: code } };
+    } catch (e: any) {
+      return {
+        status: "error",
+        message: toUserFriendlyInvitationError(e?.message ?? "Invitation failed"),
+      };
+    }
+  },
+  tenantInvitations: () => request<OwnerInvitationView[]>("/dashboard/tenant/invitations"),
+  tenantGuestHistory: () => request<OwnerStayView[]>("/dashboard/tenant/guest-history"),
+  /** Event ledger for tenant: assigned property, tenant's actions, invitations tenant created. */
+  tenantLogs: (params?: { from_ts?: string; to_ts?: string; category?: string; search?: string; property_id?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.from_ts) sp.set("from_ts", params.from_ts);
+    if (params?.to_ts) sp.set("to_ts", params.to_ts);
+    if (params?.category) sp.set("category", params.category);
+    if (params?.search) sp.set("search", params.search);
+    if (params?.property_id != null) sp.set("property_id", String(params.property_id));
+    const q = sp.toString();
+    return request<OwnerAuditLogEntry[]>(`/dashboard/tenant/logs${q ? `?${q}` : ""}`);
+  },
+  getPresence: (unitId: number) =>
+    request<{ status: string; unit_id: number; away_started_at: string | null; away_ended_at: string | null; guests_authorized_during_away: boolean }>(
+      `/dashboard/presence?unit_id=${unitId}`
+    ),
+  setPresence: (unitId: number, status: "present" | "away", guestsAuthorizedDuringAway?: boolean) =>
+    request<{ status: string; presence: string; unit_id: number; away_started_at?: string | null; away_ended_at?: string | null; guests_authorized_during_away?: boolean }>(
+      "/dashboard/presence",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          unit_id: unitId,
+          status,
+          ...(guestsAuthorizedDuringAway !== undefined && { guests_authorized_during_away: guestsAuthorizedDuringAway }),
+        }),
+      }
+    ),
+  /** Guest stay presence (for an ongoing checked-in stay). */
+  getStayPresence: (stayId: number) =>
+    request<{ status: string; stay_id: number; away_started_at: string | null; away_ended_at: string | null; guests_authorized_during_away: boolean }>(
+      `/dashboard/guest/presence?stay_id=${stayId}`
+    ),
+  setStayPresence: (stayId: number, status: "present" | "away", guestsAuthorizedDuringAway?: boolean) =>
+    request<{ status: string; presence: string; stay_id: number; away_started_at?: string | null; away_ended_at?: string | null; guests_authorized_during_away?: boolean }>(
+      "/dashboard/guest/presence",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          stay_id: stayId,
+          status,
+          ...(guestsAuthorizedDuringAway !== undefined && { guests_authorized_during_away: guestsAuthorizedDuringAway }),
+        }),
+      }
+    ),
   guestStays: () => request<GuestStayView[]>("/dashboard/guest/stays"),
   /** Guest profile (full_legal_name, permanent_home_address). Guest only. */
   guestProfile: () =>
@@ -707,12 +899,26 @@ export const dashboardApi = {
   /** Cancel a future stay. Guest only. */
   guestCancelStay: (stayId: number) =>
     request<{ status: string; message?: string }>(`/dashboard/guest/stays/${stayId}/cancel`, { method: "POST" }),
+  /** Activity logs (audit trail) for the guest's stays. Guest only. Optional stay_id restricts to one stay. */
+  guestLogs: (params?: { from_ts?: string; to_ts?: string; category?: string; search?: string; stay_id?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.from_ts) sp.set("from_ts", params.from_ts);
+    if (params?.to_ts) sp.set("to_ts", params.to_ts);
+    if (params?.category) sp.set("category", params.category);
+    if (params?.search) sp.set("search", params.search);
+    if (params?.stay_id != null) sp.set("stay_id", String(params.stay_id));
+    const q = sp.toString();
+    return request<OwnerAuditLogEntry[]>(`/dashboard/guest/logs${q ? `?${q}` : ""}`);
+  },
   /** Revoke stay (Kill Switch). Owner only. Guest must vacate in 12 hours; email sent to guest. */
   revokeStay: (stayId: number) =>
     request<{ status: string; message?: string }>(`/dashboard/owner/stays/${stayId}/revoke`, { method: "POST" }),
-  /** Initiate formal removal for overstayed guest. Revokes USAT token, sends emails to guest and owner. */
+  /** Initiate formal removal for overstayed guest. Revokes stay authorization, sends emails to guest and owner. */
   initiateRemoval: (stayId: number) =>
     request<{ status: string; message?: string; usat_revoked?: boolean }>(`/dashboard/owner/stays/${stayId}/initiate-removal`, { method: "POST" }),
+  /** Confirm vacant unit still vacant (owner or manager). */
+  confirmVacant: (propertyId: number) =>
+    request<{ status: string; message?: string }>(`/dashboard/owner/properties/${propertyId}/confirm-vacant`, { method: "POST" }),
   /** Owner confirms occupancy: Unit Vacated, Lease Renewed, or Holdover. */
   confirmOccupancyStatus: (stayId: number, action: "vacated" | "renewed" | "holdover", newLeaseEndDate?: string) =>
     request<{ status: string; message?: string; occupancy_status?: string; new_lease_end_date?: string }>(
@@ -924,6 +1130,8 @@ export interface Property {
   /** Shield Mode: independent of vacant/occupied. Owner can turn ON or OFF anytime. Auto ON: last day of guest's stay, and when Dead Man's Switch runs (48h after stay end). Auto OFF: when new guest accepts invitation. */
   shield_mode_enabled?: boolean;
   occupancy_status?: string;  // vacant | occupied | unknown | unconfirmed
+  /** True when property has multiple units (apartment, duplex, triplex, quadplex). */
+  is_multi_unit?: boolean;
   ownership_proof_filename?: string | null;
   ownership_proof_type?: string | null;
   ownership_proof_uploaded_at?: string | null;
@@ -1007,6 +1215,8 @@ export const propertiesApi = {
     country?: string;
     property_type?: string;
     bedrooms?: string;
+    unit_count?: number;
+    primary_residence_unit?: number;
     is_primary_residence: boolean;
     tax_id?: string;
     apn?: string;
@@ -1016,6 +1226,46 @@ export const propertiesApi = {
       body: JSON.stringify(data),
     }),
   get: (id: number) => request<Property>(`/owners/properties/${id}`),
+  /** List units for a property. Used when inviting guests to multi-unit properties. */
+  getUnits: (propertyId: number) =>
+    request<{ id: number; unit_label: string; occupancy_status: string; is_primary_residence?: boolean; occupied_by?: string | null; invite_id?: string | null }[]>(`/owners/properties/${propertyId}/units`),
+  /** Create a tenant invitation for a unit. Owner must own the property. Use for multi-unit. */
+  inviteTenant: (unitId: number, data: { tenant_name: string; tenant_email: string; lease_start_date: string; lease_end_date: string }) =>
+    request<{ invitation_code: string; status?: string; message?: string }>(`/owners/units/${unitId}/invite-tenant`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  /** Create a tenant invitation for a single-unit property (no unit rows). */
+  inviteTenantForProperty: (propertyId: number, data: { tenant_name: string; tenant_email: string; lease_start_date: string; lease_end_date: string }) =>
+    request<{ invitation_code: string; status?: string; message?: string }>(`/owners/properties/${propertyId}/invite-tenant`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  /** Invite a property manager to manage this property. */
+  inviteManager: (propertyId: number, email: string) =>
+    request<{ status: string; message?: string }>(`/owners/properties/${propertyId}/invite-manager`, {
+      method: "POST",
+      body: JSON.stringify({ email: email.trim().toLowerCase() }),
+    }),
+  listAssignedManagers: (propertyId: number) =>
+    request<{ user_id: number; email: string; full_name: string | null; has_resident_mode: boolean; resident_unit_id: number | null; resident_unit_label: string | null; presence_status: string | null; presence_away_started_at: string | null }[]>(
+      `/owners/properties/${propertyId}/assigned-managers`
+    ),
+  removePropertyManager: (propertyId: number, managerUserId: number) =>
+    request<{ status: string; message?: string }>(`/owners/properties/${propertyId}/managers/remove`, {
+      method: "POST",
+      body: JSON.stringify({ manager_user_id: managerUserId }),
+    }),
+  addManagerResidentMode: (propertyId: number, managerUserId: number, unitId: number) =>
+    request<{ status: string; message?: string }>(`/owners/properties/${propertyId}/managers/add-resident-mode`, {
+      method: "POST",
+      body: JSON.stringify({ manager_user_id: managerUserId, unit_id: unitId }),
+    }),
+  removeManagerResidentMode: (propertyId: number, managerUserId: number) =>
+    request<{ status: string; message?: string }>(`/owners/properties/${propertyId}/managers/remove-resident-mode`, {
+      method: "POST",
+      body: JSON.stringify({ manager_user_id: managerUserId }),
+    }),
   /** Utility Bucket: providers and authority letters for this property. */
   getUtilities: (id: number) => request<PropertyUtilitiesResponse>(`/owners/properties/${id}/utilities`),
   /** Verify address (Smarty) and fetch utility options by type. For add-property utilities step. */
@@ -1062,6 +1312,8 @@ export const propertiesApi = {
     region_code?: string;
     property_type?: string;
     bedrooms?: string;
+    unit_count?: number;
+    primary_residence_unit?: number;
     is_primary_residence?: boolean;
     owner_occupied?: boolean;
     shield_mode_enabled?: boolean;
@@ -1157,6 +1409,8 @@ export interface InvitationDetails {
   expired?: boolean;
   /** True when the invitation link was already used (guest accepted; one-time use). */
   used?: boolean;
+  /** From DB: 'guest' | 'tenant'. Enforced so guest links cannot be used for tenant signup and vice versa. */
+  invitation_kind?: 'guest' | 'tenant';
   property_name?: string | null;
   property_address?: string | null;
   stay_start_date?: string;
@@ -1164,14 +1418,18 @@ export interface InvitationDetails {
   region_code?: string;
   host_name?: string;
   guest_name?: string | null;
+  guest_email?: string | null;
+  /** Derived from invitation_kind (true when invitation_kind === 'tenant'). */
+  is_tenant_invite?: boolean;
 }
 
 export const invitationsApi = {
   getDetails: (code: string) =>
     request<InvitationDetails>(`/owners/invitation-details?code=${encodeURIComponent(code)}`),
   async create(data: {
-    owner_id: string;
+    owner_id?: string | number;
     property_id?: number;
+    unit_id?: number;
     guest_name: string;
     checkin_date: string;
     checkout_date: string;
@@ -1182,14 +1440,23 @@ export const invitationsApi = {
     dead_mans_switch_alert_phone?: boolean;
   }): Promise<{ status: string; data?: { invitation_code: string }; message?: string }> {
     try {
-      const res = await request<{ invitation_code?: string }>("/owners/invitations", {
+      const res = await request<{ invitation_code?: string; data?: { invitation_code?: string } }>("/owners/invitations", {
         method: "POST",
         body: JSON.stringify(data),
       });
-      const code = (res as any)?.invitation_code || "INV-" + Math.random().toString(36).slice(2, 8).toUpperCase();
+      const code = (res as any)?.invitation_code ?? (res as any)?.data?.invitation_code;
+      if (!code || typeof code !== "string") {
+        return {
+          status: "error",
+          message: "We couldn't create a valid invitation link. Please try again.",
+        };
+      }
       return { status: "success", data: { invitation_code: code } };
     } catch (e: any) {
-      return { status: "error", message: e?.message || "Invitation failed" };
+      return {
+        status: "error",
+        message: toUserFriendlyInvitationError(e?.message ?? "Invitation failed"),
+      };
     }
   },
 };
@@ -1320,8 +1587,9 @@ export const ownerPoaApi = {
 // --- Guest registration (from invite link) ---
 export const authApiGuest = {
   async register(data: {
-    invitation_id: string;
-    invitation_code: string;
+    role?: "guest" | "tenant";
+    invitation_id?: string;
+    invitation_code?: string;
     full_name: string;
     email: string;
     phone: string;

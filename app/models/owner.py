@@ -43,6 +43,7 @@ class OwnerProfile(Base):
     # Public portfolio page: unique slug for URL (e.g. /#portfolio/abc123)
     portfolio_slug = Column(String(32), unique=True, nullable=True, index=True)
 
+
     user = relationship("User", backref="owner_profile")
     properties = relationship("Property", back_populates="owner_profile")
 
@@ -105,6 +106,9 @@ class Property(Base):
     # Property identifier for authority package (Jurisdictional POA wrap)
     tax_id = Column(String(64), nullable=True)
     apn = Column(String(64), nullable=True)
+
+    # Multi-unit: when True, units are in Unit table; when False, 1 Property = 1 implicit unit
+    is_multi_unit = Column(Boolean, nullable=False, default=False)
 
     # Vacant-unit monitoring (DMS for vacant): if enabled, system prompts at intervals; no response → UNCONFIRMED
     vacant_monitoring_enabled = Column(Integer, nullable=False, default=0)

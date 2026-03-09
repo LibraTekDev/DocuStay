@@ -21,6 +21,7 @@ from app.services.notifications import (
     send_vacant_monitoring_flipped,
 )
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_SHIELD_MODE, CATEGORY_DEAD_MANS_SWITCH
+from app.services.event_ledger import create_ledger_event, ACTION_OVERSTAY_OCCURRED, ACTION_DMS_48H_ALERT, ACTION_DMS_AUTO_EXECUTED, ACTION_SHIELD_MODE_ON, ACTION_VACANT_MONITORING_NO_RESPONSE
 from app.services.billing import sync_subscription_quantities
 from app.config import get_settings
 
@@ -105,6 +106,15 @@ def send_overstay_alerts_and_log(db: Session) -> None:
             property_id=stay.property_id,
             stay_id=stay.id,
             actor_email=None,
+            meta={"guest_id": stay.guest_id, "owner_id": stay.owner_id, "stay_end_date": end_str},
+        )
+        create_ledger_event(
+            db,
+            ACTION_OVERSTAY_OCCURRED,
+            target_object_type="Stay",
+            target_object_id=stay.id,
+            property_id=stay.property_id,
+            stay_id=stay.id,
             meta={"guest_id": stay.guest_id, "owner_id": stay.owner_id, "stay_end_date": end_str},
         )
         db.commit()

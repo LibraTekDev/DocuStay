@@ -4,6 +4,7 @@ import { Card, Input, Button } from '../../components/UI';
 import { invitationsApi, propertiesApi, APP_ORIGIN } from '../../services/api';
 import { UserSession } from '../../types';
 import { copyToClipboard } from '../../utils/clipboard';
+import { toUserFriendlyInvitationError } from '../../utils/invitationErrors';
 
 const InviteGuest: React.FC<{ user: UserSession | null, navigate: (v: string) => void, setLoading: (l: boolean) => void, notify: (t: 'success' | 'error', m: string) => void }> = ({ user, navigate, setLoading, notify }) => {
   const [formData, setFormData] = useState({ guest_name: '', checkin_date: '', checkout_date: '' });
@@ -54,11 +55,11 @@ const InviteGuest: React.FC<{ user: UserSession | null, navigate: (v: string) =>
         setInviteLink(link);
         setShowInviteModal(true);
       } else {
-        notify('error', result.message || 'Invitation failed.');
+        notify('error', result.message || 'We couldn\'t create a valid invitation link. Please try again.');
       }
     } catch (err) {
       setLoading(false);
-      notify('error', (err as Error)?.message || 'Invitation failed.');
+      notify('error', toUserFriendlyInvitationError((err as Error)?.message ?? 'Invitation failed.'));
     }
   };
 

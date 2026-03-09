@@ -3,8 +3,8 @@ import { Card, Button } from '../../components/UI';
 
 const FAQS = [
   { q: "How does DocuStay document temporary stays?", a: "DocuStay records authorization and stay details by region. Guests sign a Revocable License; stay durations are documented and capped by region. Identity verification supports the audit trail." },
-  { q: "What is a USAT Token?", a: "The Utility Service Authorization Token is a cryptographically signed pass that authorizes a guest to use utilities for the stay period without establishing an account in their name." },
-  { q: "What if a guest stays past the end date?", a: "You can revoke the USAT token from your dashboard, which disables utility access. Notices and all actions are logged in the audit trail. Your dashboard holds the documentation for your records." },
+  { q: "How does utility authorization work?", a: "DocuStay provides utility authorization so guests can use utilities for the stay period without establishing an account in their name. Authorization is documented and can be revoked if needed." },
+  { q: "What if a guest stays past the end date?", a: "You can revoke the guest's stay authorization from your dashboard, which disables access. Notices and all actions are logged in the audit trail. Your dashboard holds the documentation for your records." },
 ];
 
 const HelpCenter: React.FC<{ navigate: (v: string) => void; embedded?: boolean }> = ({ navigate, embedded }) => {

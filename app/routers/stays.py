@@ -11,6 +11,7 @@ from app.schemas.stay import StayCreate, StayResponse
 from app.dependencies import get_current_user
 from app.services.jle import resolve_jurisdiction
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE
+from app.services.event_ledger import create_ledger_event, ACTION_STAY_CREATED
 from app.schemas.jle import JLEInput
 
 router = APIRouter(prefix="/stays", tags=["stays"])
@@ -86,6 +87,18 @@ def create_stay(
         ip_address=ip,
         user_agent=ua,
         meta={"guest_id": stay.guest_id, "owner_id": stay.owner_id},
+    )
+    create_ledger_event(
+        db,
+        ACTION_STAY_CREATED,
+        target_object_type="Stay",
+        target_object_id=stay.id,
+        property_id=stay.property_id,
+        stay_id=stay.id,
+        actor_user_id=current_user.id,
+        meta={"guest_id": stay.guest_id, "owner_id": stay.owner_id, "stay_start_date": str(stay.stay_start_date), "stay_end_date": str(stay.stay_end_date)},
+        ip_address=ip,
+        user_agent=ua,
     )
     db.commit()
     return StayResponse.model_validate(stay)

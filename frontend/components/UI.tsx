@@ -44,14 +44,16 @@ export const Input: React.FC<{
   type?: string;
   value: string;
   onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => void;
+  onKeyDown?: (e: React.KeyboardEvent<HTMLInputElement | HTMLSelectElement>) => void;
   error?: string;
   placeholder?: string;
   options?: { value: string; label: string }[];
   required?: boolean;
   className?: string;
-  // Added disabled prop to support read-only form elements
   disabled?: boolean;
-}> = ({ label, name, type = 'text', value, onChange, error, placeholder, options, required, className, disabled }) => (
+  min?: string;
+  max?: string;
+}> = ({ label, name, type = 'text', value, onChange, onKeyDown, error, placeholder, options, required, className, disabled, min, max }) => (
   <div className={`mb-4 ${className}`}>
     <label htmlFor={name} className="block text-sm font-medium text-gray-700 mb-1.5">
       {label} {required && <span className="text-red-500">*</span>}
@@ -75,8 +77,11 @@ export const Input: React.FC<{
         type={type}
         value={value}
         onChange={onChange}
+        onKeyDown={onKeyDown}
         placeholder={placeholder}
         disabled={disabled}
+        min={min}
+        max={max}
         className={`w-full px-4 py-2.5 bg-white border rounded-lg text-gray-900 placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:border-blue-600 outline-none transition-colors ${error ? 'border-red-500' : 'border-gray-300'} ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
       />
     )}

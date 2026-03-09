@@ -22,7 +22,7 @@ export const generateEnforcementPacket = (state: JurisdictionState, data: any): 
         },
         {
           title: "Notice of License Revocation",
-          statute: "DocuStay USAT Protocol",
+          statute: "DocuStay Authorization Protocol",
           instructions: "Keep as proof of service.",
           content: `Stay authorization for Token ${data.tokenId} was officially revoked at ${new Date().toLocaleString()}.`
         }

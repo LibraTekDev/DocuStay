@@ -1,7 +1,7 @@
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Card, Input, Button } from '../../components/UI';
-import { propertiesApi } from '../../services/api';
+import { propertiesApi, emitPropertiesChanged, setContextMode } from '../../services/api';
 import { UserSession } from '../../types';
 
 interface Props {
@@ -34,9 +34,19 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
     country: 'USA',
     property_type: 'house',
     bedrooms: '1',
+    unit_count: '',
     is_primary_residence: false,
+    primary_residence_unit: '' as string,  // For multi-unit: '1', '2', ... or ''
     proof_type: 'deed',
   });
+
+  const isMultiUnitType = ['apartment', 'duplex', 'triplex', 'quadplex'].includes(formData.property_type);
+  const defaultUnitCount: Record<string, string> = { duplex: '2', triplex: '3', quadplex: '4' };
+
+  // Property registration requires Business mode (owner portfolio action)
+  useEffect(() => {
+    setContextMode('business');
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -50,9 +60,17 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
       return;
     }
 
+    if (isMultiUnitType) {
+      const uc = parseInt(formData.unit_count, 10);
+      if (!formData.unit_count.trim() || isNaN(uc) || uc < 1) {
+        notify('error', 'Please enter a valid number of units (at least 1).');
+        return;
+      }
+    }
+
     setLoading(true);
     try {
-      const prop = await propertiesApi.add({
+      const payload = {
         property_name: formData.property_name || undefined,
         street_address: formData.street_address,
         city: formData.city,
@@ -62,9 +80,19 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
         property_type: formData.property_type,
         bedrooms: formData.bedrooms,
         is_primary_residence: formData.is_primary_residence,
-      });
+      };
+      if (isMultiUnitType && formData.unit_count) {
+        const uc = parseInt(formData.unit_count, 10);
+        if (!isNaN(uc) && uc > 0) (payload as { unit_count?: number }).unit_count = uc;
+      }
+      if (isMultiUnitType && formData.primary_residence_unit) {
+        const pu = parseInt(formData.primary_residence_unit, 10);
+        if (!isNaN(pu) && pu >= 1) (payload as { primary_residence_unit?: number }).primary_residence_unit = pu;
+      }
+      const prop = await propertiesApi.add(payload);
       await propertiesApi.uploadOwnershipProof(prop.id, formData.proof_type, proofFile);
       setLoading(false);
+      emitPropertiesChanged();
       notify('success', 'Property added.');
       navigate(`property/${prop.id}`);
     } catch (err) {
@@ -77,7 +105,10 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
     { id: 'house', name: 'House', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
     { id: 'apartment', name: 'Apartment', icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' },
     { id: 'condo', name: 'Condo', icon: 'M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z' },
-    { id: 'townhouse', name: 'Townhouse', icon: 'M3 21h18M3 7h18M5 3h14a2 2 0 012 2v16H3V5a2 2 0 012-2z' }
+    { id: 'townhouse', name: 'Townhouse', icon: 'M3 21h18M3 7h18M5 3h14a2 2 0 012 2v16H3V5a2 2 0 012-2z' },
+    { id: 'duplex', name: 'Duplex', icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' },
+    { id: 'triplex', name: 'Triplex', icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' },
+    { id: 'quadplex', name: 'Quadplex', icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' },
   ];
 
   return (
@@ -141,13 +172,17 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
           {step === 2 && (
             <div className="animate-in fade-in slide-in-from-right-4 duration-500">
               <h2 className="text-3xl font-bold text-slate-800 mb-2">Property Details</h2>
-              <p className="text-slate-500 mb-8">Specific details help set region-appropriate stay limits for documentation.</p>
+              <p className="text-slate-500 mb-8">For houses or condos, provide bedroom info. For multi-unit buildings (apartment, duplex, triplex, quadplex), provide the number of units. Unit details can be managed individually after creation.</p>
               <label className="block text-sm font-medium text-slate-600 mb-4 ml-1">Property Type</label>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
                 {propertyTypes.map(type => (
                   <div
                     key={type.id}
-                    onClick={() => setFormData({...formData, property_type: type.id})}
+                    onClick={() => setFormData({
+                      ...formData,
+                      property_type: type.id,
+                      unit_count: defaultUnitCount[type.id] ?? formData.unit_count,
+                    })}
                     className={`cursor-pointer p-6 rounded-2xl border-2 transition-all duration-300 flex flex-col items-center gap-3 ${formData.property_type === type.id ? 'bg-blue-50 border-blue-400 shadow-lg shadow-blue-500/10' : 'bg-slate-100 border-slate-200 hover:border-slate-300'}`}
                   >
                     <div className={`w-12 h-12 rounded-xl flex items-center justify-center transition-colors ${formData.property_type === type.id ? 'bg-blue-600 text-white' : 'bg-slate-200 text-slate-600'}`}>
@@ -158,23 +193,72 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
                 ))}
               </div>
               <div className="grid md:grid-cols-2 gap-8">
-                <Input label="Number of Bedrooms" name="bedrooms" value={formData.bedrooms} onChange={e => setFormData({...formData, bedrooms: e.target.value})} options={[
-                  {value: '1', label: '1 Bedroom'}, {value: '2', label: '2 Bedrooms'}, {value: '3', label: '3 Bedrooms'}, {value: '4', label: '4 Bedrooms'}, {value: '5', label: '5+ Bedrooms'}
-                ]} />
-                <div className="flex flex-col justify-center">
-                  <label className="flex items-center gap-4 cursor-pointer p-4 rounded-xl bg-slate-100 border border-slate-200 hover:border-slate-300 transition-all">
-                    <input
-                      type="checkbox"
-                      checked={formData.is_primary_residence}
-                      onChange={e => setFormData({...formData, is_primary_residence: e.target.checked})}
-                      className="w-6 h-6 rounded border-slate-300 bg-white text-blue-600 focus:ring-blue-500"
-                    />
-                    <div>
-                      <span className="block text-sm font-bold text-slate-800">Primary Residence?</span>
-                      <span className="text-xs text-slate-500">Documented limits may vary for homestead properties.</span>
-                    </div>
-                  </label>
-                </div>
+                {isMultiUnitType ? (
+                  <Input
+                    label="Number of units"
+                    name="unit_count"
+                    value={formData.unit_count}
+                    onChange={e => setFormData({...formData, unit_count: e.target.value})}
+                    placeholder={defaultUnitCount[formData.property_type] || 'e.g. 8'}
+                    required
+                  />
+                ) : (
+                  <Input label="Number of Bedrooms" name="bedrooms" value={formData.bedrooms} onChange={e => setFormData({...formData, bedrooms: e.target.value})} options={[
+                    {value: '1', label: '1 Bedroom'}, {value: '2', label: '2 Bedrooms'}, {value: '3', label: '3 Bedrooms'}, {value: '4', label: '4 Bedrooms'}, {value: '5', label: '5+ Bedrooms'}
+                  ]} />
+                )}
+                {!isMultiUnitType ? (
+                  <div className="flex flex-col justify-center">
+                    <label className="flex items-center gap-4 cursor-pointer p-4 rounded-xl bg-slate-100 border border-slate-200 hover:border-slate-300 transition-all">
+                      <input
+                        type="checkbox"
+                        checked={formData.is_primary_residence}
+                        onChange={e => setFormData({...formData, is_primary_residence: e.target.checked})}
+                        className="w-6 h-6 rounded border-slate-300 bg-white text-blue-600 focus:ring-blue-500"
+                      />
+                      <div>
+                        <span className="block text-sm font-bold text-slate-800">Primary Residence?</span>
+                        <span className="text-xs text-slate-500">Documented limits may vary for homestead properties.</span>
+                      </div>
+                    </label>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-3">
+                    <p className="text-sm font-medium text-slate-700">Do you live in one of the units?</p>
+                    <label className="flex items-center gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!!formData.primary_residence_unit}
+                        onChange={e => {
+                          if (!e.target.checked) setFormData({...formData, primary_residence_unit: ''});
+                          else {
+                            const uc = parseInt(formData.unit_count, 10);
+                            setFormData({...formData, primary_residence_unit: (uc >= 1 ? '1' : '')});
+                          }
+                        }}
+                        className="w-5 h-5 rounded border-slate-300 bg-white text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-sm text-slate-800">Yes, one unit is my primary residence</span>
+                    </label>
+                    {formData.primary_residence_unit && (() => {
+                      const uc = Math.max(1, parseInt(formData.unit_count, 10) || 1);
+                      return (
+                        <div className="pl-8">
+                          <label className="block text-xs font-medium text-slate-500 mb-1">Which unit?</label>
+                          <select
+                            value={formData.primary_residence_unit}
+                            onChange={e => setFormData({...formData, primary_residence_unit: e.target.value})}
+                            className="w-full max-w-xs px-3 py-2 border border-slate-300 rounded-lg text-sm"
+                          >
+                            {Array.from({ length: uc }, (_, i) => i + 1).map((n) => (
+                              <option key={n} value={String(n)}>Unit {n}</option>
+                            ))}
+                          </select>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
               </div>
             </div>
           )}

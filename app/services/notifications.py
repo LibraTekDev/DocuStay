@@ -199,6 +199,19 @@ def send_owner_welcome_email(to_email: str, full_name: str | None = None) -> boo
     return send_email(to_email, subject, html, text_content=text)
 
 
+def send_manager_welcome_email(to_email: str, full_name: str | None = None, property_name: str = "your assigned properties") -> bool:
+    """Send welcome email when property manager signs up via invite."""
+    name = (full_name or "").strip() or "there"
+    subject = "[DocuStay] Welcome – your Property Manager account is ready"
+    html = f"""
+    <p>Hi {name},</p>
+    <p>Welcome to <strong>DocuStay</strong>. Your Property Manager account is ready.</p>
+    <p>You can now sign in to manage <strong>{property_name}</strong>, view units, invite tenants, and view activity logs.</p>
+    <p>— DocuStay</p>
+    """
+    return send_email(to_email, subject, html, text_content=f"Hi {name}, welcome to DocuStay. Your Property Manager account is ready. Sign in to manage {property_name}.")
+
+
 def send_guest_signup_welcome_email(to_email: str, full_name: str | None = None) -> bool:
     """Send welcome email when a guest signs up (no stay yet – e.g. no invite or invite not yet accepted)."""
     name = (full_name or "").strip() or "there"
@@ -250,6 +263,22 @@ def send_guest_stay_added_email(
     <p>— DocuStay</p>
     """
     return send_email(to_email, subject, html)
+
+
+def send_manager_invite_email(to_email: str, invite_link: str, property_name: str = "a property") -> bool:
+    """Send property manager invitation email with signup link."""
+    subject = "[DocuStay] You've been invited as a Property Manager"
+    html = f"""
+    <p>Hello,</p>
+    <p>You've been invited to manage <strong>{property_name}</strong> on DocuStay.</p>
+    <p>Click the link below to create your account and get started:</p>
+    <p><a href="{invite_link}" style="background:#2563eb;color:white;padding:10px 16px;text-decoration:none;border-radius:6px;display:inline-block;">Accept invitation</a></p>
+    <p>Or copy this link: <br/><a href="{invite_link}">{invite_link}</a></p>
+    <p>This link expires in 3 days. If you did not expect this invitation, you can ignore this email.</p>
+    <p>— DocuStay</p>
+    """
+    text = f"You've been invited to manage {property_name} on DocuStay. Create your account: {invite_link}"
+    return send_email(to_email, subject, html, text_content=text)
 
 
 def send_stay_ending_soon(

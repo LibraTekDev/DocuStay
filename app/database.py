@@ -2,10 +2,8 @@
 Database connection and session.
 
 Schema source of truth: app.models. On startup, Base.metadata.create_all(bind=engine)
-creates all tables and columns from the current models. For a new (empty) database,
-no migration scripts need to be run. The scripts in scripts/ (migrate_*.py) are only
-for existing databases that were created before a given column or table was added
-to the models.
+creates all tables and columns from the current models. For a fresh database, the full
+schema is created in one step; no migration scripts are needed.
 """
 import logging
 from sqlalchemy import create_engine

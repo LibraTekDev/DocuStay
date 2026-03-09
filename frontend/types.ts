@@ -1,9 +1,13 @@
 
 export enum UserType {
   PROPERTY_OWNER = 'PROPERTY_OWNER',
+  PROPERTY_MANAGER = 'PROPERTY_MANAGER',
+  TENANT = 'TENANT',
   GUEST = 'GUEST',
   ADMIN = 'ADMIN'
 }
+
+export type ContextMode = 'business' | 'personal';
 
 export enum AccountStatus {
   PENDING_VERIFICATION = 'PENDING_VERIFICATION',

@@ -52,13 +52,13 @@ const AdminLogin: React.FC<AdminLoginProps> = ({ onLogin, setLoading, notify, na
         {/* Left: Simple info */}
         <div className="hidden lg:flex w-1/2 bg-gradient-to-br from-blue-100/40 via-blue-50/40 to-sky-100/40 p-10 flex-col justify-center border-r border-blue-200/40">
           <h2 className="text-2xl font-semibold text-gray-900 mb-3">Admin login</h2>
-          <p className="text-gray-600 text-sm mb-8">Internal access to users, audit logs, and platform data.</p>
+          <p className="text-gray-600 text-sm mb-8">Internal access to users, event ledger, and platform data.</p>
           <ul className="space-y-3 text-sm text-gray-600">
             <li className="flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-blue-600" /> Users & roles
             </li>
             <li className="flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-blue-600" /> Audit logs
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-600" /> Event ledger
             </li>
             <li className="flex items-center gap-2">
               <span className="w-1.5 h-1.5 rounded-full bg-blue-600" /> Properties, stays & invitations
