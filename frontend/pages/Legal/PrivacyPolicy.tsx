@@ -1,17 +1,12 @@
 import React from 'react';
 
 const SECTIONS = [
-  { id: 'intro', label: 'Introduction' },
   { id: 'collect', label: 'Information We Collect' },
   { id: 'use', label: 'How We Use Your Information' },
-  { id: 'share', label: 'How We Share Your Information' },
+  { id: 'security', label: 'Data Security' },
   { id: 'retention', label: 'Data Retention' },
-  { id: 'security', label: 'Security' },
+  { id: 'sharing', label: 'Information Sharing' },
   { id: 'rights', label: 'Your Rights and Choices' },
-  { id: 'cookies', label: 'Cookies and Tracking' },
-  { id: 'transfers', label: 'International Transfers' },
-  { id: 'children', label: 'Children' },
-  { id: 'changes', label: 'Changes to This Policy' },
   { id: 'contact', label: 'Contact Us' },
 ];
 
@@ -30,11 +25,11 @@ const PrivacyPolicy: React.FC<{ navigate: (v: string) => void }> = ({ navigate }
             </div>
             <div>
               <h1 className="text-3xl md:text-4xl font-bold tracking-tight">Privacy Policy</h1>
-              <p className="text-slate-400 text-sm mt-1">Last updated: {new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
+              <p className="text-slate-400 text-sm mt-1">Last Updated: March 11, 2026</p>
             </div>
           </div>
           <p className="text-slate-300 max-w-2xl text-sm md:text-base leading-relaxed">
-            We take your privacy seriously. This policy explains how we collect, use, and protect your personal information when you use DocuStay.
+            DOCUSTAY LLC (&quot;DocuStay,&quot; &quot;we,&quot; &quot;us,&quot; or &quot;our&quot;) is committed to protecting your privacy. This Privacy Policy explains how we collect, use, disclose, and safeguard your information when you use our documentation platform and related services (the &quot;Services&quot;).
           </p>
         </div>
       </header>
@@ -61,102 +56,59 @@ const PrivacyPolicy: React.FC<{ navigate: (v: string) => void }> = ({ navigate }
           {/* Main content */}
           <main className="flex-1 min-w-0">
             <div className="space-y-8">
-              <section id="intro" className="scroll-mt-24">
-                <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
-                  <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">1</span>
-                    Introduction
-                  </h2>
-                  <p className="text-slate-600 leading-relaxed mb-4">
-                    DocuStay (&quot;we,&quot; &quot;us,&quot; or &quot;our&quot;) operates a neutral documentation platform for property status, occupancy, authorized presence, and related records. This Privacy Policy explains how we collect, use, disclose, and protect your personal information when you use our Platform, website, and services.
-                  </p>
-                  <p className="text-slate-600 leading-relaxed">
-                    By using DocuStay, you consent to the practices described in this policy. If you do not agree, please do not use the Platform.
-                  </p>
-                </div>
-              </section>
-
               <section id="collect" className="scroll-mt-24">
                 <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
                   <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">2</span>
+                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">1</span>
                     Information We Collect
                   </h2>
-                  <div className="space-y-6">
-                    <div>
-                      <h3 className="text-lg font-medium text-slate-800 mb-2">2.1 Information You Provide</h3>
-                      <ul className="space-y-2">
-                        {[
-                          { title: 'Account information', desc: 'Name, email address, phone number, and password when you register. Property owners may provide ownership verification documents (e.g., deed, tax bill).' },
-                          { title: 'Property information', desc: 'Addresses, property details, occupancy status, and documentation preferences for properties you add to the Platform.' },
-                          { title: 'Invitation and guest data', desc: 'Guest or tenant names, email addresses, stay dates, and related information when you create invitations or accept them.' },
-                          { title: 'Identity verification data', desc: 'When you complete identity verification (e.g., via Stripe Identity), we receive verification status and identifiers. We do not store raw identity documents.' },
-                          { title: 'Agreement and signature data', desc: 'Electronic signatures, agreement acceptance timestamps, and related metadata when you sign documents.' },
-                        ].map((item, i) => (
-                          <li key={i} className="flex gap-2">
-                            <span className="text-[#6B90F2] mt-1">•</span>
-                            <span className="text-slate-600"><strong className="text-slate-800">{item.title}:</strong> {item.desc}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                    <div>
-                      <h3 className="text-lg font-medium text-slate-800 mb-2">2.2 Information Collected Automatically</h3>
-                      <ul className="space-y-2 text-slate-600">
-                        <li><strong>Usage data:</strong> Logs of actions, page views, API requests, and interactions for security and service improvement.</li>
-                        <li><strong>Device and browser data:</strong> IP address, browser type, operating system, and similar technical data.</li>
-                      </ul>
-                    </div>
-                    <div>
-                      <h3 className="text-lg font-medium text-slate-800 mb-2">2.3 Information from Third Parties</h3>
-                      <p className="text-slate-600 leading-relaxed">We may receive information from identity verification providers (e.g., Stripe), email delivery services, and other service providers that support Platform operations.</p>
-                    </div>
-                  </div>
+                  <p className="text-slate-600 leading-relaxed mb-4">We collect information to provide and improve our Services.</p>
+                  <ul className="space-y-3 mb-4">
+                    <li className="flex gap-2">
+                      <span className="text-[#6B90F2] mt-1">•</span>
+                      <span className="text-slate-600"><strong className="text-slate-800">Account Information:</strong> When you create a DocuStay account, we collect your name, email address, and password. For business accounts, we may collect the legal entity name and business address.</span>
+                    </li>
+                    <li className="flex gap-2">
+                      <span className="text-[#6B90F2] mt-1">•</span>
+                      <span className="text-slate-600"><strong className="text-slate-800">Property and Occupancy Data:</strong> We collect and store the information you provide about your properties (e.g., address) and the authorization records you create, which may include guest names and the start/end dates of authorized stays.</span>
+                    </li>
+                    <li className="flex gap-2">
+                      <span className="text-[#6B90F2] mt-1">•</span>
+                      <span className="text-slate-600"><strong className="text-slate-800">Identity Verification:</strong> In some cases, we may request information to verify your identity for security and fraud prevention purposes.</span>
+                    </li>
+                    <li className="flex gap-2">
+                      <span className="text-[#6B90F2] mt-1">•</span>
+                      <span className="text-slate-600"><strong className="text-slate-800">Usage Information:</strong> We automatically collect data about how you interact with our Services, such as your IP address, browser type, and actions taken on the platform.</span>
+                    </li>
+                  </ul>
                 </div>
               </section>
 
               <section id="use" className="scroll-mt-24">
                 <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
                   <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">3</span>
+                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">2</span>
                     How We Use Your Information
                   </h2>
-                  <p className="text-slate-600 leading-relaxed mb-4">We use your information to:</p>
+                  <p className="text-slate-600 leading-relaxed mb-4">We use the information we collect to:</p>
                   <ul className="space-y-2 mb-4">
-                    {[
-                      { title: 'Provide the Platform', desc: 'Create and manage accounts, document property status, process invitations, generate agreements, maintain audit trails.' },
-                      { title: 'Verify identity', desc: 'Facilitate identity verification and link verification results to your account.' },
-                      { title: 'Communicate with you', desc: 'Send transactional emails (verification codes, invitation links, stay reminders, status alerts).' },
-                      { title: 'Improve and secure the Platform', desc: 'Analyze usage, detect fraud, debug issues, and enhance performance.' },
-                      { title: 'Comply with legal obligations', desc: 'Respond to lawful requests and enforce our Terms of Service.' },
-                    ].map((item, i) => (
-                      <li key={i} className="flex gap-2">
-                        <span className="text-emerald-500 mt-1">✓</span>
-                        <span className="text-slate-600"><strong className="text-slate-800">{item.title}:</strong> {item.desc}</span>
-                      </li>
-                    ))}
+                    <li className="flex gap-2 text-slate-600"><span className="text-emerald-500 mt-1">✓</span>Provide, operate, and maintain the Services.</li>
+                    <li className="flex gap-2 text-slate-600"><span className="text-emerald-500 mt-1">✓</span>Create and manage your account.</li>
+                    <li className="flex gap-2 text-slate-600"><span className="text-emerald-500 mt-1">✓</span>Send you service-related communications, including security alerts and support messages.</li>
+                    <li className="flex gap-2 text-slate-600"><span className="text-emerald-500 mt-1">✓</span>Monitor and analyze usage to improve the user experience.</li>
+                    <li className="flex gap-2 text-slate-600"><span className="text-emerald-500 mt-1">✓</span>Enforce our Terms of Service and comply with legal obligations.</li>
                   </ul>
-                  <div className="rounded-xl bg-emerald-50/80 border border-emerald-200/60 p-4">
-                    <p className="text-slate-700 text-sm font-medium">We do not sell your personal information to third parties for marketing purposes.</p>
-                  </div>
                 </div>
               </section>
 
-              <section id="share" className="scroll-mt-24">
+              <section id="security" className="scroll-mt-24">
                 <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
                   <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">4</span>
-                    How We Share Your Information
+                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">3</span>
+                    Data Security
                   </h2>
-                  <p className="text-slate-600 leading-relaxed mb-4">We may share your information with:</p>
-                  <ul className="space-y-2 mb-4">
-                    <li className="flex gap-2 text-slate-600"><span className="text-slate-400">•</span><strong className="text-slate-800">Other users as necessary:</strong> Property owners see guest/tenant info for invitations they create. Guests and tenants see relevant property details.</li>
-                    <li className="flex gap-2 text-slate-600"><span className="text-slate-400">•</span><strong className="text-slate-800">Verification and public pages:</strong> Our public Verify page allows token-based authorization checks without exposing full personal details.</li>
-                    <li className="flex gap-2 text-slate-600"><span className="text-slate-400">•</span><strong className="text-slate-800">Service providers:</strong> Hosting, email, identity verification, analytics. Contractually required to protect your data.</li>
-                    <li className="flex gap-2 text-slate-600"><span className="text-slate-400">•</span><strong className="text-slate-800">Legal and safety:</strong> When required by law or to protect rights and safety.</li>
-                  </ul>
                   <p className="text-slate-600 leading-relaxed">
-                    Documentation and audit records are immutable and append-only. Once created, they may be retained and shared as described in this policy.
+                    We implement industry-standard security measures to protect your information. Data is encrypted in transit and at rest. Access to personally identifiable information is restricted to authorized personnel who require it to perform their job functions.
                   </p>
                 </div>
               </section>
@@ -164,33 +116,23 @@ const PrivacyPolicy: React.FC<{ navigate: (v: string) => void }> = ({ navigate }
               <section id="retention" className="scroll-mt-24">
                 <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
                   <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">5</span>
+                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">4</span>
                     Data Retention
                   </h2>
-                  <p className="text-slate-600 leading-relaxed mb-4">
-                    We retain your information for as long as your account is active. After account closure, we may retain:
-                  </p>
-                  <ul className="space-y-2 mb-4">
-                    <li className="flex gap-2 text-slate-600"><span className="text-slate-400">•</span><strong className="text-slate-800">Documentation and audit records:</strong> For legal, compliance, and dispute-resolution purposes.</li>
-                    <li className="flex gap-2 text-slate-600"><span className="text-slate-400">•</span><strong className="text-slate-800">Backup and operational data:</strong> For a limited period for security and recovery.</li>
-                  </ul>
                   <p className="text-slate-600 leading-relaxed">
-                    You may request deletion of your account and associated data subject to our retention obligations and applicable law.
+                    We retain your information for as long as your account is active or as necessary to provide you with the Services. Documentation records, including property status logs and guest authorization timelines, are core components of the Service and are retained as part of your account history. We will also retain information as necessary to comply with our legal obligations, resolve disputes, and enforce our agreements.
                   </p>
                 </div>
               </section>
 
-              <section id="security" className="scroll-mt-24">
+              <section id="sharing" className="scroll-mt-24">
                 <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
                   <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">6</span>
-                    Security
+                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">5</span>
+                    Information Sharing
                   </h2>
                   <p className="text-slate-600 leading-relaxed mb-4">
-                    We implement technical and organizational measures to protect your data, including encryption in transit and at rest, access controls, and secure development practices. No system is completely secure; you are responsible for safeguarding your account credentials.
-                  </p>
-                  <p className="text-slate-600 leading-relaxed">
-                    If we become aware of a data breach affecting your personal information, we will notify you and relevant authorities as required by applicable law.
+                    We do not sell your personal information. We may share your information with third-party service providers who perform services on our behalf (e.g., cloud hosting, payment processing), but only to the extent necessary for them to provide such services. We may also disclose information if required by law or in response to a valid legal process.
                   </p>
                 </div>
               </section>
@@ -198,74 +140,11 @@ const PrivacyPolicy: React.FC<{ navigate: (v: string) => void }> = ({ navigate }
               <section id="rights" className="scroll-mt-24">
                 <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
                   <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">7</span>
+                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">6</span>
                     Your Rights and Choices
                   </h2>
-                  <p className="text-slate-600 leading-relaxed mb-4">Depending on your location, you may have rights to:</p>
-                  <div className="grid sm:grid-cols-2 gap-3 mb-4">
-                    {['Access', 'Correction', 'Deletion', 'Portability', 'Opt-out', 'Object or restrict'].map((right, i) => (
-                      <div key={i} className="flex items-center gap-2 rounded-lg bg-slate-50 px-4 py-2">
-                        <span className="text-[#6B90F2]">✓</span>
-                        <span className="text-slate-700 font-medium">{right}</span>
-                      </div>
-                    ))}
-                  </div>
-                  <p className="text-slate-600 leading-relaxed mb-4">
-                    To exercise these rights, contact us through the support options on the Platform. Residents of California, the EEA, the UK, and other jurisdictions may have additional rights under applicable law.
-                  </p>
-                </div>
-              </section>
-
-              <section id="cookies" className="scroll-mt-24">
-                <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
-                  <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">8</span>
-                    Cookies and Tracking
-                  </h2>
-                  <p className="text-slate-600 leading-relaxed mb-4">We use cookies for:</p>
-                  <ul className="space-y-2 mb-4">
-                    <li className="text-slate-600"><strong className="text-slate-800">Authentication:</strong> Keeping you signed in and managing your session.</li>
-                    <li className="text-slate-600"><strong className="text-slate-800">Security:</strong> Detecting and preventing fraud and abuse.</li>
-                    <li className="text-slate-600"><strong className="text-slate-800">Functionality:</strong> Remembering preferences and supporting core features.</li>
-                  </ul>
                   <p className="text-slate-600 leading-relaxed">
-                    You can control cookies through your browser settings. Disabling certain cookies may affect Platform functionality.
-                  </p>
-                </div>
-              </section>
-
-              <section id="transfers" className="scroll-mt-24">
-                <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
-                  <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">9</span>
-                    International Transfers
-                  </h2>
-                  <p className="text-slate-600 leading-relaxed">
-                    Your information may be processed and stored in the United States or other countries. By using the Platform, you consent to such transfer. We take steps to ensure adequate protection in accordance with applicable law.
-                  </p>
-                </div>
-              </section>
-
-              <section id="children" className="scroll-mt-24">
-                <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
-                  <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">10</span>
-                    Children
-                  </h2>
-                  <p className="text-slate-600 leading-relaxed">
-                    The Platform is not intended for users under 18. We do not knowingly collect personal information from children. If you believe we have collected information from a child, please contact us and we will take steps to delete it.
-                  </p>
-                </div>
-              </section>
-
-              <section id="changes" className="scroll-mt-24">
-                <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
-                  <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">11</span>
-                    Changes to This Policy
-                  </h2>
-                  <p className="text-slate-600 leading-relaxed">
-                    We may update this Privacy Policy from time to time. We will notify you of material changes by posting the updated policy and updating the &quot;Last updated&quot; date. Your continued use constitutes acceptance. We encourage you to review this policy periodically.
+                    Depending on your jurisdiction, you may have rights to access, correct, or delete your personal information. You can manage your account information through your account settings. For other requests, please contact us at the email address below.
                   </p>
                 </div>
               </section>
@@ -273,12 +152,16 @@ const PrivacyPolicy: React.FC<{ navigate: (v: string) => void }> = ({ navigate }
               <section id="contact" className="scroll-mt-24">
                 <div className="bg-white rounded-2xl border border-slate-200/80 shadow-sm shadow-slate-200/50 p-6 md:p-8">
                   <h2 className="text-xl font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">12</span>
+                    <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-600 text-sm font-bold">7</span>
                     Contact Us
                   </h2>
-                  <p className="text-slate-600 leading-relaxed">
-                    For questions about this Privacy Policy or our data practices, please contact us through the support options available on the Platform.
+                  <p className="text-slate-600 leading-relaxed mb-4">
+                    If you have any questions about this Privacy Policy, please contact us at:
                   </p>
+                  <div className="rounded-xl bg-slate-50 border border-slate-200 p-4">
+                    <p className="text-slate-800 font-semibold">DOCUSTAY LLC</p>
+                    <p className="text-slate-600">Email: <a href="mailto:michael@docustay.online" className="text-[#6B90F2] hover:underline">michael@docustay.online</a></p>
+                  </div>
                 </div>
               </section>
             </div>
