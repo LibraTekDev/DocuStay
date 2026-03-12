@@ -330,13 +330,13 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
                   <label className="flex items-start gap-4 cursor-pointer p-4 rounded-xl border border-slate-200 bg-white/80 hover:border-slate-300 hover:bg-white transition-colors focus-within:ring-2 focus-within:ring-blue-500 focus-within:ring-offset-2 focus-within:border-blue-400">
                     <input type="checkbox" name="terms_agreed" checked={formData.terms_agreed} onChange={handleCheckboxChange} className="w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-0 shrink-0 mt-0.5 accent-blue-600" required />
                     <span className="text-sm text-slate-700 leading-relaxed">
-                      I agree to the <a href="#" className="text-[#6B90F2] font-semibold hover:text-[#5a7ed9] hover:underline underline-offset-2 transition-colors">Terms of Service</a>.
+                      I agree to the <a href="#terms" target="_blank" rel="noopener noreferrer" className="text-[#6B90F2] font-semibold hover:text-[#5a7ed9] hover:underline underline-offset-2 transition-colors">Terms of Service</a>.
                     </span>
                   </label>
                   <label className="flex items-start gap-4 cursor-pointer p-4 rounded-xl border border-slate-200 bg-white/80 hover:border-slate-300 hover:bg-white transition-colors focus-within:ring-2 focus-within:ring-blue-500 focus-within:ring-offset-2 focus-within:border-blue-400">
                     <input type="checkbox" name="privacy_agreed" checked={formData.privacy_agreed} onChange={handleCheckboxChange} className="w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-0 shrink-0 mt-0.5 accent-blue-600" required />
                     <span className="text-sm text-slate-700 leading-relaxed">
-                      I agree to the <a href="#" className="text-[#6B90F2] font-semibold hover:text-[#5a7ed9] hover:underline underline-offset-2 transition-colors">Privacy Policy</a>.
+                      I agree to the <a href="#privacy" target="_blank" rel="noopener noreferrer" className="text-[#6B90F2] font-semibold hover:text-[#5a7ed9] hover:underline underline-offset-2 transition-colors">Privacy Policy</a>.
                     </span>
                   </label>
                 </div>

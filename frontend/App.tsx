@@ -26,6 +26,8 @@ import OnboardingIdentityComplete from './pages/Onboarding/OnboardingIdentityCom
 import OnboardingPOA from './pages/Onboarding/OnboardingPOA';
 import ProviderAuthorityLetter from './pages/Provider/ProviderAuthorityLetter';
 import Landing from './pages/Landing';
+import TermsOfService from './pages/Legal/TermsOfService';
+import PrivacyPolicy from './pages/Legal/PrivacyPolicy';
 import { LivePropertyPage } from './pages/LivePropertyPage';
 import { PortfolioPage } from './pages/PortfolioPage';
 import { VerifyPage } from './pages/Verify/VerifyPage';
@@ -366,13 +368,14 @@ const App: React.FC = () => {
 
       {/* Main Content */}
       <main className="flex-grow flex flex-col">
-        {(view === 'login' || view === 'login/property_manager' || view === 'login/tenant') && (
+        {(view === 'login' || view.startsWith('login/')) && (
           <Login
             onLogin={handleLogin}
             setLoading={setLoading}
             notify={showNotification}
             navigate={navigate}
-            initialRole={view === 'login/property_manager' ? 'property_manager' : view === 'login/tenant' ? 'tenant' : 'owner'}
+            initialRole={view.startsWith('login/property_manager') ? 'property_manager' : view.startsWith('login/tenant') ? 'tenant' : 'owner'}
+            managerInviteToken={view.startsWith('login/property_manager/') ? view.split('/')[2] || '' : undefined}
           />
         )}
         {(view === 'forgot-password/owner' || view === 'forgot-password/guest') && (
@@ -595,6 +598,10 @@ const App: React.FC = () => {
           }
           return <AdminDashboard user={state.user} navigate={navigate} notify={showNotification} />;
         })()}
+
+        {/* Legal pages – public, no login required */}
+        {view === 'terms' && <TermsOfService navigate={navigate} />}
+        {view === 'privacy' && <PrivacyPolicy navigate={navigate} />}
 
         {/* Home / Landing – also fallback when hash is a protected route but user not loaded (avoids blank page) */}
         {(view === '' || (view && !state.user && ['dashboard', 'add-property', 'settings', 'guest-dashboard', 'onboarding/identity'].some((v) => view === v || view.startsWith(v + '/')))) && (

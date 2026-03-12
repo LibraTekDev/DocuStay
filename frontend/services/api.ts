@@ -23,6 +23,7 @@ export function setToken(token: string | null) {
 
 const CONTEXT_MODE_KEY = "docustay_context_mode";
 
+/** Business: property management scope. Personal: own residence. Privacy rules apply in both — switching modes does NOT unlock tenant-private data. */
 export function getContextMode(): "business" | "personal" {
   if (typeof window === "undefined") return "business";
   const m = (localStorage.getItem(CONTEXT_MODE_KEY) || "").toLowerCase();
@@ -339,6 +340,9 @@ export const authApi = {
     setToken(body.access_token);
     return { status: "success", data: toUserSession(body) };
   },
+  /** Accept a manager invitation as an already-logged-in property manager. Requires auth. */
+  acceptManagerInvite: (token: string) =>
+    request<{ status: string; message?: string }>(`/auth/accept-manager-invite/${encodeURIComponent(token)}`, { method: "POST" }),
   /** Resend verification code to the user's email. */
   async resendVerification(userId: string): Promise<{ status: string; message?: string }> {
     try {
@@ -702,7 +706,7 @@ export interface VerifyRequest {
   phone?: string | null;
 }
 
-/** Response from POST /public/verify. Read-only, live state. */
+/** Response from POST /public/verify. Read-only, live state. Full record when invitation/stay exists. */
 export interface VerifyResponse {
   valid: boolean;
   reason?: string | null;
@@ -710,12 +714,20 @@ export interface VerifyResponse {
   property_address?: string | null;
   occupancy_status?: string | null;
   token_state?: string | null;
+  stay_start_date?: string | null;
   stay_end_date?: string | null;
   guest_name?: string | null;
   poa_signed_at?: string | null;
   live_slug?: string | null;
   generated_at?: string | null;
   audit_entries: LiveLogEntry[];
+  status?: string | null;
+  checked_in_at?: string | null;
+  checked_out_at?: string | null;
+  revoked_at?: string | null;
+  cancelled_at?: string | null;
+  signed_agreement_available?: boolean;
+  signed_agreement_url?: string | null;
 }
 
 export interface BillingResponse {
@@ -920,6 +932,12 @@ export const dashboardApi = {
   /** Confirm vacant unit still vacant (owner or manager). */
   confirmVacant: (propertyId: number) =>
     request<{ status: string; message?: string }>(`/dashboard/owner/properties/${propertyId}/confirm-vacant`, { method: "POST" }),
+  /** Bulk update Shield Mode for selected properties. Owner or manager. */
+  bulkShieldMode: (propertyIds: number[], shieldModeEnabled: boolean) =>
+    request<{ status: string; updated_count: number; message?: string }>("/dashboard/properties/bulk-shield-mode", {
+      method: "POST",
+      body: JSON.stringify({ property_ids: propertyIds, shield_mode_enabled: shieldModeEnabled }),
+    }),
   /** Owner confirms occupancy: Unit Vacated, Lease Renewed, or Holdover. */
   confirmOccupancyStatus: (stayId: number, action: "vacated" | "renewed" | "holdover", newLeaseEndDate?: string) =>
     request<{ status: string; message?: string; occupancy_status?: string; new_lease_end_date?: string }>(
@@ -1242,9 +1260,9 @@ export const propertiesApi = {
       method: "POST",
       body: JSON.stringify(data),
     }),
-  /** Invite a property manager to manage this property. */
+  /** Invite a property manager to manage this property. In test mode, response includes invite_link for console display. */
   inviteManager: (propertyId: number, email: string) =>
-    request<{ status: string; message?: string }>(`/owners/properties/${propertyId}/invite-manager`, {
+    request<{ status: string; message?: string; invite_link?: string }>(`/owners/properties/${propertyId}/invite-manager`, {
       method: "POST",
       body: JSON.stringify({ email: email.trim().toLowerCase() }),
     }),
@@ -1641,7 +1659,8 @@ export const authApiGuest = {
       }
       if (msg.includes("acknowledge")) validation.acknowledgments = { error: "You must acknowledge all guest and vacate terms" };
       if (msg.includes("already registered")) validation.email = { error: "Email already registered" };
-      if (msg.includes("Invalid or expired") || msg.includes("Invitation code")) validation.invitation = { error: "Invalid or expired invitation code." };
+      if (msg.includes("Invalid or no longer valid")) validation.invitation = { error: "Invalid or no longer valid invitation code." };
+      else if (msg.includes("Invalid or expired") || msg.includes("Invitation code")) validation.invitation = { error: "Invalid or expired invitation code." };
       return { status: "error", message: msg, validation };
     }
   },

@@ -128,7 +128,7 @@ export const LivePropertyPage: React.FC<{ slug: string }> = ({ slug }) => {
   const poaDateFormatted = poa_signed_at ? formatDate(poa_signed_at) : null;
   const poaTimestampFormatted = poa_signed_at ? formatDateTime(poa_signed_at) : null;
 
-  // Condensed Audit Timeline (Part B): POA signed, property onboarded, status changes, token burn/expire/revoke
+  // Condensed Audit Timeline (Part B): POA signed, property onboarded, status changes (active/expired/revoked)
   const oldestLog = logs.length > 0 ? logs[logs.length - 1] : null;
   const propertyOnboardedAt = oldestLog ? formatDateTime(oldestLog.created_at) : null;
   const statusChangeLogs = logs.filter(
@@ -300,7 +300,7 @@ export const LivePropertyPage: React.FC<{ slug: string }> = ({ slug }) => {
                   : ' —'}
               </li>
               <li>
-                <span className="font-medium text-slate-900">Token burn / expire / revoke</span> –
+                <span className="font-medium text-slate-900">Status changes (active / expired / revoked)</span> –
                 {tokenEventLogs.length > 0
                   ? ` ${tokenEventLogs.slice(0, 5).map((e) => formatDateTime(e.created_at)).join(', ')}${tokenEventLogs.length > 5 ? ' …' : ''}`
                   : ' —'}
@@ -397,10 +397,11 @@ export const LivePropertyPage: React.FC<{ slug: string }> = ({ slug }) => {
                 <span className="group-open:rotate-90 transition-transform text-teal-600">▶</span> Token states legend
               </summary>
               <ul className="mt-2 pl-4 space-y-0.5 text-xs text-slate-600 border-l-2 border-teal-200">
-                <li><strong>STAGED</strong> — Invite sent, not yet accepted (no stay).</li>
-                <li><strong>BURNED</strong> — Guest accepted and signed; stay created (authorization active or past).</li>
-                <li><strong>EXPIRED</strong> — Stay ended or guest checked out; no current authorization.</li>
-                <li><strong>REVOKED</strong> — Invite or stay cancelled by owner/guest.</li>
+                <li><strong>PENDING</strong> — Invite sent, not yet accepted (no stay).</li>
+                <li><strong>ACTIVE</strong> — Guest accepted and signed; stay created (authorization active or past).</li>
+                <li><strong>EXPIRED</strong> — Stay ended or guest checked out; no current authorization. (Guests only; DocuStay does not expire tenants.)</li>
+                <li><strong>REVOKED</strong> — Guest authorization revoked by owner.</li>
+                <li><strong>CANCELLED</strong> — Tenant assignment cancelled by tenant. (DocuStay does not revoke tenants.)</li>
               </ul>
             </details>
             {(!invitations || invitations.length === 0) ? (
@@ -439,10 +440,10 @@ export const LivePropertyPage: React.FC<{ slug: string }> = ({ slug }) => {
                           <span className={`inline-flex px-2 py-0.5 rounded text-xs font-semibold ${
                             inv.token_state === 'BURNED' ? 'bg-emerald-100 text-emerald-800' :
                             inv.token_state === 'EXPIRED' ? 'bg-amber-100 text-amber-800' :
-                            inv.token_state === 'REVOKED' ? 'bg-red-100 text-red-800' :
+                            (inv.token_state === 'REVOKED' || inv.token_state === 'CANCELLED') ? 'bg-slate-100 text-slate-700' :
                             'bg-slate-100 text-slate-700'
                           }`}>
-                            {inv.token_state}
+                            {inv.token_state === 'BURNED' ? 'Active' : (inv.token_state === 'REVOKED' || inv.token_state === 'CANCELLED') ? 'Cancelled' : inv.token_state === 'STAGED' ? 'Pending' : inv.token_state === 'EXPIRED' ? 'Expired' : inv.token_state}
                           </span>
                         </td>
                       </tr>
@@ -512,9 +513,9 @@ export const LivePropertyPage: React.FC<{ slug: string }> = ({ slug }) => {
           </section>
         )}
 
-        {/* Dead Man's Switch – compact footnote */}
+        {/* Stay end reminders – compact footnote */}
         <div className="rounded-xl border border-slate-200 bg-gradient-to-r from-slate-50 to-slate-100/80 px-4 py-3 shadow-sm print:bg-white print:border">
-          <p className="text-xs font-semibold text-slate-600 mb-0.5">Dead Man&apos;s Switch</p>
+          <p className="text-xs font-semibold text-slate-600 mb-0.5">Stay end reminders</p>
           <p className="text-xs text-slate-500">
             Occupied: 48h before lease end → confirmation prompt; 48h after lease end with no owner action → UNCONFIRMED. Vacant (if monitoring): prompts at intervals; no response → UNCONFIRMED.
           </p>

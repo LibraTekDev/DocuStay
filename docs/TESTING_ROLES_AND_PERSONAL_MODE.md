@@ -1,5 +1,24 @@
 # Testing Guide: Roles + Personal Mode & Feature Impact Changes
 
+## Personal vs. Business Mode – Scope Isolation
+
+**Personal mode** (owners and on-site managers):
+- Manage own properties and statuses, including multiple properties
+- Mark one as primary residence, indicate statuses (vacant, away, inactive)
+- Use resident features: presence (here/away), guest invites, guest/stay activity
+- Guests and Invitations tabs visible; presence card for personal-mode units
+
+**Business mode** (management scope only):
+- Property status, occupancy, Shield Mode, billing, event ledger
+- **No personal guest or stay activity is shown**
+- Stays and invitations APIs return `[]` when `X-Context-Mode: business`
+- Manager units: `occupied_by` and `invite_id` are omitted for privacy
+- Guests and Invitations tabs hidden; presence features unavailable
+
+The system enforces this isolation: once in business mode, the dashboard and APIs stay within management scope and do not expose personal guest/stay data.
+
+---
+
 ## How to Test
 
 ### Prerequisites
@@ -188,7 +207,7 @@ Once on **Tenant Dashboard** (`#tenant-dashboard`):
 | Check | How | Expected |
 |-------|-----|----------|
 | Wrong email at signup | Use invite link but register with a **different** email (when manager set guest_email) | Backend returns 400: “Please use the email address this invitation was sent to.” |
-| Expired or used invite | Use same invite link after tenant already accepted | Invitation details show invalid/expired/used; cannot complete signup again. |
+| Used invite | Use same invite link after tenant already accepted | Invitation details show invalid or no longer valid/used; cannot complete signup again. |
 | Tenant cannot see other units | Log in as tenant; try to open another property or unit (e.g. owner URL) | No access; tenant only has tenant-dashboard and their single unit. |
 | Cancel invite (tenant) | Tenant cancels one of their own invitations | Only the user who created the invite (or owner) can cancel; cancel succeeds and invitation status → cancelled. |
 

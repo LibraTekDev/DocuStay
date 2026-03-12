@@ -14,7 +14,7 @@ The message **"This invitation has expired or is invalid. You can't use this lin
 
 3. **Token state filter (guest vs tenant)**  
    - **Guest invites**: must have `token_state != "BURNED"` (only STAGED invites can load the agreement to sign).  
-   - **Tenant invites**: are created with `token_state="BURNED"`; the codebase allows them by treating tenant kind separately (`invitation_kind == "tenant"` OR `token_state != "BURNED"`). If that logic were missing, tenant links would always 404.
+   - **Tenant invites**: are created with `token_state="BURNED"`; the codebase allows them by treating tenant kind separately (`invitation_kind == "tenant"` OR `token_state != "BURNED"`). If that logic were missing, tenant links would always 404. DocuStay does not expire or revoke tenants; tenant invitations are excluded from the expiry cleanup job.
 
 4. **Actual expiry (cleanup job)**  
    Pending guest invites are marked expired by a background job after:

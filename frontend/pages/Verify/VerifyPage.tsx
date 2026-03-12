@@ -1,12 +1,21 @@
 import React, { useState, useEffect } from 'react';
-import { publicApi, type VerifyResponse } from '../../services/api';
+import { publicApi, API_URL, type VerifyResponse } from '../../services/api';
 import { validatePhone, sanitizePhoneInput } from '../../utils/validatePhone';
 
 function formatDateTime(s: string): string {
   return new Date(s).toLocaleString('en-US', { dateStyle: 'short', timeStyle: 'short' });
 }
 
+function formatDate(s: string): string {
+  return new Date(s).toLocaleDateString('en-US');
+}
+
 const APP_ORIGIN = typeof window !== 'undefined' ? window.location.origin : '';
+
+/** True when we have a full record to display (property, guest, dates). */
+function hasRecord(result: VerifyResponse): boolean {
+  return !!(result.property_name || result.property_address);
+}
 
 export const VerifyPage: React.FC = () => {
   const [tokenId, setTokenId] = useState('');
@@ -75,7 +84,7 @@ export const VerifyPage: React.FC = () => {
           </p>
         </header>
 
-        <form onSubmit={handleSubmit} className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 sm:p-8 space-y-4 print:shadow-none print:border">
+        <form onSubmit={handleSubmit} className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 sm:p-8 space-y-4 print:shadow-none print:border print:hidden">
           <div>
             <label htmlFor="verify-token" className="block text-sm font-medium text-gray-700 mb-1.5">
               Token ID <span className="text-red-500">*</span>
@@ -136,64 +145,185 @@ export const VerifyPage: React.FC = () => {
         </form>
 
         {result && (
-          <section className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden print:shadow-none print:border">
-            <div className={`px-6 py-4 border-b ${result.valid ? 'bg-emerald-50 border-emerald-100' : 'bg-amber-50 border-amber-100'} print:bg-gray-50 print:border-gray-200`}>
-              <h2 className="text-sm font-bold uppercase tracking-wider text-gray-700">Result</h2>
+          <section id="verify-result" className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden print:shadow-none print:border print:break-inside-avoid">
+            {/* Print header - shown only when printing */}
+            <div className="hidden print:block px-6 py-3 border-b border-gray-200">
+              <h2 className="text-lg font-bold text-gray-900">DocuStay Verification Record</h2>
+              <p className="text-sm text-gray-500 mt-0.5">{result.generated_at ? `Generated ${formatDateTime(result.generated_at)}` : ''}</p>
             </div>
-            <div className="p-6 sm:p-8 space-y-5">
+
+            <div className={`px-6 py-4 border-b ${result.valid ? 'bg-emerald-50 border-emerald-100' : hasRecord(result) ? 'bg-slate-50 border-slate-200' : 'bg-amber-50 border-amber-100'} print:bg-gray-50 print:border-gray-200`}>
+              <h2 className="text-sm font-bold uppercase tracking-wider text-gray-700 print:text-base">Result</h2>
+            </div>
+            <div className="p-6 sm:p-8 space-y-6">
+              {/* Status badge */}
               {result.valid ? (
+                <div className="inline-flex items-center gap-2.5 px-4 py-2.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200">
+                  <svg className="w-5 h-5 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
+                  <span className="font-semibold">Active authorization</span>
+                </div>
+              ) : hasRecord(result) ? (
+                <div className="inline-flex items-center gap-2.5 px-4 py-2.5 rounded-lg bg-slate-100 text-slate-800 border border-slate-200">
+                  <span className="font-semibold">Verification record</span>
+                  {result.status && (
+                    <span className="px-2.5 py-1 rounded text-sm font-semibold bg-slate-200 text-slate-800 uppercase tracking-wide">{result.status}</span>
+                  )}
+                </div>
+              ) : (
+                <div className="inline-flex items-center gap-2.5 px-4 py-2.5 rounded-lg bg-amber-50 text-amber-800 border border-amber-200">
+                  <svg className="w-5 h-5 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
+                  <span className="font-semibold">No record found</span>
+                </div>
+              )}
+              {!hasRecord(result) && result.reason && <p className="text-gray-700">{result.reason}</p>}
+
+              {hasRecord(result) && (
                 <>
-                  <div className="inline-flex items-center gap-2.5 px-4 py-2.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200">
-                    <svg className="w-5 h-5 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
-                    <span className="font-semibold">Active authorization found</span>
-                  </div>
-                  <dl className="grid gap-4 text-sm">
-                    <div className="pb-3 border-b border-gray-100"><dt className="text-gray-500 font-medium mb-0.5">Property</dt><dd className="text-gray-900 font-medium">{result.property_name || '—'}</dd></div>
-                    <div className="pb-3 border-b border-gray-100"><dt className="text-gray-500 font-medium mb-0.5">Address</dt><dd className="text-gray-900">{result.property_address || '—'}</dd></div>
-                    <div className="pb-3 border-b border-gray-100"><dt className="text-gray-500 font-medium mb-0.5">Occupancy</dt><dd className="text-gray-900">{result.occupancy_status ?? '—'}</dd></div>
-                    <div className="pb-3 border-b border-gray-100"><dt className="text-gray-500 font-medium mb-0.5">Authorization state</dt><dd className="text-gray-900">{result.token_state ?? '—'}</dd></div>
-                    {result.guest_name && <div className="pb-3 border-b border-gray-100"><dt className="text-gray-500 font-medium mb-0.5">Guest</dt><dd className="text-gray-900">{result.guest_name}</dd></div>}
-                    {result.stay_end_date && <div className="pb-3 border-b border-gray-100"><dt className="text-gray-500 font-medium mb-0.5">Stay end date</dt><dd className="text-gray-900">{new Date(result.stay_end_date).toLocaleDateString('en-US')}</dd></div>}
-                  </dl>
-                  <p className="text-sm text-gray-500">
-                    This property is documented under a signed Master POA.{result.poa_signed_at && ` POA signed: ${new Date(result.poa_signed_at).toLocaleDateString('en-US')}.`}
-                  </p>
-                  <div className="flex flex-wrap items-center gap-3 pt-4 border-t border-gray-200 text-sm">
-                    <span className="text-gray-600">Record ID: <span className="font-mono text-gray-800 bg-gray-100 px-2 py-1 rounded text-xs">{result.live_slug ?? '—'}</span></span>
-                    <span className="text-gray-400">{result.generated_at ? formatDateTime(result.generated_at) : ''}</span>
-                    {result.live_slug && (
-                      <a
-                        href={`${APP_ORIGIN}/#live/${result.live_slug}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-blue-700 hover:text-blue-800 font-medium hover:underline inline-flex items-center gap-1"
-                      >
-                        Open full evidence page
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
-                      </a>
+                  {result.reason && (
+                    <p className="text-sm text-gray-700 -mt-2 font-medium">{result.reason}</p>
+                  )}
+
+                  {/* Property section */}
+                  <div className="rounded-lg border border-gray-200 bg-gray-50/50 p-4 print:bg-white print:border-gray-300">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-3">Property</h3>
+                    <p className="text-base font-semibold text-gray-900">{result.property_name || '—'}</p>
+                    <p className="text-sm text-gray-700 mt-1 leading-relaxed">{result.property_address || '—'}</p>
+                    {result.occupancy_status && (
+                      <p className="text-sm text-gray-600 mt-1">Occupancy: {result.occupancy_status}</p>
                     )}
                   </div>
-                  <a href={liveLink} className="inline-flex items-center gap-1.5 text-blue-700 hover:text-blue-800 font-medium text-sm">
-                    Live link for re-verification
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
-                  </a>
-                </>
-              ) : (
-                <>
-                  <div className="inline-flex items-center gap-2.5 px-4 py-2.5 rounded-lg bg-amber-50 text-amber-800 border border-amber-200">
-                    <svg className="w-5 h-5 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" /></svg>
-                    <span className="font-semibold">No active authorization found</span>
+
+                  {/* Guest section */}
+                  {result.guest_name && (
+                    <div className="rounded-lg border border-gray-200 bg-gray-50/50 p-4 print:bg-white print:border-gray-300">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-1">Guest</h3>
+                      <p className="text-base font-medium text-gray-900">{result.guest_name}</p>
+                    </div>
+                  )}
+
+                  {/* Stay dates & status history */}
+                  <div className="rounded-lg border border-gray-200 bg-gray-50/50 p-4 print:bg-white print:border-gray-300">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-3">Stay dates & status</h3>
+                    <div className="space-y-3 text-sm">
+                      {result.stay_start_date && (
+                        <div className="flex justify-between gap-4">
+                          <span className="text-gray-500">Stay period</span>
+                          <span className="text-gray-900 font-medium text-right">
+                            {formatDate(result.stay_start_date)} – {result.stay_end_date ? formatDate(result.stay_end_date) : '—'}
+                          </span>
+                        </div>
+                      )}
+                      {result.valid && result.checked_in_at && (
+                        <>
+                          <div className="flex justify-between gap-4">
+                            <span className="text-gray-500">Became active</span>
+                            <span className="text-gray-900 font-medium">{formatDateTime(result.checked_in_at)}</span>
+                          </div>
+                          <div className="flex justify-between gap-4">
+                            <span className="text-gray-500">Expires</span>
+                            <span className="text-gray-900 font-medium">{result.stay_end_date ? formatDate(result.stay_end_date) : '—'}</span>
+                          </div>
+                        </>
+                      )}
+                      {result.status === 'EXPIRED' && result.checked_in_at && (
+                        <>
+                          <div className="flex justify-between gap-4">
+                            <span className="text-gray-500">Became active</span>
+                            <span className="text-gray-900 font-medium">{formatDateTime(result.checked_in_at)}</span>
+                          </div>
+                          <div className="flex justify-between gap-4">
+                            <span className="text-gray-500">Expired</span>
+                            <span className="text-gray-900 font-medium">{result.stay_end_date ? formatDate(result.stay_end_date) : '—'}</span>
+                          </div>
+                        </>
+                      )}
+                      {result.status === 'REVOKED' && (
+                        <>
+                          {result.checked_in_at && (
+                            <div className="flex justify-between gap-4">
+                              <span className="text-gray-500">Became active</span>
+                              <span className="text-gray-900 font-medium">{formatDateTime(result.checked_in_at)}</span>
+                            </div>
+                          )}
+                          <div className="flex justify-between gap-4">
+                            <span className="text-gray-500">Revoked at</span>
+                            <span className="text-gray-900 font-medium">{result.revoked_at ? formatDateTime(result.revoked_at) : '—'}</span>
+                          </div>
+                        </>
+                      )}
+                      {result.status === 'COMPLETED' && result.checked_out_at && (
+                        <>
+                          <div className="flex justify-between gap-4">
+                            <span className="text-gray-500">Became active</span>
+                            <span className="text-gray-900 font-medium">{result.checked_in_at ? formatDateTime(result.checked_in_at) : '—'}</span>
+                          </div>
+                          <div className="flex justify-between gap-4">
+                            <span className="text-gray-500">Checked out at</span>
+                            <span className="text-gray-900 font-medium">{formatDateTime(result.checked_out_at)}</span>
+                          </div>
+                        </>
+                      )}
+                      {result.cancelled_at && (
+                        <div className="flex justify-between gap-4">
+                          <span className="text-gray-500">Cancelled at</span>
+                          <span className="text-gray-900 font-medium">{formatDateTime(result.cancelled_at)}</span>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  {result.reason && <p className="text-gray-700">{result.reason}</p>}
-                  <p className="text-sm text-gray-500">
-                    {result.generated_at ? `Checked at ${formatDateTime(result.generated_at)}` : ''}
-                  </p>
+
+                  {/* Signed agreement - prominent */}
+                  {result.signed_agreement_available && result.signed_agreement_url && tokenId && (
+                    <div className="rounded-lg border-2 border-blue-200 bg-blue-50/30 p-4 print:border-blue-300 print:bg-blue-50/50">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-blue-800 mb-2">Signed agreement</h3>
+                      <p className="text-sm text-gray-700 mb-3">View and print the document you signed.</p>
+                      <a
+                        href={`${API_URL}${result.signed_agreement_url}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 transition-colors print:bg-blue-600 print:text-white"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                        View / Print signed agreement
+                      </a>
+                    </div>
+                  )}
+
+                  {/* Authority & links */}
+                  <div className="space-y-3 pt-2 border-t border-gray-200">
+                    {result.poa_signed_at && (
+                      <p className="text-sm text-gray-600">
+                        Property documented under Master POA (signed {formatDate(result.poa_signed_at)}).
+                      </p>
+                    )}
+                    <div className="flex flex-wrap items-center gap-3 text-sm">
+                      {result.live_slug && (
+                        <a
+                          href={`${APP_ORIGIN}/#live/${result.live_slug}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-700 hover:text-blue-800 font-medium hover:underline inline-flex items-center gap-1"
+                        >
+                          Open full evidence page
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg>
+                        </a>
+                      )}
+                      <a href={liveLink} className="text-blue-700 hover:text-blue-800 font-medium hover:underline inline-flex items-center gap-1">
+                        Re-verify
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                      </a>
+                    </div>
+                    <p className="text-xs text-gray-400">
+                      {result.generated_at ? `Verified at ${formatDateTime(result.generated_at)}` : ''}
+                      {result.live_slug && ` · Record ID: ${result.live_slug}`}
+                    </p>
+                  </div>
                 </>
               )}
             </div>
-            {result.valid && result.audit_entries && result.audit_entries.length > 0 && (
-              <div className="border-t border-gray-200 px-6 py-4 bg-gray-50/50">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-3">Recent audit timeline</h3>
+            {hasRecord(result) && result.audit_entries && result.audit_entries.length > 0 && (
+              <div className="border-t border-gray-200 px-6 py-4 bg-gray-50/50 print:bg-white">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-3">Status history</h3>
                 <ul className="space-y-2 text-sm text-gray-700 max-h-48 overflow-y-auto">
                   {result.audit_entries.slice(0, 10).map((entry, i) => (
                     <li key={i} className="flex gap-3 items-start">

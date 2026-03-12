@@ -1,5 +1,29 @@
 """Module H: Notification service (Mailgun/SendGrid email, optional SMS)."""
 from app.config import get_settings
+from app.services.notification_templates import (
+    render_authorization_record_block,
+    render_view_record_link,
+    wrap_email_body,
+)
+
+
+def _property_page_url(property_id: int, for_manager: bool = False) -> str:
+    """Build frontend URL to property detail page. Owners: #property/{id}. Managers: #manager-dashboard/property/{id}."""
+    base = (get_settings().stripe_identity_return_url or get_settings().frontend_base_url or "http://localhost:5173").strip().split("#")[0].rstrip("/")
+    path = f"manager-dashboard/property/{property_id}" if for_manager else f"property/{property_id}"
+    return f"{base}/#{path}"
+
+
+def _verify_record_url(invite_code: str, property_address: str | None = None) -> str:
+    """Build frontend URL to verify page for this stay record (scoped to invitation token). Shows full record and signed agreement."""
+    base = (get_settings().stripe_identity_return_url or get_settings().frontend_base_url or "http://localhost:5173").strip().split("#")[0].rstrip("/")
+    from urllib.parse import quote
+    if invite_code:
+        url = f"{base}/#check?token={quote(invite_code)}"
+        if property_address:
+            url += f"&address={quote(property_address)}"
+        return url
+    return base
 
 # Clear settings cache so we use latest .env when sending (fixes server vs script using different config)
 def _get_fresh_settings():
@@ -343,18 +367,39 @@ def send_vacate_12h_notice(
     property_name: str,
     vacate_by_iso: str,
     region_code: str = "",
+    *,
+    property_address: str = "",
+    stay_start_date: str = "",
+    stay_end_date: str = "",
+    revoked_at: str = "",
+    invite_code: str = "",
 ) -> bool:
-    """Email to guest when owner revokes stay (Kill Switch): must vacate within 12 hours."""
+    """Email to guest when owner revokes stay (Kill Switch): must vacate within 12 hours. Includes authorization record details and link to view/print signed agreement."""
     subject = "[DocuStay] Urgent: You must vacate the property within 12 hours"
-    html = f"""
-    <p>Hello {guest_name},</p>
-    <p>Your stay authorization at <strong>{property_name}</strong> has been revoked by the property owner.</p>
-    <p><strong>You must vacate the property within 12 hours.</strong></p>
-    <p><strong>Vacate by:</strong> {vacate_by_iso}</p>
-    <p>Please remove all belongings and complete checkout by this time to avoid further action.</p>
-    <p>— DocuStay</p>
+    record_url = _verify_record_url(invite_code, property_address) if invite_code else ""
+    record_block = render_authorization_record_block(
+        property_address=property_address,
+        guest_name=guest_name,
+        stay_start_date=stay_start_date,
+        stay_end_date=stay_end_date,
+        status="Revoked",
+        revoked_at=revoked_at,
+    )
+    view_link = render_view_record_link(record_url) if record_url else ""
+    inner = f"""
+    <p style="margin: 0 0 16px;">Hello {guest_name},</p>
+    <p style="margin: 0 0 16px;">Your stay authorization at <strong>{property_name}</strong> has been revoked by the property owner.</p>
+    <p style="margin: 0 0 16px;"><strong>You must vacate the property within 12 hours.</strong></p>
+    <p style="margin: 0 0 16px;"><strong>Vacate by:</strong> {vacate_by_iso}</p>
+    {record_block}
+    {view_link}
+    <p style="margin: 0 0 16px;">Please remove all belongings and complete checkout by this time to avoid further action.</p>
     """
-    text = f"Hello {guest_name}, your stay at {property_name} has been revoked. You must vacate within 12 hours. Vacate by: {vacate_by_iso}. — DocuStay"
+    html = wrap_email_body(inner)
+    text = f"Hello {guest_name}, your stay at {property_name} has been revoked. You must vacate within 12 hours. Vacate by: {vacate_by_iso}. "
+    if record_url:
+        text += f"View your record and signed agreement: {record_url} "
+    text += "— DocuStay"
     return send_email(to_email, subject, html, text_content=text)
 
 
@@ -363,17 +408,38 @@ def send_removal_notice_to_guest(
     guest_name: str,
     property_name: str,
     region_code: str = "",
+    *,
+    property_address: str = "",
+    stay_start_date: str = "",
+    stay_end_date: str = "",
+    revoked_at: str = "",
+    invite_code: str = "",
 ) -> bool:
-    """Email to guest when owner initiates formal removal for overstay."""
+    """Email to guest when owner initiates formal removal for overstay. Includes authorization record details and link to view/print signed agreement."""
     subject = "[DocuStay] NOTICE: Removal Initiated – You must vacate immediately"
-    html = f"""
-    <p>Hello {guest_name},</p>
-    <p>The property owner has revoked your stay authorization for <strong>{property_name}</strong>.</p>
-    <p><strong>Your utility access (USAT token) has been revoked.</strong></p>
-    <p>Your stay authorization has ended. Please vacate the property and remove all belongings. All actions are recorded in the audit trail.</p>
-    <p>— DocuStay</p>
+    record_url = _verify_record_url(invite_code, property_address) if invite_code else ""
+    record_block = render_authorization_record_block(
+        property_address=property_address,
+        guest_name=guest_name,
+        stay_start_date=stay_start_date,
+        stay_end_date=stay_end_date,
+        status="Revoked",
+        revoked_at=revoked_at,
+    )
+    view_link = render_view_record_link(record_url) if record_url else ""
+    inner = f"""
+    <p style="margin: 0 0 16px;">Hello {guest_name},</p>
+    <p style="margin: 0 0 16px;">The property owner has revoked your stay authorization for <strong>{property_name}</strong>.</p>
+    <p style="margin: 0 0 16px;"><strong>Your utility access (USAT token) has been revoked.</strong></p>
+    <p style="margin: 0 0 16px;">Your stay authorization has ended. Please vacate the property and remove all belongings.</p>
+    {record_block}
+    {view_link}
     """
-    text = f"Hello {guest_name}, the owner has initiated removal for {property_name}. Your USAT token has been revoked. You must vacate immediately. — DocuStay"
+    html = wrap_email_body(inner)
+    text = f"Hello {guest_name}, the owner has initiated removal for {property_name}. Your USAT token has been revoked. You must vacate immediately. "
+    if record_url:
+        text += f"View your record and signed agreement: {record_url} "
+    text += "— DocuStay"
     return send_email(to_email, subject, html, text_content=text)
 
 
@@ -382,22 +448,45 @@ def send_removal_confirmation_to_owner(
     guest_name: str,
     property_name: str,
     region_code: str = "",
+    *,
+    property_address: str = "",
+    stay_start_date: str = "",
+    stay_end_date: str = "",
+    revoked_at: str = "",
+    invite_code: str = "",
 ) -> bool:
-    """Email to owner confirming removal has been initiated."""
+    """Email to owner confirming removal has been initiated. Includes authorization record details and link to view record."""
     subject = f"[DocuStay] Removal Initiated – {guest_name} at {property_name}"
-    html = f"""
-    <p>Hello,</p>
-    <p>You have revoked stay authorization for <strong>{guest_name}</strong> at <strong>{property_name}</strong>.</p>
-    <p><strong>Actions taken:</strong></p>
-    <ul>
+    record_url = _verify_record_url(invite_code, property_address) if invite_code else ""
+    record_block = render_authorization_record_block(
+        property_address=property_address,
+        guest_name=guest_name,
+        stay_start_date=stay_start_date,
+        stay_end_date=stay_end_date,
+        status="Revoked",
+        revoked_at=revoked_at,
+    )
+    view_link = render_view_record_link(
+        record_url,
+        link_hint="View the full authorization record and signed agreement for this stay.",
+    ) if record_url else ""
+    inner = f"""
+    <p style="margin: 0 0 16px;">Hello,</p>
+    <p style="margin: 0 0 16px;">You have revoked stay authorization for <strong>{guest_name}</strong> at <strong>{property_name}</strong>.</p>
+    <p style="margin: 0 0 16px;"><strong>Actions taken:</strong></p>
+    <ul style="margin: 0 0 16px; padding-left: 1.5em;">
         <li>Guest's USAT token has been revoked (utility access disabled)</li>
         <li>Guest has been notified via email to vacate immediately</li>
         <li>All actions logged in the audit trail</li>
     </ul>
-    <p>Your DocuStay dashboard holds the full documentation and audit trail for your records.</p>
-    <p>— DocuStay</p>
+    {record_block}
+    {view_link}
     """
-    text = f"Hello, you have initiated removal for {guest_name} at {property_name}. USAT token revoked. Guest notified. — DocuStay"
+    html = wrap_email_body(inner)
+    text = f"Hello, you have initiated removal for {guest_name} at {property_name}. USAT token revoked. Guest notified. "
+    if record_url:
+        text += f"View record: {record_url} "
+    text += "— DocuStay"
     return send_email(owner_email, subject, html, text_content=text)
 
 
@@ -494,6 +583,30 @@ def send_dead_mans_switch_48h_before(
     return send_email(owner_email, subject, html)
 
 
+def send_dead_mans_switch_48h_before_to_owner_and_managers(
+    owner_email: str,
+    manager_emails: list[str],
+    guest_name: str,
+    property_name: str,
+    stay_end_date: str,
+) -> None:
+    """Dead Man's Switch: 48h before lease end – notify owner and all assigned managers."""
+    subject = f"[DocuStay] Dead Man's Switch – {guest_name}'s stay ends in 2 days"
+    html = f"""
+    <p>Hello,</p>
+    <p><strong>Dead Man's Switch alert:</strong> The stay for <strong>{guest_name}</strong> at <strong>{property_name}</strong> ends in 2 days.</p>
+    <p><strong>Lease end date:</strong> {stay_end_date}</p>
+    <p>Please confirm in DocuStay: has the guest renewed or moved out? If you do not update the stay (checkout or renew) within 48 hours after the end date, the system will automatically set the property to vacant and activate protective measures (utility lock, trespass detection, authority letters).</p>
+    <p>— DocuStay</p>
+    """
+    seen = set()
+    for email in ([owner_email] + list(manager_emails)):
+        e = (email or "").strip().lower()
+        if e and e not in seen:
+            seen.add(e)
+            send_email(e, subject, html)
+
+
 def send_dead_mans_switch_urgent_today(
     owner_email: str,
     guest_name: str,
@@ -509,6 +622,29 @@ def send_dead_mans_switch_urgent_today(
     <p>— DocuStay</p>
     """
     return send_email(owner_email, subject, html)
+
+
+def send_dead_mans_switch_urgent_today_to_owner_and_managers(
+    owner_email: str,
+    manager_emails: list[str],
+    guest_name: str,
+    property_name: str,
+    stay_end_date: str,
+) -> None:
+    """Dead Man's Switch: lease ends today – notify owner and all assigned managers."""
+    subject = f"[DocuStay] URGENT – {guest_name}'s stay ends TODAY"
+    html = f"""
+    <p>Hello,</p>
+    <p><strong>Dead Man's Switch – urgent:</strong> The stay for <strong>{guest_name}</strong> at <strong>{property_name}</strong> ends <strong>today</strong> ({stay_end_date}).</p>
+    <p>Please update DocuStay: mark checkout if the guest has left, or extend the stay if renewed. If no action is taken within 48 hours, the system will automatically set the property to vacant and activate protective measures.</p>
+    <p>— DocuStay</p>
+    """
+    seen = set()
+    for email in ([owner_email] + list(manager_emails)):
+        e = (email or "").strip().lower()
+        if e and e not in seen:
+            seen.add(e)
+            send_email(e, subject, html)
 
 
 def send_dead_mans_switch_auto_executed(
@@ -629,6 +765,29 @@ def send_shield_mode_turned_on_notification(
             send_email(e, subject, html)
 
 
+def send_shield_mode_turned_off_notification(
+    owner_email: str,
+    manager_emails: list[str],
+    property_name: str,
+    *,
+    turned_off_by: str = "property owner",
+) -> None:
+    """Notify property owner and all assigned managers when Shield Mode is turned off for a property."""
+    subject = f"[DocuStay] Shield Mode turned off – {property_name}"
+    html = f"""
+    <p>Hello,</p>
+    <p><strong>Shield Mode has been turned off</strong> for <strong>{property_name}</strong> by the {turned_off_by}.</p>
+    <p>DocuStay is no longer actively monitoring this property. You can turn it back on anytime in your dashboard.</p>
+    <p>— DocuStay</p>
+    """
+    seen = set()
+    for email in ([owner_email] + list(manager_emails)):
+        e = (email or "").strip().lower()
+        if e and e not in seen:
+            seen.add(e)
+            send_email(e, subject, html)
+
+
 def send_dead_mans_switch_enabled_notification(
     owner_email: str,
     manager_emails: list[str],
@@ -643,6 +802,61 @@ def send_dead_mans_switch_enabled_notification(
     <p><strong>Dead Man's Switch</strong> has been enabled for a guest stay at <strong>{property_name}</strong>.</p>
     <p>Guest: <strong>{guest_name}</strong>. Stay end date: <strong>{stay_end_date}</strong>.</p>
     <p>You will receive alerts 48 hours before the stay end date and on the end date. If no response is received within 48 hours after the end date, the system will set the property to vacant and activate Shield Mode.</p>
+    <p>— DocuStay</p>
+    """
+    seen = set()
+    for email in ([owner_email] + list(manager_emails)):
+        e = (email or "").strip().lower()
+        if e and e not in seen:
+            seen.add(e)
+            send_email(e, subject, html)
+
+
+def send_dms_triggered_set_status_notification(
+    owner_email: str,
+    manager_emails: list[str],
+    property_name: str,
+    property_id: int,
+    guest_name: str,
+    stay_end_date: str,
+) -> None:
+    """When DMS auto-executes (48h after lease end): notify owner+managers to go set status. 24h no response → Unknown."""
+    owner_url = _property_page_url(property_id, for_manager=False)
+    manager_url = _property_page_url(property_id, for_manager=True)
+    subject = f"[DocuStay] Action required – set property status – {property_name}"
+    html = f"""
+    <p>Hello,</p>
+    <p><strong>Dead Man's Switch</strong> has been executed for <strong>{property_name}</strong>. No response was received within 48 hours after the stay end date ({stay_end_date}).</p>
+    <p>Guest: <strong>{guest_name}</strong>. The property is now in UNCONFIRMED status with Shield Mode active.</p>
+    <p><strong>Action required:</strong> Please go to the DocuStay app and confirm the occupancy status for this property (Unit Vacated, Lease Renewed, or Holdover).</p>
+    <p>Property owners: <a href="{owner_url}">Open property page</a></p>
+    <p>Property managers: <a href="{manager_url}">Open property page</a></p>
+    <p>If you do not respond within 24 hours, the property status will be set to Unknown.</p>
+    <p>— DocuStay</p>
+    """
+    seen = set()
+    for email in ([owner_email] + list(manager_emails)):
+        e = (email or "").strip().lower()
+        if e and e not in seen:
+            seen.add(e)
+            send_email(e, subject, html)
+
+
+def send_dms_turned_off_notification(
+    owner_email: str,
+    manager_emails: list[str],
+    property_name: str,
+    guest_name: str,
+    stay_end_date: str,
+    reason: str = "occupancy confirmed",
+) -> None:
+    """Notify owner and managers when Dead Man's Switch is turned off for a stay."""
+    subject = f"[DocuStay] Dead Man's Switch turned off – {property_name}"
+    html = f"""
+    <p>Hello,</p>
+    <p><strong>Dead Man's Switch</strong> has been turned off for the guest stay at <strong>{property_name}</strong>.</p>
+    <p>Guest: <strong>{guest_name}</strong>. Stay end date: <strong>{stay_end_date}</strong>.</p>
+    <p>Reason: {reason}.</p>
     <p>— DocuStay</p>
     """
     seen = set()

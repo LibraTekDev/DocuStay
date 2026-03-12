@@ -7,7 +7,7 @@ Activity logs are visible to:
 
 Logged actions include:
 - Tenant invitations (manager/owner invites tenant to register).
-- Tenant assignments (tenant accepts invitation; tenant assignment cancelled).
+- Tenant assignments (tenant accepts invitation; tenant assignment cancelled by tenant). DocuStay does not revoke or expire tenants.
 - Guest invitations (owner/manager/tenant creates invite; guest invite accepted/revoked/cancelled).
 - Guest authorization changes (stay revoked, formal removal initiated, check-in, check-out).
 - Presence/away status changes (away activated/ended; resident temporarily absent, guests authorized, start timestamp).

@@ -107,11 +107,6 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
   const [removeResidentModeSaving, setRemoveResidentModeSaving] = useState<number | null>(null);
   const id = Number(propertyId);
 
-  const handleContextModeChange = (mode: 'business' | 'personal') => {
-    setContextMode(mode);
-    setContextModeState(mode);
-    loadData();
-  };
   const canInvite = billing?.can_invite !== false;
   const stateKey = property?.state ?? 'FL';
   // Prefer jurisdiction from API (JurisdictionInfo SOT); fallback to frontend rules for legacy/offline
@@ -127,13 +122,17 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
   const activeStaysForProperty = propertyStays.filter((s) => s.checked_in_at && !s.checked_out_at && !s.cancelled_at);
   const activeStays = stays.filter((s) => s.checked_in_at && !s.checked_out_at && !s.cancelled_at);
   const activeStay = activeStaysForProperty.find((s) => !isOverstayed(s.stay_end_date)) ?? activeStaysForProperty[0];
+  // Business mode: use property status only (no guest data). Personal mode: use stays for occupancy.
+  const isOccupiedForDisplay = contextMode === 'business'
+    ? (property?.occupancy_status || '').toLowerCase() === 'occupied'
+    : activeStaysForProperty.length > 0;
   const isOccupied = activeStaysForProperty.length > 0;
   const hasActiveStay = activeStaysForProperty.length > 0;
   const shieldOn = !!(property?.shield_mode_enabled);
-  const shieldStatus = shieldOn ? (isOccupied ? 'PASSIVE GUARD' : 'ACTIVE MONITORING') : null;
+  const shieldStatus = shieldOn ? (isOccupiedForDisplay ? 'PASSIVE GUARD' : 'ACTIVE MONITORING') : null;
   const isInactive = !!(property?.deleted_at);
   // Display status: active stay → OCCUPIED; else use property.occupancy_status (vacant | occupied | unknown | unconfirmed)
-  const displayStatus = isOccupied ? 'OCCUPIED' : (property?.occupancy_status ?? 'unknown').toUpperCase();
+  const displayStatus = isOccupiedForDisplay ? 'OCCUPIED' : (property?.occupancy_status ?? 'unknown').toUpperCase();
   const stayNeedingConfirmation = propertyStays.find((s) => s.show_occupancy_confirmation_ui);
   /** Stay to use for vacated/renewed/holdover: confirmation prompt stay, or any checked-in active stay on this property */
   const stayForOccupancyActions = stayNeedingConfirmation ?? (activeStaysForProperty.length > 0 ? activeStay ?? null : null);
@@ -167,6 +166,14 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
       })
       .finally(() => setLoading(false));
   }, [id, notify]);
+
+  const handleContextModeChange = useCallback((mode: 'business' | 'personal') => {
+    setContextMode(mode);
+    setContextModeState(mode);
+    setActiveTab((prev) => (mode === 'business' && (prev === 'stay' || prev === 'guests') ? 'overview' : prev));
+    if (mode === 'business') setStays([]);
+    loadData();
+  }, [loadData]);
 
   useEffect(() => {
     loadData();
@@ -210,6 +217,10 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
   useEffect(() => {
     if (activeTab === 'logs') loadPropertyLogs();
   }, [activeTab, loadPropertyLogs]);
+
+  useEffect(() => {
+    if (contextMode === 'business' && (activeTab === 'stay' || activeTab === 'guests')) setActiveTab('overview');
+  }, [contextMode, activeTab]);
 
   useEffect(() => {
     if (!property?.id || contextMode !== 'business') return;
@@ -384,6 +395,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
             </button>
           ))}
         </div>
+        {contextMode === 'personal' && (
         <div className="mt-6 pt-6 border-t border-slate-200 flex-grow min-h-0 flex flex-col">
           <h3 className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-3 px-1">Your guests</h3>
           {loading ? (
@@ -409,6 +421,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
             </ul>
           )}
         </div>
+        )}
 
         {/* Mode switcher at bottom (same as OwnerDashboard) */}
         <div className="mt-6 pt-6 border-t border-slate-200 flex-shrink-0">
@@ -451,10 +464,8 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
             <p className="text-slate-600 mt-1">{address || '—'}</p>
           </div>
           <div className="flex flex-wrap gap-3">
-            {contextMode !== 'personal' && (
-              <Button variant="outline" onClick={openEdit}>Edit Property</Button>
-            )}
-            {!isInactive && (
+            <Button variant="outline" onClick={openEdit}>Edit Property</Button>
+            {!isInactive && contextMode === 'personal' && (
               <span className={!canInvite ? 'group relative inline-block cursor-not-allowed' : undefined}>
                 {!canInvite && (
                   <span
@@ -528,7 +539,9 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
       </header>
 
       <div className="flex border-b border-slate-200 mb-8 overflow-x-auto no-scrollbar">
-        {(['Overview', 'Stay', 'Guests', 'Documentation', 'Event ledger'] as const).map((tab) => {
+        {(contextMode === 'personal'
+          ? (['Overview', 'Stay', 'Guests', 'Documentation', 'Event ledger'] as const)
+          : (['Overview', 'Documentation', 'Event ledger'] as const)).map((tab) => {
           const tabId = tab === 'Event ledger' ? 'logs' : tab.toLowerCase();
           return (
             <button
@@ -676,8 +689,8 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                           <div key={u.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200 flex flex-col gap-2">
                             <p className="font-medium text-slate-900">Unit {u.unit_label}</p>
                             <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusCls}`}>{label}</span>
-                            {u.occupied_by && <p className="text-xs text-slate-600">Occupied by {u.occupied_by}</p>}
-                            {u.invite_id && <p className="text-xs text-slate-500">Invite ID {u.invite_id}</p>}
+                            {contextMode === 'personal' && u.occupied_by && <p className="text-xs text-slate-600">Occupied by {u.occupied_by}</p>}
+                            {contextMode === 'personal' && u.invite_id && <p className="text-xs text-slate-500">Invite ID {u.invite_id}</p>}
                           </div>
                         );
                       })}
@@ -960,7 +973,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                         }`} />
                         {displayStatus}
                       </span>
-                      {isOccupied && activeStay && (
+                      {contextMode === 'personal' && isOccupied && activeStay && (
                         <div className="text-sm text-slate-600 space-y-0.5">
                           <p>Current guest: <span className="font-medium text-slate-800">{activeStay.guest_name}</span></p>
                           <p>Lease end: <span className="font-medium text-slate-800">{activeStay.stay_end_date}</span></p>
@@ -1004,21 +1017,21 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                         <span className="text-sm text-slate-600">Status: <span className="font-semibold text-slate-800">{shieldStatus}</span></span>
                       )}
                       {!shieldOn && (
-                        <span className="text-xs text-slate-500">Turn on anytime. Also turns on automatically on the last day of a guest&apos;s stay and when Dead Man&apos;s Switch runs (48h after stay end).</span>
+                        <span className="text-xs text-slate-500">Turn on anytime. Also turns on automatically on the last day of a guest&apos;s stay and when stay end reminders run (48h after stay end).</span>
                       )}
                     </div>
                   </Card>
                   <Card className="p-5 md:p-6 border-slate-200 flex flex-col">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Dead Man&apos;s Switch</h3>
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Stay end reminders</h3>
                     <div className="flex flex-col gap-2 flex-1 min-h-0">
-                      {isOccupied && activeStay ? (
+                      {contextMode === 'personal' && isOccupied && activeStay ? (
                         <>
                           <span className={`text-sm font-medium ${activeStay.dead_mans_switch_enabled ? 'text-amber-700' : 'text-slate-600'}`}>
                             {activeStay.dead_mans_switch_enabled ? 'On' : 'Off'}
                           </span>
                           <p className="text-xs text-slate-500">Alerts you if the stay ends without checkout or renewal. Shown for current guest stay.</p>
                         </>
-                      ) : upcomingStayForProperty ? (
+                      ) : contextMode === 'personal' && upcomingStayForProperty ? (
                         <>
                           <span className="text-sm font-medium text-slate-600">Off</span>
                           <p className="text-xs text-slate-500">Activates when the guest checks in. Alerts you if the stay ends without checkout or renewal.</p>
@@ -1035,7 +1048,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
           </div>
         )}
 
-        {activeTab === 'stay' && (
+        {activeTab === 'stay' && contextMode === 'personal' && (
           <Card className="overflow-hidden border-slate-200">
             <div className="p-6">
               <h3 className="text-lg font-semibold text-slate-800 mb-4">Stay (Invite token)</h3>
@@ -1045,7 +1058,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                 <div className="space-y-6">
                   {propertyStays.map((stay) => {
                     const isActive = !stay.checked_out_at && !stay.cancelled_at;
-                    const stateLabel = stay.token_state ?? '—';
+                    const stateLabel = (stay.token_state ?? '—').toUpperCase();
                     const stateClass =
                       stateLabel === 'BURNED'
                         ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
@@ -1055,12 +1068,15 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                             ? 'bg-slate-100 text-slate-600 border-slate-200'
                             : stateLabel === 'REVOKED'
                               ? 'bg-amber-50 text-amber-700 border-amber-200'
-                              : 'bg-slate-100 text-slate-600 border-slate-200';
+                              : stateLabel === 'CANCELLED'
+                                ? 'bg-slate-100 text-slate-600 border-slate-200'
+                                : 'bg-slate-100 text-slate-600 border-slate-200';
+                    const displayLabel = stateLabel === 'BURNED' ? 'Active' : stateLabel === 'STAGED' ? 'Pending' : stateLabel === 'REVOKED' ? 'Revoked' : stateLabel === 'CANCELLED' ? 'Cancelled' : stateLabel === 'EXPIRED' ? 'Expired' : stateLabel;
                     return (
                       <div key={stay.stay_id} className={`rounded-xl border p-5 ${isActive ? 'border-slate-200 bg-slate-50/50' : 'border-slate-100 bg-white'}`}>
                         <div className="flex flex-wrap items-center gap-2 mb-3">
                           <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide border ${stateClass}`}>
-                            {stateLabel}
+                            {displayLabel}
                           </span>
                           {stay.invitation_only && (
                             <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">Pending sign-up</span>
@@ -1104,7 +1120,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
           </Card>
         )}
 
-        {activeTab === 'guests' && (
+        {activeTab === 'guests' && contextMode === 'personal' && (
           <Card className="overflow-hidden border-slate-200">
             <table className="w-full text-left">
               <thead className="bg-slate-100 text-slate-500 uppercase text-[10px] tracking-widest font-black">
@@ -1228,7 +1244,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                               entry.category === 'billing' ? 'bg-slate-200 text-slate-800' :
                               'bg-sky-100 text-sky-800'
                             }`}>
-                              {entry.category === 'shield_mode' ? 'Shield Mode' : entry.category === 'dead_mans_switch' ? "Dead Man's Switch" : entry.category === 'billing' ? 'Billing' : entry.category.replace('_', ' ')}
+                              {entry.category === 'shield_mode' ? 'Shield Mode' : entry.category === 'dead_mans_switch' ? 'Stay end reminders' : entry.category === 'billing' ? 'Billing' : entry.category.replace('_', ' ')}
                             </span>
                           </td>
                           <td className="px-6 py-3 font-medium text-slate-800">{entry.title}</td>
@@ -1654,7 +1670,10 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                   if (!property || !inviteManagerEmail.trim() || !inviteManagerEmail.includes('@')) return;
                   setInviteManagerSending(true);
                   try {
-                    await propertiesApi.inviteManager(property.id, inviteManagerEmail.trim());
+                    const res = await propertiesApi.inviteManager(property.id, inviteManagerEmail.trim());
+                    if (typeof window !== 'undefined' && res?.invite_link) {
+                      console.log('%c[DocuStay] Property manager invite link (test mode):', 'color: #059669; font-weight: bold;', res.invite_link);
+                    }
                     notify('success', 'Invitation sent. The manager will receive an email with a signup link.');
                     setShowInviteManagerModal(false);
                     setInviteManagerEmail('');

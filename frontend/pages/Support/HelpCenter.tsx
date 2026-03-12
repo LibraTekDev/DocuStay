@@ -2,8 +2,8 @@ import React, { useState } from 'react';
 import { Card, Button } from '../../components/UI';
 
 const FAQS = [
-  { q: "How does DocuStay document temporary stays?", a: "DocuStay records authorization and stay details by region. Guests sign a Revocable License; stay durations are documented and capped by region. Identity verification supports the audit trail." },
-  { q: "How does utility authorization work?", a: "DocuStay provides utility authorization so guests can use utilities for the stay period without establishing an account in their name. Authorization is documented and can be revoked if needed." },
+  { q: "What does DocuStay document?", a: "DocuStay documents property status: occupancy (vacant or occupied), authorized presence, and status changes over time. For guest stays, it records authorization, identity verification, and stay details by region. All records form an immutable audit trail." },
+  { q: "How does guest authorization work?", a: "When you invite a guest, they sign a region-specific Revocable License. Stay durations are documented and capped by region. Identity verification supports the audit trail. You can revoke authorization at any time from your dashboard." },
   { q: "What if a guest stays past the end date?", a: "You can revoke the guest's stay authorization from your dashboard, which disables access. Notices and all actions are logged in the audit trail. Your dashboard holds the documentation for your records." },
 ];
 

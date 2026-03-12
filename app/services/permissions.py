@@ -1,11 +1,18 @@
 """Permission helpers for role-based access control. All checks are property/unit-scoped.
 
+KEY RULE: Ask "What lane does this data belong to?" — not "Who owns the property?"
+Permissions follow the lane (property/management, tenant, guest), not ownership status.
+Ownership does NOT override privacy scope. Tenant-invited guest data stays in tenant lane.
+
 Permission structure: User + Property/Unit + Role + Mode + Action
 - User: the authenticated user
 - Property/Unit: the resource being accessed
 - Role: owner, property_manager, tenant, guest
 - Mode: business (portfolio/management) or personal (resident)
 - Action: the requested operation (VIEW_BILLING, INVITE_GUEST, SET_PRESENCE, etc.)
+
+Personal vs Business Mode: Users can switch modes, but privacy rules still apply.
+Switching to personal mode does NOT unlock tenant-private information.
 """
 from enum import Enum
 from sqlalchemy.orm import Session

@@ -8,6 +8,7 @@ from sqlalchemy import func
 
 from app.database import get_db
 from app.models.owner import Property, OwnerProfile
+from app.services.privacy_lanes import is_tenant_lane_invitation, is_tenant_lane_stay, filter_tenant_lane_from_ledger_rows
 from app.models.unit import Unit
 from app.models.user import User
 from app.models.stay import Stay
@@ -16,7 +17,8 @@ from app.models.audit_log import AuditLog
 from app.models.event_ledger import EventLedger
 from app.models.invitation import Invitation
 from app.models.owner_poa_signature import OwnerPOASignature
-from app.services.agreements import agreement_content_to_pdf, poa_content_with_signature
+from app.models.agreement_signature import AgreementSignature
+from app.services.agreements import agreement_content_to_pdf, fill_guest_signature_in_content, poa_content_with_signature
 from app.services.dropbox_sign import get_signed_pdf
 from app.services.audit_log import create_log, CATEGORY_VERIFY_ATTEMPT, CATEGORY_FAILED_ATTEMPT
 from app.services.event_ledger import create_ledger_event, ledger_event_to_display, ACTION_VERIFY_ATTEMPT_VALID, ACTION_VERIFY_ATTEMPT_FAILED
@@ -135,13 +137,14 @@ def get_live_property_page(slug: str, db: Session = Depends(get_db)):
         # Overstay: end date passed but not checked out
         current_stay = max(current_stays, key=lambda x: (x.stay_end_date, x.id))
 
-    # Logs for this property from event ledger
+    # Logs for this property from event ledger (exclude tenant-lane: owners/managers/public must never see tenant guest activity)
     log_rows = (
         db.query(EventLedger)
         .filter(EventLedger.property_id == prop.id)
         .order_by(EventLedger.created_at.desc())
         .limit(100)
     ).all()
+    log_rows = filter_tenant_lane_from_ledger_rows(db, log_rows)
     logs = []
     for r in log_rows:
         cat, title, msg = ledger_event_to_display(r)
@@ -161,23 +164,33 @@ def get_live_property_page(slug: str, db: Session = Depends(get_db)):
         .order_by(Invitation.created_at.desc())
         .limit(50)
     ).all()
-    invitations = [
-        LiveInvitationSummary(
-            invitation_code=inv.invitation_code,
-            guest_label=(inv.guest_name or inv.guest_email or "").strip() or None,
-            stay_start_date=inv.stay_start_date,
-            stay_end_date=inv.stay_end_date,
-            status=inv.status or "pending",
-            token_state=getattr(inv, "token_state", None) or "STAGED",
+    invitations = []
+    for inv in inv_rows:
+        # Tenant-invited guest names are private; show "Guest" on public page
+        guest_label = None
+        if not is_tenant_lane_invitation(db, inv):
+            guest_label = (inv.guest_name or inv.guest_email or "").strip() or None
+        if guest_label is None:
+            guest_label = "Guest"
+        invitations.append(
+            LiveInvitationSummary(
+                invitation_code=inv.invitation_code,
+                guest_label=guest_label,
+                stay_start_date=inv.stay_start_date,
+                stay_end_date=inv.stay_end_date,
+                status=inv.status or "pending",
+                token_state=getattr(inv, "token_state", None) or "STAGED",
+            )
         )
-        for inv in inv_rows
-    ]
 
     if current_stay:
         authorization_state = "REVOKED" if getattr(current_stay, "revoked_at", None) else "ACTIVE"
-        guest = db.query(User).filter(User.id == current_stay.guest_id).first()
-        guest_profile = db.query(GuestProfile).filter(GuestProfile.user_id == current_stay.guest_id).first()
-        guest_name = (guest_profile.full_legal_name if guest_profile else None) or (guest.full_name if guest else None) or (guest.email if guest else "Guest")
+        if is_tenant_lane_stay(db, current_stay):
+            guest_name = "Guest"  # Tenant-invited guest names are private
+        else:
+            guest = db.query(User).filter(User.id == current_stay.guest_id).first()
+            guest_profile = db.query(GuestProfile).filter(GuestProfile.user_id == current_stay.guest_id).first()
+            guest_name = (guest_profile.full_legal_name if guest_profile else None) or (guest.full_name if guest else None) or (guest.email if guest else "Guest")
         return LivePropertyPagePayload(
             has_current_guest=True,
             property=prop_info,
@@ -206,9 +219,12 @@ def get_live_property_page(slug: str, db: Session = Depends(get_db)):
     last_stay = None
     for s in all_stays:
         if getattr(s, "checked_out_at", None) is not None or s.stay_end_date < today:
-            guest = db.query(User).filter(User.id == s.guest_id).first()
-            gp = db.query(GuestProfile).filter(GuestProfile.user_id == s.guest_id).first()
-            gn = (gp.full_legal_name if gp else None) or (guest.full_name if guest else None) or (guest.email if guest else "Guest")
+            if is_tenant_lane_stay(db, s):
+                gn = "Guest"
+            else:
+                guest = db.query(User).filter(User.id == s.guest_id).first()
+                gp = db.query(GuestProfile).filter(GuestProfile.user_id == s.guest_id).first()
+                gn = (gp.full_legal_name if gp else None) or (guest.full_name if guest else None) or (guest.email if guest else "Guest")
             last_stay = LiveStaySummary(
                 guest_name=gn,
                 stay_start_date=s.stay_start_date,
@@ -220,9 +236,12 @@ def get_live_property_page(slug: str, db: Session = Depends(get_db)):
     upcoming = []
     for s in all_stays:
         if s.stay_start_date > today and getattr(s, "cancelled_at", None) is None:
-            guest = db.query(User).filter(User.id == s.guest_id).first()
-            gp = db.query(GuestProfile).filter(GuestProfile.user_id == s.guest_id).first()
-            gn = (gp.full_legal_name if gp else None) or (guest.full_name if guest else None) or (guest.email if guest else "Guest")
+            if is_tenant_lane_stay(db, s):
+                gn = "Guest"
+            else:
+                guest = db.query(User).filter(User.id == s.guest_id).first()
+                gp = db.query(GuestProfile).filter(GuestProfile.user_id == s.guest_id).first()
+                gn = (gp.full_legal_name if gp else None) or (guest.full_name if guest else None) or (guest.email if guest else "Guest")
             upcoming.append(
                 LiveStaySummary(
                     guest_name=gn,
@@ -261,6 +280,129 @@ def _normalize_address(s: str) -> str:
     if not s:
         return ""
     return " ".join(s.lower().strip().split())
+
+
+def _build_verify_record(
+    db: Session,
+    inv: Invitation,
+    prop: Property,
+    stay: Stay | None,
+    valid: bool,
+    reason: str,
+    token_id: str,
+    now: datetime,
+) -> VerifyResponse:
+    """Build full VerifyResponse with property, guest, dates, status, and signed agreement info."""
+    prop_parts = [prop.street, prop.city, prop.state, (prop.zip_code or "").strip()]
+    prop_full = ", ".join(p for p in prop_parts if p)
+    token_state = getattr(inv, "token_state", None) or "STAGED"
+    today = date.today()
+
+    # Guest name
+    if stay:
+        guest = db.query(User).filter(User.id == stay.guest_id).first()
+        guest_profile = db.query(GuestProfile).filter(GuestProfile.user_id == stay.guest_id).first()
+        guest_name = (guest_profile.full_legal_name if guest_profile else None) or (guest.full_name if guest else None) or (guest.email if guest else "Guest")
+    else:
+        guest_name = inv.guest_name or inv.guest_email or "Guest"
+
+    # Stay dates
+    stay_start_date = stay.stay_start_date if stay else inv.stay_start_date
+    stay_end_date = stay.stay_end_date if stay else inv.stay_end_date
+    checked_in_at = getattr(stay, "checked_in_at", None) if stay else None
+    checked_out_at = getattr(stay, "checked_out_at", None) if stay else None
+    revoked_at = getattr(stay, "revoked_at", None) if stay else None
+    cancelled_at = getattr(stay, "cancelled_at", None) if stay else None
+
+    # Status
+    if not stay:
+        if token_state in ("CANCELLED", "REVOKED"):
+            status = "CANCELLED"
+        elif token_state == "EXPIRED":
+            status = "EXPIRED"
+        else:
+            status = "PENDING"
+    elif revoked_at:
+        status = "REVOKED"
+    elif cancelled_at:
+        status = "CANCELLED"
+    elif checked_out_at:
+        status = "COMPLETED"
+    elif stay_end_date < today:
+        status = "EXPIRED"
+    elif checked_in_at:
+        status = "ACTIVE"
+    else:
+        status = "PENDING"
+
+    # Signed agreement
+    sig = (
+        db.query(AgreementSignature)
+        .filter(AgreementSignature.invitation_code == inv.invitation_code)
+        .order_by(AgreementSignature.signed_at.desc())
+        .first()
+    )
+    signed_agreement_available = False
+    signed_agreement_url = None
+    if sig and (sig.signed_pdf_bytes or getattr(sig, "dropbox_sign_request_id", None)):
+        signed_agreement_available = True
+        signed_agreement_url = f"/public/verify/{token_id}/signed-agreement"
+
+    # POA
+    profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+    poa_signed_at = None
+    if profile and profile.user_id:
+        poa_sig = (
+            db.query(OwnerPOASignature)
+            .filter(OwnerPOASignature.used_by_user_id == profile.user_id)
+            .first()
+        )
+        if poa_sig:
+            poa_signed_at = poa_sig.signed_at
+
+    # Audit entries
+    log_rows = (
+        db.query(AuditLog)
+        .filter(AuditLog.property_id == prop.id)
+        .order_by(AuditLog.created_at.desc())
+        .limit(20)
+    ).all()
+    audit_entries = [
+        LiveLogEntry(
+            category=r.category or "—",
+            title=r.title or "—",
+            message=r.message or "—",
+            created_at=r.created_at if r.created_at is not None else now,
+        )
+        for r in log_rows
+    ]
+
+    occ = getattr(prop, "occupancy_status", None) or "unknown"
+    if valid and (occ or "").lower() == "unknown":
+        occ = "occupied"
+
+    return VerifyResponse(
+        valid=valid,
+        reason=reason,
+        property_name=prop.name,
+        property_address=prop_full,
+        occupancy_status=occ,
+        token_state=token_state,
+        stay_start_date=stay_start_date,
+        stay_end_date=stay_end_date,
+        guest_name=guest_name,
+        poa_signed_at=poa_signed_at,
+        live_slug=prop.live_slug,
+        generated_at=now,
+        audit_entries=audit_entries,
+        status=status,
+        checked_in_at=checked_in_at,
+        checked_out_at=checked_out_at,
+        revoked_at=revoked_at,
+        cancelled_at=cancelled_at,
+        signed_agreement_available=signed_agreement_available,
+        signed_agreement_url=signed_agreement_url,
+    )
 
 
 @router.post("/verify", response_model=VerifyResponse)
@@ -371,8 +513,14 @@ def post_verify(
                     generated_at=now,
                 )
 
-    # 4. Validity: invitation token_state BURNED, stay exists and active
+    # 4. Stay and validity
+    stay = db.query(Stay).filter(Stay.invitation_id == inv.id).first()
+    today = date.today()
     token_state = getattr(inv, "token_state", None) or "STAGED"
+
+    # Determine validity and reason
+    valid = False
+    reason = ""
     if token_state != "BURNED":
         create_log(
             db,
@@ -386,14 +534,20 @@ def post_verify(
             meta={"result": "invalid", "reason": "token_not_burned", "token_state": token_state},
         )
         db.commit()
-        return VerifyResponse(
+        if token_state in ("CANCELLED", "REVOKED"):
+            reason_msg = "Status: CANCELLED — Assignment or invitation was cancelled."
+        elif token_state == "EXPIRED":
+            reason_msg = "Status: EXPIRED — Invitation or stay has ended."
+        else:
+            reason_msg = "Status: PENDING — Invitation not yet accepted."
+        return _build_verify_record(
+            db, inv, prop, stay,
             valid=False,
-            reason="Authorization is not active for this token.",
-            generated_at=now,
+            reason=reason_msg,
+            token_id=token_id,
+            now=now,
         )
 
-    stay = db.query(Stay).filter(Stay.invitation_id == inv.id).first()
-    today = date.today()
     if not stay:
         create_log(
             db,
@@ -407,11 +561,14 @@ def post_verify(
             meta={"result": "invalid", "reason": "no_stay"},
         )
         db.commit()
-        return VerifyResponse(
+        return _build_verify_record(
+            db, inv, prop, None,
             valid=False,
-            reason="No active authorization found.",
-            generated_at=now,
+            reason="Status: PENDING — Agreement signed; stay record not yet created.",
+            token_id=token_id,
+            now=now,
         )
+
     if getattr(stay, "revoked_at", None) is not None:
         create_log(
             db,
@@ -426,11 +583,14 @@ def post_verify(
             meta={"result": "invalid", "reason": "stay_revoked"},
         )
         db.commit()
-        return VerifyResponse(
+        return _build_verify_record(
+            db, inv, prop, stay,
             valid=False,
-            reason="Authorization has been revoked.",
-            generated_at=now,
+            reason="Status: REVOKED — Authorization was revoked.",
+            token_id=token_id,
+            now=now,
         )
+
     if getattr(stay, "checked_out_at", None) is not None:
         create_log(
             db,
@@ -445,11 +605,14 @@ def post_verify(
             meta={"result": "invalid", "reason": "stay_checked_out"},
         )
         db.commit()
-        return VerifyResponse(
+        return _build_verify_record(
+            db, inv, prop, stay,
             valid=False,
-            reason="Authorization ended (guest checked out).",
-            generated_at=now,
+            reason="Status: COMPLETED — Guest checked out.",
+            token_id=token_id,
+            now=now,
         )
+
     if getattr(stay, "cancelled_at", None) is not None:
         create_log(
             db,
@@ -464,11 +627,14 @@ def post_verify(
             meta={"result": "invalid", "reason": "stay_cancelled"},
         )
         db.commit()
-        return VerifyResponse(
+        return _build_verify_record(
+            db, inv, prop, stay,
             valid=False,
-            reason="Authorization was cancelled.",
-            generated_at=now,
+            reason="Status: CANCELLED — Stay was cancelled.",
+            token_id=token_id,
+            now=now,
         )
+
     if stay.stay_end_date < today:
         create_log(
             db,
@@ -483,10 +649,12 @@ def post_verify(
             meta={"result": "invalid", "reason": "stay_ended"},
         )
         db.commit()
-        return VerifyResponse(
+        return _build_verify_record(
+            db, inv, prop, stay,
             valid=False,
-            reason="Authorization has ended.",
-            generated_at=now,
+            reason="Status: EXPIRED — Stay end date has passed.",
+            token_id=token_id,
+            now=now,
         )
 
     # 5. Valid: log success and build response
@@ -516,58 +684,73 @@ def post_verify(
     )
     db.commit()
 
-    # Guest name
-    guest = db.query(User).filter(User.id == stay.guest_id).first()
-    guest_profile = db.query(GuestProfile).filter(GuestProfile.user_id == stay.guest_id).first()
-    guest_name = (guest_profile.full_legal_name if guest_profile else None) or (guest.full_name if guest else None) or (guest.email if guest else "Guest")
-
-    # POA signed date for authority reference
-    profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
-    poa_signed_at = None
-    if profile and profile.user_id:
-        poa_sig = (
-            db.query(OwnerPOASignature)
-            .filter(OwnerPOASignature.used_by_user_id == profile.user_id)
-            .first()
-        )
-        if poa_sig:
-            poa_signed_at = poa_sig.signed_at
-
-    # Recent audit entries for this property (last 20)
-    log_rows = (
-        db.query(AuditLog)
-        .filter(AuditLog.property_id == prop.id)
-        .order_by(AuditLog.created_at.desc())
-        .limit(20)
-    ).all()
-    audit_entries = [
-        LiveLogEntry(
-            category=r.category or "—",
-            title=r.title or "—",
-            message=r.message or "—",
-            created_at=r.created_at if r.created_at is not None else now,
-        )
-        for r in log_rows
-    ]
-
-    # For verify display: if property is still "unknown" but we have an active stay, show "occupied"
-    # so the verifier sees that the unit has an active guest authorization (occupancy is set in DB when guest checks in).
-    occ = getattr(prop, "occupancy_status", None) or "unknown"
-    if (occ or "").lower() == "unknown":
-        occ = "occupied"
-
-    return VerifyResponse(
+    return _build_verify_record(
+        db, inv, prop, stay,
         valid=True,
-        property_name=prop.name,
-        property_address=prop_full,
-        occupancy_status=occ,
-        token_state=token_state,
-        stay_end_date=stay.stay_end_date,
-        guest_name=guest_name,
-        poa_signed_at=poa_signed_at,
-        live_slug=prop.live_slug,
-        generated_at=now,
-        audit_entries=audit_entries,
+        reason="",
+        token_id=token_id,
+        now=now,
+    )
+
+
+@router.get("/verify/{token}/signed-agreement")
+def get_verify_signed_agreement_pdf(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Public: return signed guest agreement PDF for the invitation identified by token (invitation code).
+    No auth; for use by the verify page when signed_agreement_available is true.
+    """
+    token = (token or "").strip()
+    if not token:
+        raise HTTPException(status_code=404, detail="Token required")
+    inv = (
+        db.query(Invitation)
+        .filter(func.lower(Invitation.invitation_code) == token.lower())
+        .first()
+    )
+    if not inv:
+        raise HTTPException(status_code=404, detail="Token not found")
+    sig = (
+        db.query(AgreementSignature)
+        .filter(AgreementSignature.invitation_code == inv.invitation_code)
+        .order_by(AgreementSignature.signed_at.desc())
+        .first()
+    )
+    if not sig:
+        raise HTTPException(status_code=404, detail="No signed agreement found for this token.")
+    # Dropbox: prefer PDF from Dropbox
+    if getattr(sig, "dropbox_sign_request_id", None):
+        pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
+        if pdf_bytes:
+            sig.signed_pdf_bytes = pdf_bytes
+            db.commit()
+            return Response(
+                content=pdf_bytes,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'inline; filename="DocuStay-Signed-{sig.invitation_code}.pdf"'},
+            )
+        raise HTTPException(
+            status_code=404,
+            detail="Document not yet signed. Please complete signing in the link we sent you.",
+        )
+    if sig.signed_pdf_bytes:
+        return Response(
+            content=sig.signed_pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="DocuStay-Signed-{sig.invitation_code}.pdf"'},
+        )
+    # Legacy: in-app signing; generate from stored content
+    date_str = sig.signed_at.strftime("%Y-%m-%d") if sig.signed_at else ""
+    content = fill_guest_signature_in_content(sig.document_content, sig.typed_signature, date_str, getattr(sig, "ip_address", None))
+    pdf_bytes = agreement_content_to_pdf(sig.document_title, content)
+    sig.signed_pdf_bytes = pdf_bytes
+    db.commit()
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="DocuStay-Signed-{sig.invitation_code}.pdf"'},
     )
 
 

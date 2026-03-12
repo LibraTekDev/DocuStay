@@ -28,7 +28,8 @@ class Invitation(Base):
     status = Column(String(20), nullable=False, default="pending")  # pending, ongoing (e.g. CSV occupied), accepted, cancelled
 
     # Invite-as-token state (Invite ID = invitation_code; used as Stay ID for display)
-    # STAGED=created, BURNED=guest accepted+signed MoA, EXPIRED=stay ended/checked out, REVOKED=cancelled by owner/guest
+    # STAGED=created, BURNED=guest/tenant accepted+signed, EXPIRED=guest stay ended (guests only; tenants not expired)
+    # REVOKED=guest authorization revoked by owner, CANCELLED=tenant self-cancelled (DocuStay does not revoke tenants)
     token_state = Column(String(20), nullable=False, default="STAGED", server_default="STAGED")
 
     # Whether this invite is for a guest stay or a tenant signup; enforced on verify/signup so links are not interchangeable

@@ -204,3 +204,46 @@ export const ErrorModal: React.FC<{
     document.body
   );
 };
+
+/** Success modal for invite acceptance, property assignment, etc. */
+export const SuccessModal: React.FC<{
+  open: boolean;
+  title?: string;
+  message: string;
+  onClose: () => void;
+  /** Primary button label. Default "Continue" */
+  buttonLabel?: string;
+}> = ({ open, title = "Success", message, onClose, buttonLabel = "Continue" }) => {
+  if (!open) return null;
+  return createPortal(
+    <div className="fixed inset-0 z-[60]">
+      <div className="absolute inset-0 bg-slate-900/60" onClick={onClose} aria-hidden />
+      <div className="absolute inset-0 p-4 flex items-center justify-center">
+        <div
+          className="w-full max-w-md bg-white border border-emerald-200 rounded-xl shadow-lg overflow-hidden"
+          role="alertdialog"
+          aria-labelledby="success-modal-title"
+          aria-describedby="success-modal-desc"
+        >
+          <div className="flex items-center gap-3 px-6 py-4 border-b border-emerald-100 bg-emerald-50/50">
+            <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0">
+              <svg className="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            <h2 id="success-modal-title" className="text-lg font-semibold text-emerald-900">{title}</h2>
+          </div>
+          <div className="px-6 py-4">
+            <p id="success-modal-desc" className="text-slate-700 leading-relaxed">{message}</p>
+            <div className="mt-6 flex justify-end">
+              <Button variant="primary" onClick={onClose} className="bg-emerald-600 hover:bg-emerald-700 focus:ring-emerald-500">
+                {buttonLabel}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+};

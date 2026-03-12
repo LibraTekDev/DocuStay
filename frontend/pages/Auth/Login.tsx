@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Input, Button, ErrorModal } from '../../components/UI';
+import { Input, Button, ErrorModal, SuccessModal } from '../../components/UI';
 import { HeroBackground } from '../../components/HeroBackground';
 import { AuthCardLayout, AuthBullet } from '../../components/AuthCardLayout';
 import { authApi, invitationsApi } from '../../services/api';
@@ -20,18 +20,33 @@ interface LoginProps {
   notify: (t: 'success' | 'error', m: string) => void;
   navigate: (v: string) => void;
   initialRole?: 'owner' | 'property_manager' | 'tenant' | 'guest';
+  managerInviteToken?: string;
 }
 
 type LoginRole = "owner" | "property_manager" | "tenant" | "guest";
 
-const Login: React.FC<LoginProps> = ({ onLogin, setLoading, notify, navigate, initialRole = 'owner' }) => {
+const Login: React.FC<LoginProps> = ({ onLogin, setLoading, notify, navigate, initialRole = 'owner', managerInviteToken }) => {
   const [formData, setFormData] = useState({ email: '', password: '', role: initialRole as LoginRole, invitation_link: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [inviteCheck, setInviteCheck] = useState<{ loading: boolean; valid: boolean; expired?: boolean; used?: boolean } | null>(null);
+  const [managerInviteInfo, setManagerInviteInfo] = useState<{ property_name: string } | null>(null);
   useEffect(() => {
     setFormData((prev) => ({ ...prev, role: initialRole as LoginRole }));
   }, [initialRole]);
+  useEffect(() => {
+    if (managerInviteToken && initialRole === 'property_manager') {
+      authApi.getManagerInvite(managerInviteToken)
+        .then((d) => {
+          setFormData((prev) => ({ ...prev, email: d.email }));
+          setManagerInviteInfo({ property_name: d.property_name });
+        })
+        .catch(() => setManagerInviteInfo(null));
+    } else {
+      setManagerInviteInfo(null);
+    }
+  }, [managerInviteToken, initialRole]);
   const [errorModal, setErrorModal] = useState<{ open: boolean; message: string }>({ open: false, message: '' });
+  const [successModal, setSuccessModal] = useState<{ open: boolean; message: string; user?: any }>({ open: false, message: '' });
 
   const inviteCode = parseInviteCode(formData.invitation_link);
 
@@ -72,16 +87,35 @@ const Login: React.FC<LoginProps> = ({ onLogin, setLoading, notify, navigate, in
     try {
       const apiRole = formData.role;
       const result = await authApi.login(email, password, apiRole);
-      setLoading(false);
       if (result.status === 'success' && result.data) {
-        if (formData.role === 'tenant' && inviteCode && inviteCheck?.valid !== false) {
+        if (formData.role === 'property_manager' && managerInviteToken) {
+          try {
+            await authApi.acceptManagerInvite(managerInviteToken);
+            const propertyName = managerInviteInfo?.property_name || 'the property';
+            setLoading(false);
+            setSuccessModal({
+              open: true,
+              message: `You have been successfully assigned to manage ${propertyName}.`,
+              user: result.data,
+            });
+          } catch (acceptErr) {
+            notify('error', (acceptErr as Error)?.message ?? 'Failed to accept invitation.');
+            setLoading(false);
+            onLogin(result.data);
+            return;
+          }
+        } else if (formData.role === 'tenant' && inviteCode && inviteCheck?.valid !== false) {
           sessionStorage.setItem(PENDING_INVITE_STORAGE_KEY, inviteCode.trim().toUpperCase());
           notify('success', 'Signed in. You can sign the invitation agreement on your dashboard.');
-        } else {
+        } else if (!managerInviteToken) {
           notify('success', 'Logged in successfully.');
         }
-        onLogin(result.data);
+        setLoading(false);
+        if (!(formData.role === 'property_manager' && managerInviteToken)) {
+          onLogin(result.data);
+        }
       } else {
+        setLoading(false);
         showError(result.message || 'Login failed. Please check your email and password.');
       }
     } catch (err) {
@@ -111,7 +145,13 @@ const Login: React.FC<LoginProps> = ({ onLogin, setLoading, notify, navigate, in
       >
           <div className="max-w-sm mx-auto w-full">
             <h1 className="text-xl font-semibold text-slate-900 mb-1 lg:hidden">{roleTitle}</h1>
-            <p className="text-slate-600 text-sm mb-6">Sign in to your account.</p>
+            <p className="text-slate-600 text-sm mb-6">
+              {managerInviteInfo ? (
+                <>Sign in to accept your invitation to manage <strong>{managerInviteInfo.property_name}</strong>.</>
+              ) : (
+                'Sign in to your account.'
+              )}
+            </p>
             
             <form onSubmit={handleSubmit} className="space-y-6">
               <Input
@@ -212,6 +252,15 @@ const Login: React.FC<LoginProps> = ({ onLogin, setLoading, notify, navigate, in
         open={errorModal.open}
         message={errorModal.message}
         onClose={() => setErrorModal((p) => ({ ...p, open: false }))}
+      />
+      <SuccessModal
+        open={successModal.open}
+        title="Property Assigned Successfully"
+        message={successModal.message}
+        onClose={() => {
+          if (successModal.user) onLogin(successModal.user);
+          setSuccessModal({ open: false, message: '' });
+        }}
       />
     </HeroBackground>
   );

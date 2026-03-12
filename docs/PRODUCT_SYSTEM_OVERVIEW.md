@@ -2,6 +2,9 @@
 
 This document describes **what the system does** and **how each feature works** from a product and logic perspective—for use by product, support, and stakeholders. It does not include code-level details.
 
+### Platform scope (guests vs tenants)
+DocuStay handles **guest authorization records**, **guest expirations**, **guest revocations**, and related documentation. The platform does **not** revoke tenants, expire tenants, or send tenant revocation/expiration notifications. Tenant lease and legal removal is outside DocuStay’s scope. Tenant assignments can be **cancelled by the tenant** (self-cancel); the system does not revoke them.
+
 ---
 
 ## 1. Shield Mode
@@ -127,9 +130,10 @@ Jurisdiction and legal content are stored in the database as the **source of tru
 - **Output:** An invitation is created with status **pending**, token_state **STAGED**, and a unique **invitation code**. Dead Man’s Switch is enabled for the resulting stay (alerts by email and dashboard). The owner receives a **link** they can share: `#invite/{invitation_code}`.
 
 ### Invitation expiry (pending, not accepted in time)
-- **Normal mode:** Pending invitations that are not accepted within **12 hours** are marked **expired** (status=expired, token_state=EXPIRED) by a scheduled cleanup job that runs every hour.
+- **Normal mode:** Pending **guest** invitations that are not accepted within **12 hours** are marked **expired** (status=expired, token_state=EXPIRED) by a scheduled cleanup job that runs every hour.
 - **Test mode** (when `TEST_MODE=true` in .env): The same logic applies but the window is **5 minutes** instead of 12 hours, and the cleanup job runs **every minute** so expired invites are updated soon after the window.
-- The owner dashboard uses the same rule to show which pending invites are expired (5 min or 12 h depending on mode).
+- **Tenant invitations are excluded** from expiry; DocuStay does not expire tenants. Tenant lease/legal removal is outside the platform’s scope.
+- The owner dashboard uses the same rule to show which pending guest invites are expired (5 min or 12 h depending on mode).
 
 ### How a guest can accept
 1. **New guest (signup with invite link)**  
@@ -433,8 +437,9 @@ Each invitation has **status** and **token_state**. The invitation code (invite 
 |-------|--------|----------------|
 | **STAGED** | Invite created; link can be used to sign and accept. | Owner creates invitation (manual flow). |
 | **BURNED** | Guest signed agreement and accepted; stay created. One-time use consumed. Or (CSV) invitation created for documented tenant who has not yet signed up. | Guest accepts (signup-with-invite or accept-invite with valid signature). Also when owner confirms “Lease Renewed” (stays BURNED). **CSV bulk upload:** When Occupied=YES with tenant name and dates, the system creates an invitation in BURNED state so the tenant is documented; no Stay or guest account until the tenant uses the invite link. |
-| **EXPIRED** | Stay ended normally (checkout or owner confirmed vacated). | Owner confirms “Unit Vacated”; or guest checks out (guest-end stay). |
-| **REVOKED** | Invite or stay cancelled/revoked. | Owner cancels invitation; or owner revokes stay (Kill Switch); or guest cancels future stay. |
+| **EXPIRED** | Stay ended normally (checkout or owner confirmed vacated). | Owner confirms “Unit Vacated”; or guest checks out (guest-end stay). **Guests only;** DocuStay does not expire tenants. |
+| **REVOKED** | Guest authorization revoked by owner. | Owner cancels guest invitation; or owner revokes guest stay (Kill Switch); or guest cancels future stay. **Guests only;** DocuStay does not revoke tenants. |
+| **CANCELLED** | Tenant assignment cancelled by tenant. | Tenant self-cancels their assignment. DocuStay does not revoke tenants; tenant lease/legal removal is outside scope. |
 
 **Display:** In the owner dashboard, invitations are shown with a combined display status (e.g. pending / ongoing / cancelled / expired) that considers both status and token_state (e.g. BURNED + pending may show as “ongoing” when a stay exists).
 

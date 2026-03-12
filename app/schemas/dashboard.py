@@ -16,7 +16,7 @@ class OwnerInvitationView(BaseModel):
     stay_end_date: date
     region_code: str
     status: str  # pending, ongoing (e.g. CSV occupied), accepted, cancelled, expired
-    token_state: str = "STAGED"  # STAGED | BURNED | EXPIRED | REVOKED
+    token_state: str = "STAGED"  # STAGED | BURNED | EXPIRED | REVOKED | CANCELLED
     created_at: datetime | None
     is_expired: bool = False  # True when pending and created_at older than 12 hours
 
@@ -42,7 +42,7 @@ class OwnerStayView(BaseModel):
     stay_id: int  # Real stay PK, or negative invitation id for invitation_only rows (CSV BURNED with no stay)
     property_id: int
     invite_id: str | None = None  # Invitation code (Invite ID) for this stay
-    token_state: str | None = None  # STAGED | BURNED | EXPIRED | REVOKED (from linked invitation)
+    token_state: str | None = None  # STAGED | BURNED | EXPIRED | REVOKED | CANCELLED (from linked invitation)
     invitation_only: bool = False  # True when from CSV BURNED invite with no Stay (tenant has not signed up yet)
     guest_name: str
     property_name: str
@@ -76,7 +76,7 @@ class GuestStayView(BaseModel):
     """Guest view: property, approved dates, region classification, legal notice and laws from Jurisdiction SOT. usat_token when released; vacate_by when revoked."""
     stay_id: int
     invite_id: str | None = None  # Invite ID (invitation code) for this stay
-    token_state: str | None = None  # STAGED | BURNED | EXPIRED | REVOKED
+    token_state: str | None = None  # STAGED | BURNED | EXPIRED | REVOKED | CANCELLED
     property_live_slug: str | None = None  # for building live link URL (#live/<slug>)
     property_name: str
     unit_label: str | None = None  # Unit the guest is invited to (e.g. "5" for multi-unit building)

@@ -9,7 +9,7 @@ type AckKey = "read" | "temporary" | "vacate" | "electronic";
 const DUMMY_POA_CONTENT = `**Master Power of Attorney (POA)**
 
 **Overview**
-This is a one-time authorization you sign when you set up your DocuStay account. It lets DocuStay act on your behalf for documentation and utility-related steps so the platform can help you manage your rental properties.
+This is a one-time authorization you sign when you set up your DocuStay account. It lets DocuStay act on your behalf for documentation steps so the platform can help you manage your rental properties.
 
 **1. Who Signs This?**
 Only property owners sign this Master POA when they join DocuStay.
@@ -21,13 +21,12 @@ One signature applies to all properties you add to your account, now and later.
 
 **3. What Does DocuStay Do With This?**
 With your authorization, DocuStay can:
-- Create and send utility authorization so providers can verify occupancy
-- Contact utility companies when needed to confirm or update service for your properties
 - Put together documentation packages (e.g. occupancy, dates, guest info) for your records
 - Keep dated records of property status and actions for your reference
+- Document occupancy status, authorized presence, and status changes over time
 
 **4. How Does Location Matter?**
-DocuStay uses each property's address (zip code and state/region) to show relevant local information on that property's page and to tailor guest agreements and any letters or forms to that location.
+DocuStay uses each property's address (zip code and state/region) to show relevant local information on that property's page and to tailor guest agreements and forms to that location.
 
 **SIGNATURE (ELECTRONIC)**
 Owner: ________________________   Date: __________`;

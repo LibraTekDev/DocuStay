@@ -32,7 +32,8 @@ def get_invitation_expire_cutoff() -> datetime:
 
 
 def run_invitation_cleanup_job() -> None:
-    """Mark pending invitations older than the configured window as expired: status='expired', token_state='EXPIRED'."""
+    """Mark pending GUEST invitations older than the configured window as expired: status='expired', token_state='EXPIRED'.
+    Tenant invitations are excluded; DocuStay does not expire tenants."""
     logger.info("Invitation cleanup job: started")
     db: Session = SessionLocal()
     try:
@@ -40,6 +41,7 @@ def run_invitation_cleanup_job() -> None:
         invs = db.query(Invitation).filter(
             Invitation.status == "pending",
             Invitation.created_at < threshold,
+            Invitation.invitation_kind == "guest",
         ).all()
         if invs:
             for inv in invs:
@@ -65,7 +67,7 @@ def run_invitation_cleanup_job() -> None:
                     meta={"invitation_id": inv.id, "invitation_code": getattr(inv, "invitation_code", None), "job": "invitation_cleanup"},
                 )
             db.commit()
-            logger.info("Invitation cleanup job: marked %d pending invitation(s) as expired (status=expired, token_state=EXPIRED).", len(invs))
+            logger.info("Invitation cleanup job: marked %d pending guest invitation(s) as expired (status=expired, token_state=EXPIRED).", len(invs))
         else:
             logger.info("Invitation cleanup job: no pending invitations past cutoff, done")
     except Exception as e:

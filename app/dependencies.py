@@ -190,6 +190,8 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
 
 
 def get_context_mode(request: Request) -> str:
-    """Read X-Context-Mode header: business | personal. Defaults to business."""
+    """Read X-Context-Mode header: business | personal. Defaults to business.
+    Users can switch modes, but privacy rules still apply — switching to personal
+    does NOT unlock tenant-private information (lane-based access)."""
     mode = (request.headers.get("X-Context-Mode") or "").strip().lower()
     return mode if mode in ("business", "personal") else "business"

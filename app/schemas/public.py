@@ -80,7 +80,7 @@ class LiveInvitationSummary(BaseModel):
     stay_start_date: date
     stay_end_date: date
     status: str  # pending, ongoing, accepted, cancelled
-    token_state: str  # STAGED, BURNED, EXPIRED, REVOKED
+    token_state: str  # STAGED, BURNED, EXPIRED, REVOKED, CANCELLED
 
 
 class LiveLogEntry(BaseModel):
@@ -139,16 +139,25 @@ class VerifyRequest(BaseModel):
 
 
 class VerifyResponse(BaseModel):
-    """Response for POST /public/verify. Read-only, live state."""
+    """Response for POST /public/verify. Read-only, live state. Full record returned whenever invitation/stay exists."""
     valid: bool
     reason: str | None = None  # Short reason when invalid
     property_name: str | None = None
     property_address: str | None = None
     occupancy_status: str | None = None
     token_state: str | None = None
+    stay_start_date: date | None = None
     stay_end_date: date | None = None
     guest_name: str | None = None
     poa_signed_at: datetime | None = None
     live_slug: str | None = None
     generated_at: datetime | None = None
     audit_entries: list[LiveLogEntry] = []
+    # Status and dates for full record display (pending, active, revoked, expired, cancelled, completed)
+    status: str | None = None  # PENDING | ACTIVE | REVOKED | EXPIRED | CANCELLED | COMPLETED
+    checked_in_at: datetime | None = None
+    checked_out_at: datetime | None = None
+    revoked_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    signed_agreement_available: bool = False
+    signed_agreement_url: str | None = None  # Path for GET (frontend prepends API_URL)

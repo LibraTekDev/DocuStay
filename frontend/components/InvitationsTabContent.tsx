@@ -22,10 +22,13 @@ function TokenStateBadge({ tokenState }: { tokenState?: string | null }) {
           ? 'bg-slate-100 text-slate-600 border-slate-200'
           : state === 'REVOKED'
             ? 'bg-amber-100 text-amber-700 border-amber-200'
-            : 'bg-slate-100 text-slate-600 border-slate-200';
+            : state === 'CANCELLED'
+              ? 'bg-slate-100 text-slate-600 border-slate-200'
+              : 'bg-slate-100 text-slate-600 border-slate-200';
+  const displayLabel = state === 'BURNED' ? 'Active' : state === 'STAGED' ? 'Pending' : state === 'REVOKED' ? 'Revoked' : state === 'CANCELLED' ? 'Cancelled' : state === 'EXPIRED' ? 'Expired' : state;
   return (
     <span className={`inline-flex px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest border ${classes}`}>
-      {state}
+      {displayLabel}
     </span>
   );
 }
@@ -142,7 +145,7 @@ export const InvitationsTabContent: React.FC<InvitationsTabContentProps> = ({
       <Card className="overflow-hidden">
         <div className="p-6 border-b border-slate-200 bg-slate-100">
           <h3 className="text-xl font-bold text-slate-800">Expired invites</h3>
-          <p className="text-xs text-slate-500 mt-1">Pending invites whose 12-hour window was exceeded (not accepted in time)</p>
+          <p className="text-xs text-slate-500 mt-1">Pending guest invites whose 12-hour window was exceeded (not accepted in time). Tenant invitations are not expired by DocuStay.</p>
         </div>
         <div className="overflow-x-auto">
           {invitations.filter((i) => i.is_expired).length === 0 ? (
@@ -219,8 +222,8 @@ export const InvitationsTabContent: React.FC<InvitationsTabContentProps> = ({
               <tbody className="divide-y divide-slate-200">
                 {invitations.filter((i) => i.status === 'accepted' || i.status === 'ongoing').map((inv) => {
                   const tokenState = (inv.token_state || 'BURNED').toUpperCase();
-                  const stayStatusLabel = tokenState === 'EXPIRED' ? 'Completed' : tokenState === 'REVOKED' ? 'Revoked' : 'Active stay';
-                  const stayStatusClass = tokenState === 'EXPIRED' ? 'bg-slate-100 text-slate-600 border-slate-200' : tokenState === 'REVOKED' ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-emerald-100 text-emerald-700 border-emerald-200';
+                  const stayStatusLabel = tokenState === 'EXPIRED' ? 'Completed' : tokenState === 'REVOKED' ? 'Revoked' : tokenState === 'CANCELLED' ? 'Cancelled' : 'Active stay';
+                  const stayStatusClass = tokenState === 'EXPIRED' ? 'bg-slate-100 text-slate-600 border-slate-200' : tokenState === 'REVOKED' ? 'bg-amber-100 text-amber-700 border-amber-200' : tokenState === 'CANCELLED' ? 'bg-slate-100 text-slate-600 border-slate-200' : 'bg-emerald-100 text-emerald-700 border-emerald-200';
                   const statusLabel = inv.status === 'ongoing' ? 'Ongoing' : stayStatusLabel;
                   const statusClass = inv.status === 'ongoing' ? 'bg-sky-100 text-sky-700 border-sky-200' : stayStatusClass;
                   return (

@@ -219,12 +219,12 @@ const RegisterOwner: React.FC<Props> = ({ setPendingVerification, onLogin, navig
               <div className={`md:col-span-2 space-y-3 mt-2 p-4 rounded-lg bg-slate-50 border ${errors.terms?.error || errors.privacy?.error ? 'border-red-300' : 'border-slate-200'}`}>
                 <label className="flex items-start gap-3 cursor-pointer">
                   <input type="checkbox" name="terms_agreed" checked={formData.terms_agreed} onChange={handleCheckboxChange} className="w-5 h-5 rounded border-slate-300 text-[#6B90F2] focus:ring-[#6B90F2] shrink-0 mt-0.5" />
-                  <span className="text-sm text-slate-600 leading-relaxed">I agree to the <a href="#" className="text-[#6B90F2] font-medium hover:underline">Terms of Service</a> and the platform&apos;s documentation and authorization protocols for temporary stays.</span>
+                  <span className="text-sm text-slate-600 leading-relaxed">I agree to the <a href="#terms" target="_blank" rel="noopener noreferrer" className="text-[#6B90F2] font-medium hover:underline">Terms of Service</a> and the platform&apos;s documentation and authorization protocols.</span>
                 </label>
                 {errors.terms?.error && <p className="text-xs text-red-500 pl-8">{errors.terms.error}</p>}
                 <label className="flex items-start gap-3 cursor-pointer">
                   <input type="checkbox" name="privacy_agreed" checked={formData.privacy_agreed} onChange={handleCheckboxChange} className="w-5 h-5 rounded border-slate-300 text-[#6B90F2] focus:ring-[#6B90F2] shrink-0 mt-0.5" />
-                  <span className="text-sm text-slate-600">I agree to the processing of my data according to the <a href="#" className="text-[#6B90F2] font-medium hover:underline">Privacy Policy</a>.</span>
+                  <span className="text-sm text-slate-600">I agree to the processing of my data according to the <a href="#privacy" target="_blank" rel="noopener noreferrer" className="text-[#6B90F2] font-medium hover:underline">Privacy Policy</a>.</span>
                 </label>
                 {errors.privacy?.error && <p className="text-xs text-red-500 pl-8">{errors.privacy.error}</p>}
               </div>

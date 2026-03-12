@@ -1,0 +1,55 @@
+---
+description: Lane-based privacy - ownership does not override tenant/guest scope
+alwaysApply: true
+---
+
+# Privacy Lanes Rule
+
+**Ownership does NOT override privacy scope.** Data belongs to one of three lanes; permissions follow the lane.
+
+## Key Rule
+
+Ask **"What lane does this data belong to?"** — not "Who owns the property?"
+Every record: property/management | tenant | guest. Permissions follow the lane, not ownership.
+
+## Personal Mode vs Business Mode
+
+Users can switch modes, but privacy rules still apply. Switching to personal mode does NOT unlock tenant-private information.
+- Business: owner/manager manages properties and units.
+- Personal: user manages own residence or personal property.
+
+## Business Mode (owners/managers)
+
+In business mode (`X-Context-Mode: business`), owners and managers can see:
+- Properties, unit status (occupied/vacant/unknown), Shield Mode, billing
+- Property-level audits (no tenant guest events), property assignments
+- Tenant invitation status at property level, management activity
+
+They cannot see tenant guest activity (invites, names, stays, agreements, logs).
+
+## Tenant Lane (personal mode)
+
+Tenants see only their own guest invites, stays, overstays, agreements, authorization history. Private to tenant; owners/managers never see it.
+
+## Guest Lane
+
+Guests see only their own authorization record, agreement, stay status. They cannot see property or other users.
+
+## Implementation
+
+- Use `app/services/privacy_lanes.py` for lane detection:
+  - `is_tenant_lane_invitation(db, inv)` — True if inviter has role tenant
+  - `is_tenant_lane_stay(db, stay)` — True if stay is from tenant-invited guest
+  - `filter_property_lane_*` — Exclude tenant-lane from owner/manager views
+  - `filter_tenant_lane_from_ledger_rows(db, rows)` — Exclude tenant-lane from logs
+
+- Owner/manager invitations and stays: return `[]` in business mode; in personal mode filter to property-lane only.
+- Owner/manager logs: exclude tenant-lane events.
+- When displaying guest names to owners/managers or on public pages: anonymize tenant-lane as "Guest" or "Occupied".
+
+## Why This Simplifies
+
+- UI decisions become obvious
+- Permissions become predictable
+- Privacy rules stay correct
+- Development becomes much easier

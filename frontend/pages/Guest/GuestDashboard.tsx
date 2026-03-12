@@ -875,13 +875,13 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
                 <>
                   <span className="text-slate-400">·</span>
                   <span className="text-slate-500 text-sm font-mono">Invite ID: {stay.invite_id}</span>
-                  {stay.token_state && (
+                      {stay.token_state && (
                     <span className={`ml-1 px-1.5 py-0.5 rounded text-xs font-medium ${
                       stay.token_state === 'BURNED' ? 'bg-[#28A745] text-white' :
                       stay.token_state === 'EXPIRED' ? 'bg-slate-100 text-slate-600' :
                       stay.token_state === 'REVOKED' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-600'
                     }`}>
-                      {stay.token_state}
+                      {stay.token_state === 'BURNED' ? 'Active' : stay.token_state === 'STAGED' ? 'Pending' : stay.token_state === 'EXPIRED' ? 'Expired' : stay.token_state === 'REVOKED' ? 'Revoked' : stay.token_state}
                     </span>
                   )}
                 </>

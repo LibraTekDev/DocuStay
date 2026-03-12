@@ -39,7 +39,7 @@ function formatStayDuration(startStr: string, endStr: string): string {
   return `${fmt(start)} – ${fmt(end)} (${days} day${days !== 1 ? 's' : ''})`;
 }
 
-/** Invite ID token state badge: STAGED | BURNED | EXPIRED | REVOKED */
+/** Invite ID token state badge: displays Pending | Active | Expired | Revoked (maps from STAGED | BURNED | EXPIRED | REVOKED) */
 function TokenStateBadge({ tokenState }: { tokenState?: string | null }) {
   const state = (tokenState || 'STAGED').toUpperCase();
   const classes =
@@ -51,10 +51,13 @@ function TokenStateBadge({ tokenState }: { tokenState?: string | null }) {
           ? 'bg-slate-100 text-slate-600 border-slate-200'
           : state === 'REVOKED'
             ? 'bg-amber-100 text-amber-700 border-amber-200'
-            : 'bg-slate-100 text-slate-600 border-slate-200';
+            : state === 'CANCELLED'
+              ? 'bg-slate-100 text-slate-600 border-slate-200'
+              : 'bg-slate-100 text-slate-600 border-slate-200';
+  const displayLabel = state === 'BURNED' ? 'Active' : state === 'STAGED' ? 'Pending' : state === 'REVOKED' ? 'Revoked' : state === 'CANCELLED' ? 'Cancelled' : state === 'EXPIRED' ? 'Expired' : state;
   return (
     <span className={`inline-flex px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest border ${classes}`}>
-      {state}
+      {displayLabel}
     </span>
   );
 }
@@ -102,12 +105,20 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
   const [propertyManagersMap, setPropertyManagersMap] = useState<Record<number, AssignedManagerItem[]>>({});
   const [removingManager, setRemovingManager] = useState<{ propertyId: number; userId: number } | null>(null);
   const [removingResidentMode, setRemovingResidentMode] = useState<{ propertyId: number; userId: number } | null>(null);
+  const [shieldFilter, setShieldFilter] = useState<'all' | 'on' | 'off'>('all');
+  const [selectedPropertyIds, setSelectedPropertyIds] = useState<Set<number>>(new Set());
+  const [bulkShieldLoading, setBulkShieldLoading] = useState(false);
 
   const setLoadingWrapper = (x: boolean) => { setLoadingState(x); setLoading(x); };
 
   const handleContextModeChange = (mode: 'business' | 'personal') => {
     setContextMode(mode);
     setContextModeState(mode);
+    // Clear guest-related state immediately so no data carries over between modes
+    if (mode === 'business') {
+      setStays([]);
+      setInvitations([]);
+    }
     loadData();
   };
 
@@ -150,7 +161,8 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
   }, [initialTab]);
 
   useEffect(() => {
-    if (contextMode === 'personal' && ['billing', 'logs', 'invitations'].includes(activeTab)) setActiveTab('dashboard');
+    if (contextMode === 'personal' && ['billing', 'logs'].includes(activeTab)) setActiveTab('dashboard');
+    if (contextMode === 'business' && ['guests', 'invitations'].includes(activeTab)) setActiveTab('dashboard');
   }, [contextMode]);
 
   useEffect(() => {
@@ -296,8 +308,8 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
           {[
             { id: 'dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
             { id: 'properties', label: 'My Properties', icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' },
-            { id: 'guests', label: 'Guests', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' },
-            ...(contextMode !== 'personal' ? [{ id: 'invitations', label: 'Invitations', icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' }] : []),
+            ...(contextMode === 'personal' ? [{ id: 'guests', label: 'Guests', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' }] : []),
+            ...(contextMode === 'personal' ? [{ id: 'invitations', label: 'Invitations', icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' }] : []),
             ...(contextMode !== 'personal' ? [{ id: 'billing', label: 'Billing', icon: 'M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v2H9v2h2v6a2 2 0 002 2h2a2 2 0 002-2v-6h2V9zm-6 0V7a2 2 0 00-2-2H5a2 2 0 00-2 2v2h4z' }] : []),
             ...(contextMode !== 'personal' ? [{ id: 'logs', label: 'Event ledger', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' }] : []),
             { id: 'settings', label: 'Settings', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z' },
@@ -339,8 +351,8 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
           >
             <option value="dashboard">Dashboard</option>
             <option value="properties">My Properties</option>
-            <option value="guests">Guests</option>
-            {contextMode !== 'personal' && <option value="invitations">Invitations</option>}
+            {contextMode === 'personal' && <option value="guests">Guests</option>}
+            {contextMode === 'personal' && <option value="invitations">Invitations</option>}
             {contextMode !== 'personal' && <option value="billing">Billing</option>}
             {contextMode !== 'personal' && <option value="logs">Event ledger</option>}
             <option value="settings">Settings</option>
@@ -359,7 +371,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
               </p>
             </div>
             <div className="flex gap-4 flex-wrap items-center">
-              {activeTab !== 'properties' && (
+              {activeTab !== 'properties' && contextMode === 'personal' && (
                 <span className={!canInvite ? 'group relative inline-block cursor-not-allowed' : undefined}>
                   {!canInvite && (
                     <span
@@ -393,11 +405,9 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                   </button>
                 </div>
               )}
-              {contextMode !== 'personal' && (
-                <Button variant="primary" onClick={() => navigate('add-property')} className="px-6">
-                  Register Property
-                </Button>
-              )}
+              <Button variant="primary" onClick={() => navigate('add-property')} className="px-6">
+                Register Property
+              </Button>
             </div>
           </header>
         )}
@@ -411,8 +421,8 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
 
         {loading ? (
           <p className="text-slate-600">Loading dashboard…</p>
-        ) : activeTab === 'guests' ? (
-          /* Guests tab: pending invitations + active & expired stays */
+        ) : activeTab === 'guests' && contextMode === 'personal' ? (
+          /* Guests tab: pending invitations + active & expired stays (personal mode only; never show in business) */
           <div className="space-y-8">
             <p className="text-slate-500 text-sm">
               Pending invitations, active stays, and past/expired stays. Data is loaded from your dashboard.
@@ -587,7 +597,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
               </Card>
             )}
           </div>
-        ) : activeTab === 'invitations' ? (
+        ) : activeTab === 'invitations' && contextMode === 'personal' ? (
           <InvitationsTabContent
             invitations={invitations}
             stays={stays}
@@ -601,9 +611,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
         ) : activeTab === 'properties' ? (
           /* Properties tab: Active list + Inactive section */
           <div className="space-y-8">
-            <p className="text-slate-500 text-sm">
-              Remove a property from your dashboard when it has no active guest stay; it moves to Inactive and can be reactivated. Data is kept for logs. Inactive properties do not appear when creating an invite.
-            </p>
+            
             {properties.length === 0 && inactiveProperties.length === 0 ? (
               <Card className="p-12 text-center">
                 <p className="text-slate-600 mb-6">You haven’t registered any properties yet.</p>
@@ -616,19 +624,145 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
               {/* Active properties */}
               {properties.length > 0 && (
               <div>
+                {contextMode === 'business' && (
+                  <div className="grid md:grid-cols-2 lg:grid-cols-5 gap-6 mb-6">
+                    <Card className="p-6 border-l-4 border-blue-500">
+                      <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Properties</p>
+                      <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.length}</p>
+                    </Card>
+                    <Card className="p-6 border-l-4 border-emerald-500">
+                      <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Occupied</p>
+                      <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.filter((p) => (p.occupancy_status || '').toLowerCase() === 'occupied').length}</p>
+                    </Card>
+                    <Card className="p-6 border-l-4 border-sky-500">
+                      <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Vacant</p>
+                      <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.filter((p) => (p.occupancy_status || '').toLowerCase() === 'vacant').length}</p>
+                    </Card>
+                    <Card className="p-6 border-l-4 border-slate-400">
+                      <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Unknown</p>
+                      <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.filter((p) => !['occupied', 'vacant', 'unconfirmed'].includes((p.occupancy_status || '').toLowerCase())).length}</p>
+                    </Card>
+                    <Card className="p-6 border-l-4 border-amber-500">
+                      <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Shield On</p>
+                      <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.filter((p) => p.shield_mode_enabled).length}</p>
+                    </Card>
+                  </div>
+                )}
                 <h3 className="text-lg font-bold text-slate-800 mb-4">Active properties</h3>
+                <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+                  <span className="text-slate-500 text-sm">Filter and manage Shield Mode for your properties.</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Shield Mode:</span>
+                    <div className="flex rounded-lg border border-slate-200 bg-white p-0.5">
+                      {(['all', 'on', 'off'] as const).map((f) => (
+                        <button
+                          key={f}
+                          type="button"
+                          onClick={() => setShieldFilter(f)}
+                          className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${shieldFilter === f ? 'bg-slate-700 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+                        >
+                          {f === 'all' ? 'All' : f === 'on' ? 'Shield ON' : 'Shield OFF'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                {(() => {
+                  const filteredProps = shieldFilter === 'all' ? properties : shieldFilter === 'on' ? properties.filter((p) => p.shield_mode_enabled) : properties.filter((p) => !p.shield_mode_enabled);
+                  const allFilteredSelected = filteredProps.length > 0 && filteredProps.every((p) => selectedPropertyIds.has(p.id));
+                  return filteredProps.length > 0 && (
+                    <div className="mb-3 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPropertyIds(allFilteredSelected ? new Set() : new Set(filteredProps.map((p) => p.id)))}
+                        className="text-sm text-slate-600 hover:text-slate-800 underline"
+                      >
+                        {allFilteredSelected ? 'Select none' : 'Select all'}
+                      </button>
+                      <span className="text-slate-400">·</span>
+                      <span className="text-sm text-slate-500">({filteredProps.length} propert{filteredProps.length === 1 ? 'y' : 'ies'} shown)</span>
+                    </div>
+                  );
+                })()}
+                {selectedPropertyIds.size > 0 && (
+                  <div className="mb-4 p-4 rounded-xl bg-slate-100 border border-slate-200 flex flex-wrap items-center justify-between gap-4">
+                    <span className="text-sm font-medium text-slate-700">{selectedPropertyIds.size} propert{selectedPropertyIds.size === 1 ? 'y' : 'ies'} selected</span>
+                    <div className="flex items-center gap-2">
+                      <Button variant="outline" size="sm" onClick={() => setSelectedPropertyIds(new Set())}>Clear selection</Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={bulkShieldLoading}
+                        onClick={async () => {
+                          setBulkShieldLoading(true);
+                          try {
+                            const res = await dashboardApi.bulkShieldMode([...selectedPropertyIds], true);
+                            notify('success', res.message || `Shield Mode turned on for ${res.updated_count} propert${res.updated_count === 1 ? 'y' : 'ies'}.`);
+                            setSelectedPropertyIds(new Set());
+                            loadData();
+                          } catch (e) {
+                            notify('error', (e as Error)?.message ?? 'Failed to update Shield Mode.');
+                          } finally {
+                            setBulkShieldLoading(false);
+                          }
+                        }}
+                      >
+                        {bulkShieldLoading ? 'Updating…' : 'Turn Shield ON'}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={bulkShieldLoading}
+                        onClick={async () => {
+                          setBulkShieldLoading(true);
+                          try {
+                            const res = await dashboardApi.bulkShieldMode([...selectedPropertyIds], false);
+                            notify('success', res.message || `Shield Mode turned off for ${res.updated_count} propert${res.updated_count === 1 ? 'y' : 'ies'}.`);
+                            setSelectedPropertyIds(new Set());
+                            loadData();
+                          } catch (e) {
+                            notify('error', (e as Error)?.message ?? 'Failed to update Shield Mode.');
+                          } finally {
+                            setBulkShieldLoading(false);
+                          }
+                        }}
+                      >
+                        {bulkShieldLoading ? 'Updating…' : 'Turn Shield OFF'}
+                      </Button>
+                    </div>
+                  </div>
+                )}
                 <div className="grid gap-6">
-                {properties.map((prop) => {
+                {(shieldFilter === 'all' ? properties : shieldFilter === 'on' ? properties.filter((p) => p.shield_mode_enabled) : properties.filter((p) => !p.shield_mode_enabled)).map((prop) => {
                   const address = [prop.street, prop.city, prop.state, prop.zip_code].filter(Boolean).join(', ');
                   const displayName = prop.name || address || `Property #${prop.id}`;
-                  const hasResident = activeStays.some((s) => s.property_id === prop.id);
-                  const activeStayForProp = activeStays.find((s) => s.property_id === prop.id);
-                  const isOccupied = !!activeStayForProp;
+                  // Business mode: use property status only (no guest data). Personal mode: can use stays for occupancy.
+                  const activeStayForProp = contextMode === 'personal' ? activeStays.find((s) => s.property_id === prop.id) : null;
+                  const isOccupied = contextMode === 'business'
+                    ? (prop.occupancy_status || '').toLowerCase() === 'occupied'
+                    : !!activeStayForProp;
                   const shieldOn = !!prop.shield_mode_enabled;
                   const shieldStatus = shieldOn ? (isOccupied ? 'PASSIVE GUARD' : 'ACTIVE MONITORING') : null;
+                  const isSelected = selectedPropertyIds.has(prop.id);
                   return (
                     <Card key={prop.id} className="p-6 border border-slate-200">
                       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
+                        <div className="flex items-start gap-3 flex-shrink-0">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              setSelectedPropertyIds((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(prop.id)) next.delete(prop.id);
+                                else next.add(prop.id);
+                                return next;
+                              });
+                            }}
+                            className="mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                            aria-label={`Select ${displayName}`}
+                          />
                         <button
                           type="button"
                           onClick={() => navigate(`property/${prop.id}`)}
@@ -664,9 +798,9 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                             {!prop.is_multi_unit && prop.bedrooms && (
                               <span>Bedrooms: <span className="text-slate-600 font-medium">{prop.bedrooms}</span></span>
                             )}
-                            {isOccupied && activeStayForProp && (
+                            {contextMode === 'personal' && isOccupied && activeStayForProp && (
                               <span>
-                                Dead Man&apos;s Switch: <span className={activeStayForProp.dead_mans_switch_enabled ? 'text-amber-600 font-medium' : 'text-slate-600 font-medium'}>
+                                Stay end reminders: <span className={activeStayForProp.dead_mans_switch_enabled ? 'text-amber-600 font-medium' : 'text-slate-600 font-medium'}>
                                   {activeStayForProp.dead_mans_switch_enabled ? 'On' : 'Off'}
                                 </span>
                               </span>
@@ -674,6 +808,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                           </div>
                           <span className="inline-block mt-2 text-xs font-medium text-blue-400">View details →</span>
                         </button>
+                        </div>
                         <div className="flex items-center gap-3 flex-shrink-0">
                           <Button variant="outline" onClick={() => navigate(`property/${prop.id}`)} className="px-4">
                             View & Edit
@@ -711,7 +846,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                           </span>
                             );
                           })()}
-                          {isOccupied && activeStayForProp && (
+                          {contextMode === 'personal' && isOccupied && activeStayForProp && (
                             <span className="text-sm text-slate-600">
                               Current guest: <span className="font-medium text-slate-800">{activeStayForProp.guest_name}</span>
                               {' · '}
@@ -756,7 +891,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                             </span>
                           )}
                           {!shieldOn && (
-                            <span className="text-xs text-slate-500">Turn on anytime. Also turns on automatically on the last day of a guest&apos;s stay and when Dead Man&apos;s Switch runs (48h after stay end).</span>
+                            <span className="text-xs text-slate-500">Turn on anytime. Also turns on automatically on the last day of a guest&apos;s stay and when stay end reminders run (48h after stay end).</span>
                           )}
                           <span className="text-xs text-slate-400">$10/month subscription</span>
                         </div>
@@ -1077,7 +1212,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                     <option value="">All</option>
                     <option value="status_change">Status change</option>
                     <option value="shield_mode">Shield Mode</option>
-                    <option value="dead_mans_switch">Dead Man&apos;s Switch</option>
+                    <option value="dead_mans_switch">Stay end reminders</option>
                     <option value="guest_signature">Guest signature</option>
                     <option value="failed_attempt">Failed attempt</option>
                     <option value="billing">Billing</option>
@@ -1103,7 +1238,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             <Card className="overflow-hidden">
               <div className="p-6 border-b border-slate-200 bg-slate-50">
                 <h3 className="text-lg font-bold text-slate-800">Event ledger (append-only)</h3>
-                <p className="text-slate-500 text-sm mt-1">Status changes, Shield Mode and Dead Man&apos;s Switch on/off, guest signatures, payment and billing activity (invoices created, paid), and failed attempts are recorded. Use the category filter to view Shield Mode, Dead Man&apos;s Switch, or Billing events. Records cannot be edited or deleted.</p>
+                <p className="text-slate-500 text-sm mt-1">Status changes, Shield Mode and stay end reminders on/off, guest signatures, payment and billing activity (invoices created, paid), and failed attempts are recorded. Use the category filter to view Shield Mode, stay end reminders, or Billing events. Records cannot be edited or deleted.</p>
               </div>
               <div className="overflow-x-auto">
                 {logsLoading && logs.length === 0 ? (
@@ -1137,7 +1272,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                               entry.category === 'billing' ? 'bg-slate-200 text-slate-800' :
                               'bg-sky-100 text-sky-800'
                             }`}>
-                              {entry.category === 'shield_mode' ? 'Shield Mode' : entry.category === 'dead_mans_switch' ? "Dead Man's Switch" : entry.category === 'billing' ? 'Billing' : entry.category.replace('_', ' ')}
+                              {entry.category === 'shield_mode' ? 'Shield Mode' : entry.category === 'dead_mans_switch' ? 'Stay end reminders' : entry.category === 'billing' ? 'Billing' : entry.category.replace('_', ' ')}
                             </span>
                           </td>
                           <td className="px-6 py-3 font-medium text-slate-800">{entry.title}</td>
@@ -1179,62 +1314,61 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
           </div>
         ) : (
           <>
-            {/* Status Alert for Overstays (real data) */}
-            {firstOverstay && (
-              <div className="mb-8 p-6 rounded-2xl bg-red-50 border border-red-200 flex flex-col md:flex-row items-center justify-between gap-6">
-                <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 rounded-full bg-red-500/20 flex items-center justify-center text-red-600">
-                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+            {contextMode === 'personal' ? (
+              <>
+                {/* Status Alert for Overstays (personal mode only) */}
+                {firstOverstay && (
+                  <div className="mb-8 p-6 rounded-2xl bg-red-50 border border-red-200 flex flex-col md:flex-row items-center justify-between gap-6">
+                    <div className="flex items-center gap-4">
+                      <div className="w-12 h-12 rounded-full bg-red-500/20 flex items-center justify-center text-red-600">
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-bold text-slate-800">Overstay Detected</h3>
+                        <p className="text-red-700 text-sm">{firstOverstay.guest_name} has exceeded their authorized stay period in {firstOverstay.region_code}.</p>
+                      </div>
+                    </div>
+                    <Button variant="danger" onClick={() => handleInitiateRemoval(firstOverstay)} className="whitespace-nowrap">Initiate Removal</Button>
                   </div>
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-800">Overstay Detected</h3>
-                    <p className="text-red-700 text-sm">{firstOverstay.guest_name} has exceeded their authorized stay period in {firstOverstay.region_code}.</p>
-                  </div>
+                )}
+
+                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-10">
+                  <Card className="p-6 border-l-4 border-blue-500 hover:scale-[1.02] transition-transform cursor-pointer" onClick={() => setActiveTab('properties')}>
+                    <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Properties</p>
+                    <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.length}</p>
+                  </Card>
+                  <Card className="p-6 border-l-4 border-green-500 hover:scale-[1.02] transition-transform cursor-pointer">
+                    <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Guests</p>
+                    <p className="text-4xl font-extrabold text-slate-800 mt-1">{activeCount}</p>
+                  </Card>
+                  <Card className="p-6 border-l-4 border-red-500 hover:scale-[1.02] transition-transform cursor-pointer">
+                    <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Overstays</p>
+                    <p className="text-4xl font-extrabold text-red-600 mt-1">{overstays.length}</p>
+                  </Card>
                 </div>
-                <Button variant="danger" onClick={() => handleInitiateRemoval(firstOverstay)} className="whitespace-nowrap">Initiate Removal</Button>
-              </div>
-            )}
 
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6 mb-10">
-              <Card
-                className="p-6 border-l-4 border-blue-500 hover:scale-[1.02] transition-transform cursor-pointer"
-                onClick={() => setActiveTab('properties')}
-              >
-                <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Properties</p>
-                <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.length}</p>
-              </Card>
-              <Card className="p-6 border-l-4 border-green-500 hover:scale-[1.02] transition-transform cursor-pointer">
-                <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Guests</p>
-                <p className="text-4xl font-extrabold text-slate-800 mt-1">{activeCount}</p>
-              </Card>
-              <Card className="p-6 border-l-4 border-red-500 hover:scale-[1.02] transition-transform cursor-pointer">
-                <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Overstays</p>
-                <p className="text-4xl font-extrabold text-red-600 mt-1">{overstays.length}</p>
-              </Card>
-            </div>
-
-            <Card className="mb-10 overflow-hidden">
-              <div className="p-6 border-b border-slate-200 flex justify-between items-center bg-white/60 backdrop-blur-md">
-                <h3 className="text-xl font-bold text-slate-800">Guests</h3>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead className="bg-slate-100 text-slate-500 uppercase text-[10px] tracking-widest font-extrabold border-b border-slate-200">
-                    <tr>
-                      <th className="px-6 py-4">Guest Name</th>
-                      <th className="px-6 py-4">Property</th>
-                      <th className="px-6 py-4">Days Left</th>
-                      <th className="px-6 py-4">Status</th>
-                      <th className="px-6 py-4 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-800">
-                    {activeStays.length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="px-6 py-12 text-center text-slate-500">No active stays. Invite a guest to get started.</td>
-                      </tr>
-                    ) : (
-                      activeStays.map((stay) => {
+                <Card className="mb-10 overflow-hidden">
+                  <div className="p-6 border-b border-slate-200 flex justify-between items-center bg-white/60 backdrop-blur-md">
+                    <h3 className="text-xl font-bold text-slate-800">Guests</h3>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead className="bg-slate-100 text-slate-500 uppercase text-[10px] tracking-widest font-extrabold border-b border-slate-200">
+                        <tr>
+                          <th className="px-6 py-4">Guest Name</th>
+                          <th className="px-6 py-4">Property</th>
+                          <th className="px-6 py-4">Days Left</th>
+                          <th className="px-6 py-4">Status</th>
+                          <th className="px-6 py-4 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-800">
+                        {activeStays.length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="px-6 py-12 text-center text-slate-500">No active stays. Invite a guest to get started.</td>
+                          </tr>
+                        ) : (
+                          activeStays.map((stay) => {
                         const overstay = isOverstayed(stay.stay_end_date);
                         const dLeft = daysLeft(stay.stay_end_date);
                         const revoked = !!stay.revoked_at;
@@ -1263,7 +1397,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                               ) : overstay ? (
                                 <Button variant="danger" onClick={() => handleInitiateRemoval(stay)} className="text-xs py-2">Remove</Button>
                               ) : (
-                                <Button variant="ghost" onClick={() => handleRevokeClick(stay)} className="text-xs py-2 text-red-600 hover:text-red-700">Kill Switch</Button>
+                                <Button variant="ghost" onClick={() => handleRevokeClick(stay)} className="text-xs py-2 text-red-600 hover:text-red-700">Revoke</Button>
                               )}
                               <Button variant="outline" className="text-xs py-2">Details</Button>
                             </td>
@@ -1275,6 +1409,40 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                 </table>
               </div>
             </Card>
+              </>
+            ) : (
+              /* Business mode: property/unit status only, no guest data */
+              <div className="space-y-8">
+                <p className="text-slate-500 text-sm">Property and unit status. Switch to Personal mode to view guest invitations, stays, and overstays.</p>
+                <div className="grid md:grid-cols-2 lg:grid-cols-5 gap-6">
+                  <Card className="p-6 border-l-4 border-blue-500 hover:scale-[1.02] transition-transform cursor-pointer" onClick={() => setActiveTab('properties')}>
+                    <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Properties</p>
+                    <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.length}</p>
+                  </Card>
+                  <Card className="p-6 border-l-4 border-emerald-500">
+                    <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Occupied</p>
+                    <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.filter((p) => (p.occupancy_status || '').toLowerCase() === 'occupied').length}</p>
+                  </Card>
+                  <Card className="p-6 border-l-4 border-sky-500">
+                    <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Vacant</p>
+                    <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.filter((p) => (p.occupancy_status || '').toLowerCase() === 'vacant').length}</p>
+                  </Card>
+                  <Card className="p-6 border-l-4 border-slate-400">
+                    <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Unknown</p>
+                    <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.filter((p) => !['occupied', 'vacant', 'unconfirmed'].includes((p.occupancy_status || '').toLowerCase())).length}</p>
+                  </Card>
+                  <Card className="p-6 border-l-4 border-amber-500">
+                    <p className="text-slate-600 text-sm font-bold uppercase tracking-wider">Shield On</p>
+                    <p className="text-4xl font-extrabold text-slate-800 mt-1">{properties.filter((p) => p.shield_mode_enabled).length}</p>
+                  </Card>
+                </div>
+                <Card className="p-6">
+                  <h3 className="text-lg font-bold text-slate-800 mb-4">Property status overview</h3>
+                  <p className="text-slate-600 text-sm">View properties and unit-level occupancy in the Properties tab. Business mode does not display guest names, invitations, or stay details.</p>
+                  <Button variant="outline" onClick={() => setActiveTab('properties')} className="mt-4">View Properties</Button>
+                </Card>
+              </div>
+            )}
           </>
         )}
       </main>
@@ -1306,7 +1474,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             Use a CSV with: <strong>Required:</strong> <code className="bg-slate-100 px-1 rounded">Address</code>, <code className="bg-slate-100 px-1 rounded">City</code>, <code className="bg-slate-100 px-1 rounded">State</code>, <code className="bg-slate-100 px-1 rounded">Zip</code>, <code className="bg-slate-100 px-1 rounded">Occupied</code> (YES/NO). <strong>If Occupied=YES:</strong> <code className="bg-slate-100 px-1 rounded">Tenant Name</code>, <code className="bg-slate-100 px-1 rounded">Lease Start</code>, <code className="bg-slate-100 px-1 rounded">Lease End</code>. <strong>Optional:</strong> <code className="bg-slate-100 px-1 rounded">Unit No</code>, <code className="bg-slate-100 px-1 rounded">Shield Mode</code> (YES/NO, default NO), <code className="bg-slate-100 px-1 rounded">Tax ID</code>, <code className="bg-slate-100 px-1 rounded">APN</code>.
           </p>
           <p className="text-xs text-slate-500">
-            Occupied=YES: property token is burned, tenant is recorded, an invite link is created (BURNED) with Dead-Man Switch from lease end. Occupied=NO: token stays STAGED, status VACANT. Shield Mode is independent of Occupied—you can turn it on or off anytime in the dashboard; Shield Mode YES in CSV or when on adds $10/month. Existing properties (same address, city, state) are updated when values change.
+            Occupied=YES: property token is active, tenant is recorded, an invite link is created (Active) with stay end reminders from lease end. Occupied=NO: token stays Pending, status VACANT. Shield Mode is independent of Occupied—you can turn it on or off anytime in the dashboard; Shield Mode YES in CSV or when on adds $10/month. Existing properties (same address, city, state) are updated when values change.
           </p>
           <div className="flex flex-wrap gap-3">
             <Button

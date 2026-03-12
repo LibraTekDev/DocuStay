@@ -87,7 +87,7 @@ This document summarizes client-side validations on login and signup pages, and 
 - **Phone**: `validatePhone()` – required where phone is required; optional fields validated only when non-empty (E.164-style, 10–15 digits).
 - **Email**: Regex `^[^\s@]+@[^\s@]+\.[^\s@]+$` used on all pages that collect email.
 - **Invite link**:
-  - **Login (tenant)**: If invite code present, `invitationsApi.getDetails` used; submit blocked if invalid/expired/used.
+  - **Login (tenant)**: If invite code present, `invitationsApi.getDetails` used; submit blocked if invalid or no longer valid/used.
   - **Register Manager Landing**: Before navigating to `register/manager/:token`, `authApi.getManagerInvite(token)` used; invalid/expired shows error.
   - **Guest Signup**: If invite code length ≥ 5, `invitationsApi.getDetails` used before submit; invalid/expired/used blocks submit.
 - **Acknowledgments**: All required checkboxes (terms, privacy, guest status, no tenancy, vacate) must be checked before submit where applicable.

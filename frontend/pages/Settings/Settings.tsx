@@ -107,7 +107,10 @@ const Settings: React.FC<{
           <Card className="p-8 md:p-10">
             <h2 className="text-lg font-semibold text-gray-900 border-b border-gray-200 pb-3 mb-6">Mode</h2>
             <p className="text-gray-600 text-sm mb-4">
-              Business mode: manage your properties as an owner. Personal mode: use resident features (presence, guest invites) for units where you live.
+              <strong>Personal mode:</strong> Manage your own properties and statuses—multiple properties, primary residence, occupancy (vacant, away, inactive). Use resident features (presence, guest invites) for units where you live.
+            </p>
+            <p className="text-gray-600 text-sm mb-4">
+              <strong>Business mode:</strong> Management scope only. Property status, occupancy, Shield Mode, billing, and event ledger. No personal guest or stay activity is shown.
             </p>
             <ModeSwitcher
               contextMode={contextMode}
@@ -232,7 +235,7 @@ const Settings: React.FC<{
               The Master POA is a one-time, account-level legal document you signed during onboarding that establishes DocuStay as your legal representative for all property protection activities.
             </p>
             <p className="text-gray-500 text-xs mb-6">
-              It designates DocuStay as your Authorized Agent to issue utility authorization tokens, communicate with utility companies, generate legal evidence packages, and maintain audit trails for all properties you add.
+              It designates DocuStay as your Authorized Agent to generate legal evidence packages and maintain audit trails for all properties you add.
             </p>
             {poaSignature === undefined ? (
               <p className="text-gray-500 text-sm">Loading…</p>

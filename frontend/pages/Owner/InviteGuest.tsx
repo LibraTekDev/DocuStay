@@ -135,7 +135,7 @@ const InviteGuest: React.FC<{ user: UserSession | null, navigate: (v: string) =>
               </div>
               <p className="text-sm text-slate-500 ml-1">These dates will be shown to the guest and used for the stay agreement.</p>
 
-              <p className="text-xs text-slate-600 rounded-xl border border-slate-200 bg-slate-50 p-4">Dead Man&apos;s Switch is always on: if the stay end date passes without you updating (checkout or renewal), you&apos;ll get alerts 48h before and on the end date, then the system will auto-set the property to vacant and activate utility lock after 48h. Alerts are sent by email and dashboard notification.</p>
+              <p className="text-xs text-slate-600 rounded-xl border border-slate-200 bg-slate-50 p-4">Stay end reminders are always on: if the stay end date passes without you updating (checkout or renewal), you&apos;ll get alerts 48h before and on the end date, then the system will auto-set the property to vacant after 48h. Alerts are sent by email and dashboard notification.</p>
 
               <div className="pt-6 border-t border-slate-200 flex gap-4">
                 <Button variant="outline" onClick={() => navigate('dashboard')} className="flex-1">Discard</Button>

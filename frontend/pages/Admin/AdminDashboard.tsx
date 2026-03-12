@@ -27,7 +27,7 @@ const AUDIT_LOG_CATEGORIES: { value: string; label: string }[] = [
   { value: 'guest_signature', label: 'Guest signature' },
   { value: 'failed_attempt', label: 'Failed attempt' },
   { value: 'shield_mode', label: 'Shield mode' },
-  { value: 'dead_mans_switch', label: 'Dead Man\'s Switch' },
+  { value: 'dead_mans_switch', label: 'Stay end reminders' },
   { value: 'billing', label: 'Billing' },
   { value: 'presence', label: 'Presence / Away' },
   { value: 'verify_attempt', label: 'Verify attempt' },

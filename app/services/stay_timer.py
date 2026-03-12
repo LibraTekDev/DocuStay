@@ -10,15 +10,22 @@ from app.models.user import User
 from app.models.region_rule import RegionRule
 from app.models.audit_log import AuditLog
 from app.models.owner import OwnerProfile, Property, USAT_TOKEN_STAGED, USAT_TOKEN_RELEASED, OccupancyStatus
+from app.models.property_manager_assignment import PropertyManagerAssignment
 from app.services.notifications import (
     send_stay_legal_warning,
     send_overstay_alert,
     send_dead_mans_switch_48h_before,
+    send_dead_mans_switch_48h_before_to_owner_and_managers,
     send_dead_mans_switch_urgent_today,
+    send_dead_mans_switch_urgent_today_to_owner_and_managers,
     send_dead_mans_switch_auto_executed,
     send_shield_mode_activated_email,
+    send_shield_mode_turned_on_notification,
+    send_shield_mode_turned_off_notification,
     send_vacant_monitoring_prompt,
     send_vacant_monitoring_flipped,
+    send_dms_triggered_set_status_notification,
+    send_dms_turned_off_notification,
 )
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_SHIELD_MODE, CATEGORY_DEAD_MANS_SWITCH
 from app.services.event_ledger import create_ledger_event, ACTION_OVERSTAY_OCCURRED, ACTION_DMS_48H_ALERT, ACTION_DMS_AUTO_EXECUTED, ACTION_SHIELD_MODE_ON, ACTION_VACANT_MONITORING_NO_RESPONSE
@@ -196,6 +203,24 @@ def _get_property_name(db: Session, prop: Property | None) -> str:
     return (prop.name or "").strip() or (f"{prop.city}, {prop.state}".strip(", ") if (prop.city or prop.state) else "Property")
 
 
+def _get_owner_and_manager_emails(db: Session, prop: Property | None) -> tuple[str, list[str]]:
+    """Return (owner_email, manager_emails) for a property."""
+    if not prop:
+        return ("", [])
+    owner_user = None
+    if getattr(prop, "owner_profile_id", None):
+        profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+        owner_user = db.query(User).filter(User.id == profile.user_id).first() if profile else None
+    owner_email = (owner_user.email or "").strip() if owner_user else ""
+    manager_emails = [
+        (u.email or "").strip()
+        for a in db.query(PropertyManagerAssignment).filter(PropertyManagerAssignment.property_id == prop.id).all()
+        for u in [db.query(User).filter(User.id == a.user_id).first()]
+        if u and (u.email or "").strip()
+    ]
+    return (owner_email, manager_emails)
+
+
 def _ensure_utc(dt: datetime | None) -> datetime | None:
     """Return datetime with UTC tzinfo; if naive, assume UTC."""
     if dt is None:
@@ -247,9 +272,11 @@ def _run_dead_mans_switch_job_test_mode(db: Session) -> None:
             owner = db.query(User).filter(User.id == stay.owner_id).first()
             prop = db.query(Property).filter(Property.id == stay.property_id).first()
             if owner and alert_email(stay):
+                owner_email, manager_emails = _get_owner_and_manager_emails(db, prop)
                 try:
-                    send_dead_mans_switch_48h_before(
-                        owner.email,
+                    send_dead_mans_switch_48h_before_to_owner_and_managers(
+                        owner_email,
+                        manager_emails,
                         _get_guest_name(db, stay),
                         _get_property_name(db, prop),
                         effective_end_date_str,
@@ -275,9 +302,11 @@ def _run_dead_mans_switch_job_test_mode(db: Session) -> None:
             owner = db.query(User).filter(User.id == stay.owner_id).first()
             prop = db.query(Property).filter(Property.id == stay.property_id).first()
             if owner and alert_email(stay):
+                owner_email, manager_emails = _get_owner_and_manager_emails(db, prop)
                 try:
-                    send_dead_mans_switch_urgent_today(
-                        owner.email,
+                    send_dead_mans_switch_urgent_today_to_owner_and_managers(
+                        owner_email,
+                        manager_emails,
                         _get_guest_name(db, stay),
                         _get_property_name(db, prop),
                         effective_end_date_str,
@@ -349,6 +378,7 @@ def _run_dead_mans_switch_job_test_mode(db: Session) -> None:
         except Exception:
             pass
         if owner and alert_email(stay):
+            owner_email, manager_emails = _get_owner_and_manager_emails(db, prop)
             try:
                 send_dead_mans_switch_auto_executed(
                     owner.email,
@@ -356,10 +386,19 @@ def _run_dead_mans_switch_job_test_mode(db: Session) -> None:
                     property_name,
                     effective_end_date_str,
                 )
-                send_shield_mode_activated_email(
-                    owner.email,
+                send_shield_mode_turned_on_notification(
+                    owner_email,
+                    manager_emails,
                     property_name,
-                    triggered_by_dead_mans_switch=True,
+                    turned_on_by="system (Dead Man's Switch)",
+                )
+                send_dms_triggered_set_status_notification(
+                    owner_email,
+                    manager_emails,
+                    property_name,
+                    stay.property_id,
+                    guest_name,
+                    effective_end_date_str,
                 )
             except Exception:
                 pass
@@ -452,9 +491,11 @@ def run_dead_mans_switch_job(db: Session) -> None:
         prop = db.query(Property).filter(Property.id == stay.property_id).first()
         if not owner or not alert_email(stay):
             continue
+        owner_email, manager_emails = _get_owner_and_manager_emails(db, prop)
         try:
-            send_dead_mans_switch_48h_before(
-                owner.email,
+            send_dead_mans_switch_48h_before_to_owner_and_managers(
+                owner_email,
+                manager_emails,
                 _get_guest_name(db, stay),
                 _get_property_name(db, prop),
                 stay.stay_end_date.isoformat(),
@@ -513,12 +554,13 @@ def run_dead_mans_switch_job(db: Session) -> None:
         except Exception:
             pass
         if owner:
+            owner_email, manager_emails = _get_owner_and_manager_emails(db, prop)
             try:
-                send_shield_mode_activated_email(
-                    owner.email,
+                send_shield_mode_turned_on_notification(
+                    owner_email,
+                    manager_emails,
                     _get_property_name(db, prop),
-                    last_day_of_stay=True,
-                    guest_name=_get_guest_name(db, stay_for_prop),
+                    turned_on_by="system (last day of stay)",
                 )
             except Exception:
                 pass
@@ -540,9 +582,11 @@ def run_dead_mans_switch_job(db: Session) -> None:
         prop = db.query(Property).filter(Property.id == stay.property_id).first()
         if not owner or not alert_email(stay):
             continue
+        owner_email, manager_emails = _get_owner_and_manager_emails(db, prop)
         try:
-            send_dead_mans_switch_urgent_today(
-                owner.email,
+            send_dead_mans_switch_urgent_today_to_owner_and_managers(
+                owner_email,
+                manager_emails,
                 _get_guest_name(db, stay),
                 _get_property_name(db, prop),
                 stay.stay_end_date.isoformat(),
@@ -628,6 +672,7 @@ def run_dead_mans_switch_job(db: Session) -> None:
             pass
 
         if owner and alert_email(stay):
+            owner_email, manager_emails = _get_owner_and_manager_emails(db, prop)
             try:
                 send_dead_mans_switch_auto_executed(
                     owner.email,
@@ -635,10 +680,19 @@ def run_dead_mans_switch_job(db: Session) -> None:
                     property_name,
                     stay.stay_end_date.isoformat(),
                 )
-                send_shield_mode_activated_email(
-                    owner.email,
+                send_shield_mode_turned_on_notification(
+                    owner_email,
+                    manager_emails,
                     property_name,
-                    triggered_by_dead_mans_switch=True,
+                    turned_on_by="system (Dead Man's Switch)",
+                )
+                send_dms_triggered_set_status_notification(
+                    owner_email,
+                    manager_emails,
+                    property_name,
+                    stay.property_id,
+                    guest_name,
+                    stay.stay_end_date.isoformat(),
                 )
             except Exception:
                 pass
@@ -726,15 +780,62 @@ def run_vacant_monitoring_job(db: Session) -> None:
         owner = db.query(User).filter(User.id == profile.user_id).first() if profile else None
         if owner and owner.email:
             property_name = (prop.name or "").strip() or (f"{prop.city}, {prop.state}".strip(", ") if (prop.city or prop.state) else "Property")
+            owner_email, manager_emails = _get_owner_and_manager_emails(db, prop)
             try:
                 send_vacant_monitoring_flipped(owner.email, property_name)
-                send_shield_mode_activated_email(owner.email, property_name, triggered_by_dead_mans_switch=False)
+                send_shield_mode_turned_on_notification(
+                    owner_email,
+                    manager_emails,
+                    property_name,
+                    turned_on_by="system (vacant monitoring)",
+                )
             except Exception:
                 pass
 
 
+DMS_24H_UNCONFIRMED_TO_UNKNOWN = "DMS: 24h no response – status set to Unknown"
+
+
+def run_dms_24h_unconfirmed_to_unknown_job(db: Session) -> None:
+    """24h after DMS trigger: if owner/manager has not confirmed (vacated/renewed/holdover), set property status to Unknown."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    stays = (
+        db.query(Stay)
+        .filter(
+            Stay.dead_mans_switch_triggered_at.isnot(None),
+            Stay.dead_mans_switch_triggered_at <= cutoff,
+            Stay.occupancy_confirmation_response.is_(None),
+            Stay.checked_out_at.is_(None),
+            Stay.cancelled_at.is_(None),
+        )
+        .all()
+    )
+    for stay in stays:
+        prop = db.query(Property).filter(Property.id == stay.property_id).first()
+        if not prop:
+            continue
+        if (getattr(prop, "occupancy_status", None) or "").lower() != OccupancyStatus.unconfirmed.value:
+            continue
+        if _dms_already_logged(db, DMS_24H_UNCONFIRMED_TO_UNKNOWN, stay_id=stay.id):
+            continue
+        prev_status = getattr(prop, "occupancy_status", None) or "unconfirmed"
+        prop.occupancy_status = OccupancyStatus.unknown.value
+        db.add(prop)
+        create_log(
+            db,
+            CATEGORY_DEAD_MANS_SWITCH,
+            DMS_24H_UNCONFIRMED_TO_UNKNOWN,
+            f"Stay {stay.id}: No response within 24h of DMS trigger. Property {prop.id} status {prev_status} -> unknown.",
+            property_id=prop.id,
+            stay_id=stay.id,
+            meta={"occupancy_status_previous": prev_status, "occupancy_status_new": OccupancyStatus.unknown.value},
+        )
+        db.commit()
+        logger.info("DMS 24h job: property %s status set to Unknown (stay %s, no response)", prop.id, stay.id)
+
+
 def run_stay_notification_job() -> None:
-    """Run once per day (or on demand): find stays approaching limit, send emails; then detect overstays, email owner+guest and log; then Dead Man's Switch."""
+    """Run once per day (or on demand): find stays approaching limit, send emails; then detect overstays, email owner+guest and log; then Dead Man's Switch; then 24h DMS follow-up."""
     if not settings.notification_cron_enabled:
         return
     db = SessionLocal()
@@ -747,5 +848,6 @@ def run_stay_notification_job() -> None:
         send_overstay_alerts_and_log(db)
         run_dead_mans_switch_job(db)
         run_vacant_monitoring_job(db)
+        run_dms_24h_unconfirmed_to_unknown_job(db)
     finally:
         db.close()

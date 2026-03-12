@@ -584,9 +584,9 @@ const TenantDashboard: React.FC<{
   const today = getTodayStr();
   const startDate = unitData?.stay_start_date ?? null;
   const endDate = unitData?.stay_end_date ?? null;
-  const isUnitRevoked = unitData?.token_state === 'REVOKED';
-  const isUnitFuture = !!(startDate && today < startDate && !isUnitRevoked);
-  const isUnitCompleted = !!((endDate && today > endDate) || isUnitRevoked);
+  const isUnitCancelled = unitData?.token_state === 'REVOKED' || unitData?.token_state === 'CANCELLED';
+  const isUnitFuture = !!(startDate && today < startDate && !isUnitCancelled);
+  const isUnitCompleted = !!((endDate && today > endDate) || isUnitCancelled);
   const isUnitOngoing = !isUnitFuture && !isUnitCompleted;
 
   const ongoingStays = stays.filter(
@@ -803,7 +803,7 @@ const TenantDashboard: React.FC<{
                             entry.category === 'billing' ? 'bg-slate-200 text-slate-800' :
                             entry.category === 'presence' ? 'bg-teal-100 text-teal-800' : 'bg-sky-100 text-sky-800'
                           }`}>
-                            {entry.category === 'shield_mode' ? 'Shield Mode' : entry.category === 'dead_mans_switch' ? "Dead Man's Switch" : entry.category === 'billing' ? 'Billing' : entry.category === 'presence' ? 'Presence' : entry.category.replace('_', ' ')}
+                            {entry.category === 'shield_mode' ? 'Shield Mode' : entry.category === 'dead_mans_switch' ? 'Stay end reminders' : entry.category === 'billing' ? 'Billing' : entry.category === 'presence' ? 'Presence' : entry.category.replace('_', ' ')}
                           </span>
                         </td>
                         <td className="px-4 py-2 font-medium text-slate-800 text-sm">{entry.title}</td>
@@ -877,11 +877,10 @@ const TenantDashboard: React.FC<{
                     const td = getTodayStr();
                     const sd = unitData?.stay_start_date ?? null;
                     const ed = unitData?.stay_end_date ?? null;
-                    const isRevoked = unitData?.token_state === 'REVOKED';
-                    const isFuture = sd && td < sd && !isRevoked;
-                    const isUpcoming = sd && ed && td >= sd && td <= ed && !isRevoked;
-                    const isOngoing = !isFuture && !isUpcoming && (!ed || td <= ed) && !isRevoked;
-                    const isCancelled = isRevoked;
+                    const isCancelled = unitData?.token_state === 'REVOKED' || unitData?.token_state === 'CANCELLED';
+                    const isFuture = sd && td < sd && !isCancelled;
+                    const isUpcoming = sd && ed && td >= sd && td <= ed && !isCancelled;
+                    const isOngoing = !isFuture && !isUpcoming && (!ed || td <= ed) && !isCancelled;
                     const statusLabel = isCancelled ? 'CANCELLED' : isFuture ? 'FUTURE' : isUpcoming ? 'UPCOMING' : 'ONGOING';
                     const statusClass = isCancelled
                       ? 'bg-slate-100 text-slate-600 border border-slate-200'
@@ -1114,7 +1113,7 @@ const TenantDashboard: React.FC<{
                           stay.token_state === 'EXPIRED' ? 'bg-slate-100 text-slate-600' :
                           stay.token_state === 'REVOKED' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-600'
                         }`}>
-                          {stay.token_state}
+                          {stay.token_state === 'BURNED' ? 'Active' : stay.token_state === 'STAGED' ? 'Pending' : stay.token_state === 'EXPIRED' ? 'Expired' : stay.token_state === 'REVOKED' ? 'Revoked' : stay.token_state}
                         </span>
                       )}
                     </>
@@ -1259,11 +1258,10 @@ const TenantDashboard: React.FC<{
               const today = getTodayStr();
               const startDate = unitData.stay_start_date ?? null;
               const endDate = unitData.stay_end_date ?? null;
-              const isRevoked = unitData.token_state === 'REVOKED';
-              const isUpcoming = startDate && today < startDate && !isRevoked;
-              const isOngoing = startDate && endDate && today >= startDate && today <= endDate && !isRevoked;
+              const isCancelled = unitData.token_state === 'REVOKED' || unitData.token_state === 'CANCELLED';
+              const isUpcoming = startDate && today < startDate && !isCancelled;
+              const isOngoing = startDate && endDate && today >= startDate && today <= endDate && !isCancelled;
               const isPast = endDate && today > endDate;
-              const isCancelled = isRevoked;
               const progressPercent = startDate && endDate
                 ? (() => {
                     const start = new Date(startDate).getTime();
@@ -1300,9 +1298,9 @@ const TenantDashboard: React.FC<{
                             <span className={`shrink-0 ml-0.5 px-1.5 py-0.5 rounded text-xs font-medium ${
                               unitData.token_state === 'BURNED' ? 'bg-emerald-100 text-emerald-800' :
                               unitData.token_state === 'EXPIRED' ? 'bg-slate-100 text-slate-600' :
-                              unitData.token_state === 'REVOKED' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-600'
+                              (unitData.token_state === 'REVOKED' || unitData.token_state === 'CANCELLED') ? 'bg-slate-100 text-slate-600' : 'bg-slate-100 text-slate-600'
                             }`}>
-                              {unitData.token_state}
+                              {unitData.token_state === 'BURNED' ? 'Active' : (unitData.token_state === 'REVOKED' || unitData.token_state === 'CANCELLED') ? 'Cancelled' : unitData.token_state === 'STAGED' ? 'Pending' : unitData.token_state === 'EXPIRED' ? 'Expired' : unitData.token_state}
                             </span>
                           )}
                         </>
@@ -1374,7 +1372,7 @@ const TenantDashboard: React.FC<{
                       <p className="text-sm text-slate-500 font-medium">Stay ended</p>
                     )}
                     {isCancelled && (
-                      <p className="text-sm text-slate-600 font-medium">This stay was cancelled. The invitation was revoked by the host.</p>
+                      <p className="text-sm text-slate-600 font-medium">This assignment was cancelled.</p>
                     )}
                   </div>
                 </div>

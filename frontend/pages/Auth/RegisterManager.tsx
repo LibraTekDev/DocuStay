@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Input, Button, ErrorModal } from '../../components/UI';
+import { Input, Button, ErrorModal, SuccessModal } from '../../components/UI';
 import { HeroBackground } from '../../components/HeroBackground';
 import { AuthCardLayout, AuthBullet } from '../../components/AuthCardLayout';
 import { authApi } from '../../services/api';
@@ -25,6 +25,7 @@ const RegisterManager: React.FC<RegisterManagerProps> = ({ inviteToken, onLogin,
   });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [errorModal, setErrorModal] = useState<{ open: boolean; message: string }>({ open: false, message: '' });
+  const [successModal, setSuccessModal] = useState<{ open: boolean; message: string; user?: any }>({ open: false, message: '' });
 
   useEffect(() => {
     if (!inviteToken) {
@@ -69,9 +70,12 @@ const RegisterManager: React.FC<RegisterManagerProps> = ({ inviteToken, onLogin,
       });
       setLoading(false);
       if (result.status === 'success' && result.data) {
-        notify('success', 'Account created. Please complete identity verification.');
-        onLogin(result.data);
-        // handleLogin redirects: if !identity_verified -> onboarding/identity; else manager-dashboard
+        const propertyName = inviteData?.property_name || 'the property';
+        setSuccessModal({
+          open: true,
+          message: `You have been successfully assigned to manage ${propertyName}. Please complete identity verification to continue.`,
+          user: result.data,
+        });
       }
     } catch (err) {
       setLoading(false);
@@ -96,7 +100,7 @@ const RegisterManager: React.FC<RegisterManagerProps> = ({ inviteToken, onLogin,
         <AuthCardLayout singleColumn maxWidth="2xl">
           <div className="text-center">
             <p className="text-slate-600 mb-4">Invalid or expired invitation. Please use the link from your invitation email.</p>
-            <Button onClick={() => navigate('login/property_manager')}>Back to Login</Button>
+            <Button onClick={() => navigate(inviteToken ? `login/property_manager/${inviteToken}` : 'login/property_manager')}>Back to Login</Button>
           </div>
         </AuthCardLayout>
         <ErrorModal open={errorModal.open} message={errorModal.message} onClose={() => setErrorModal((p) => ({ ...p, open: false }))} />
@@ -172,12 +176,21 @@ const RegisterManager: React.FC<RegisterManagerProps> = ({ inviteToken, onLogin,
           </form>
           <p className="mt-6 text-center text-slate-500 text-sm">
             Already have an account?{' '}
-            <button type="button" onClick={() => navigate('login/property_manager')} className="text-[#6B90F2] font-medium hover:text-[#5a7ed9] hover:underline">
+            <button type="button" onClick={() => navigate(`login/property_manager/${inviteToken}`)} className="text-[#6B90F2] font-medium hover:text-[#5a7ed9] hover:underline">
               Log in
             </button>
           </p>
       </AuthCardLayout>
       <ErrorModal open={errorModal.open} message={errorModal.message} onClose={() => setErrorModal((p) => ({ ...p, open: false }))} />
+      <SuccessModal
+        open={successModal.open}
+        title="Property Assigned Successfully"
+        message={successModal.message}
+        onClose={() => {
+          if (successModal.user) onLogin(successModal.user);
+          setSuccessModal({ open: false, message: '' });
+        }}
+      />
     </HeroBackground>
   );
 };

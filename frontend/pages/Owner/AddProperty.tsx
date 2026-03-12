@@ -1,7 +1,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Card, Input, Button } from '../../components/UI';
-import { propertiesApi, emitPropertiesChanged, setContextMode } from '../../services/api';
+import { propertiesApi, emitPropertiesChanged } from '../../services/api';
 import { UserSession } from '../../types';
 
 interface Props {
@@ -19,6 +19,35 @@ const TOTAL_STEPS = 3;
 function isAllowedProofFile(file: File): boolean {
   const ok = ALLOWED_PROOF_TYPES.includes(file.type) && file.size <= MAX_PROOF_SIZE;
   return ok;
+}
+
+function isStep1Valid(formData: { property_name: string; street_address: string; city: string; state: string; zip_code: string }): boolean {
+  return (
+    (formData.property_name || '').trim().length > 0 &&
+    (formData.street_address || '').trim().length > 0 &&
+    (formData.city || '').trim().length > 0 &&
+    (formData.state || '').trim().length > 0 &&
+    (formData.zip_code || '').trim().length > 0
+  );
+}
+
+function isStep2Valid(
+  formData: { property_type: string; unit_count: string; primary_residence_unit: string },
+  isMultiUnitType: boolean
+): boolean {
+  if (isMultiUnitType) {
+    const uc = parseInt(formData.unit_count, 10);
+    if (!formData.unit_count.trim() || isNaN(uc) || uc < 1) return false;
+    if (formData.primary_residence_unit) {
+      const pu = parseInt(formData.primary_residence_unit, 10);
+      if (isNaN(pu) || pu < 1) return false;
+    }
+  }
+  return true;
+}
+
+function isStep3Valid(proofFile: File | null): boolean {
+  return proofFile != null;
 }
 
 const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) => {
@@ -43,14 +72,28 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
   const isMultiUnitType = ['apartment', 'duplex', 'triplex', 'quadplex'].includes(formData.property_type);
   const defaultUnitCount: Record<string, string> = { duplex: '2', triplex: '3', quadplex: '4' };
 
-  // Property registration requires Business mode (owner portfolio action)
-  useEffect(() => {
-    setContextMode('business');
-  }, []);
+  const canProceedStep1 = isStep1Valid(formData);
+  const canProceedStep2 = isStep2Valid(formData, isMultiUnitType);
+  const canProceedStep3 = isStep3Valid(proofFile);
+  const canProceed = step === 1 ? canProceedStep1 : step === 2 ? canProceedStep2 : canProceedStep3;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (step < TOTAL_STEPS) {
+      if (step === 1 && !canProceedStep1) {
+        notify('error', 'Please fill in all required fields: Property Label, Street Address, City, State, and ZIP Code.');
+        return;
+      }
+      if (step === 2 && !canProceedStep2) {
+        notify('error', isMultiUnitType
+          ? 'Please enter a valid number of units (at least 1). If you marked a unit as primary residence, select which unit.'
+          : 'Please complete all required property details.');
+        return;
+      }
+      if (step === 3 && !canProceedStep3) {
+        notify('error', 'Please upload proof of ownership (PDF or image) before finishing.');
+        return;
+      }
       setStep(step + 1);
       return;
     }
@@ -327,7 +370,7 @@ const AddProperty: React.FC<Props> = ({ user, navigate, setLoading, notify }) =>
             <Button
               type="submit"
               className="flex-1 py-4 text-xl"
-              disabled={step === 3 && !proofFile}
+              disabled={!canProceed}
             >
               {step === 3 ? 'Add property' : 'Continue to next step'}
             </Button>

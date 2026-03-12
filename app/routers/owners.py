@@ -1,5 +1,6 @@
 """Module B1: Owner onboarding."""
 import csv
+import logging
 import io
 import secrets
 from datetime import date, datetime, timezone, timedelta
@@ -63,8 +64,10 @@ from app.services.census_geocoder import geocode_coordinates
 from app.utility_providers.pending_provider_verification_job import run_pending_provider_verification_job
 from app.utility_providers.sqlite_cache import add_pending_provider, get_pending_providers_for_property
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 from app.services.authority_letter_email import send_authority_letter_to_provider
-from app.services.notifications import send_manager_invite_email, send_shield_mode_turned_on_notification, send_dead_mans_switch_enabled_notification
+from app.services.notifications import send_manager_invite_email, send_shield_mode_turned_on_notification, send_shield_mode_turned_off_notification, send_dead_mans_switch_enabled_notification
 from app.services.dropbox_sign import get_signed_pdf
 from app.services.billing import on_onboarding_properties_completed, ensure_subscription, sync_subscription_quantities
 from app.services.permissions import can_perform_action, can_assign_property_manager, Action
@@ -971,8 +974,9 @@ def list_property_units(
     property_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
+    context_mode: str = Depends(get_context_mode),
 ):
-    """List units for an owner's property. Used when inviting guests to multi-unit properties."""
+    """List units for an owner's property. Business mode: no guest names (occupied_by, invite_id) for privacy."""
     profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="No owner profile")
@@ -997,15 +1001,15 @@ def list_property_units(
             )
         ]
     unit_ids = [u.id for u in units]
-    occupancy_display = get_units_occupancy_display(db, unit_ids)
+    occupancy_display = get_units_occupancy_display(db, unit_ids, anonymize_tenant_lane=(context_mode == "personal")) if context_mode == "personal" else {}
     return [
         UnitSummary(
             id=u.id,
             unit_label=u.unit_label,
             occupancy_status=get_unit_display_occupancy_status(db, u),
             is_primary_residence=bool(getattr(u, "is_primary_residence", 0)),
-            occupied_by=occupancy_display.get(u.id, {}).get("occupied_by"),
-            invite_id=occupancy_display.get(u.id, {}).get("invite_id"),
+            occupied_by=occupancy_display.get(u.id, {}).get("occupied_by") if context_mode == "personal" else None,
+            invite_id=occupancy_display.get(u.id, {}).get("invite_id") if context_mode == "personal" else None,
         )
         for u in units
     ]
@@ -1078,7 +1082,11 @@ def invite_property_manager(
         user_agent=(request.headers.get("user-agent") or "").strip() or None,
     )
     db.commit()
-    return {"status": "success", "message": "Invitation sent." if sent else "Invitation created. Email delivery may not be configured."}
+    response: dict = {"status": "success", "message": "Invitation sent." if sent else "Invitation created. Email delivery may not be configured."}
+    response["invite_link"] = invite_link
+    if getattr(get_settings(), "test_mode", False) or getattr(get_settings(), "dms_test_mode", False):
+        logger.info("[test_mode] Property manager invite link: %s", invite_link)
+    return response
 
 
 class AssignedManagerItem(BaseModel):
@@ -1997,23 +2005,25 @@ def update_property(
                 ip_address=ip,
                 user_agent=ua,
             )
-            if new_shield == 1:
-                owner_user = None
-                if getattr(prop, "owner_profile_id", None):
-                    profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
-                    owner_user = db.query(User).filter(User.id == profile.user_id).first() if profile else None
-                owner_email = (owner_user.email or "").strip() if owner_user else ""
-                manager_emails = [
-                    (u.email or "").strip()
-                    for a in db.query(PropertyManagerAssignment).filter(PropertyManagerAssignment.property_id == prop.id).all()
-                    for u in [db.query(User).filter(User.id == a.user_id).first()]
-                    if u and (u.email or "").strip()
-                ]
-                turned_on_by = "property manager" if current_user.role == UserRole.property_manager else "property owner"
-                try:
-                    send_shield_mode_turned_on_notification(owner_email, manager_emails, property_name, turned_on_by=turned_on_by)
-                except Exception as e:
-                    print(f"[Owners] Shield mode notification failed: {e}", flush=True)
+            owner_user = None
+            if getattr(prop, "owner_profile_id", None):
+                prof = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+                owner_user = db.query(User).filter(User.id == prof.user_id).first() if prof else None
+            owner_email = (owner_user.email or "").strip() if owner_user else ""
+            manager_emails = [
+                (u.email or "").strip()
+                for a in db.query(PropertyManagerAssignment).filter(PropertyManagerAssignment.property_id == prop.id).all()
+                for u in [db.query(User).filter(User.id == a.user_id).first()]
+                if u and (u.email or "").strip()
+            ]
+            turned_by = "property manager" if current_user.role == UserRole.property_manager else "property owner"
+            try:
+                if new_shield == 1:
+                    send_shield_mode_turned_on_notification(owner_email, manager_emails, property_name, turned_on_by=turned_by)
+                else:
+                    send_shield_mode_turned_off_notification(owner_email, manager_emails, property_name, turned_off_by=turned_by)
+            except Exception as e:
+                print(f"[Owners] Shield mode notification failed: {e}", flush=True)
     db.commit()
     db.refresh(prop)
     if "shield_mode_enabled" in (changes_meta or {}):

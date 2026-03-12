@@ -75,6 +75,7 @@ from app.services.notifications import (
     send_guest_stay_added_email,
     send_manager_welcome_email,
     send_tenant_guest_accepted_invite,
+    send_shield_mode_turned_off_notification,
 )
 from app.dependencies import get_current_user, require_owner, require_guest, require_guest_or_tenant, get_pending_owner
 from app.models.guest import GuestProfile
@@ -490,6 +491,68 @@ def register_manager(request: Request, data: ManagerRegister, db: Session = Depe
     send_manager_welcome_email(user.email, user.full_name, property_name)
     token = create_access_token(user.id, user.email, user.role)
     return Token(access_token=token, user=_user_to_response(user, db))
+
+
+@router.post("/accept-manager-invite/{token}")
+def accept_manager_invite(
+    token: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Accept a manager invitation as an already-logged-in property manager. Creates PropertyManagerAssignment."""
+    if current_user.role != UserRole.property_manager:
+        raise HTTPException(status_code=403, detail="Only property managers can accept manager invitations.")
+    norm_token = _normalize_manager_invite_token(token)
+    if not norm_token:
+        raise HTTPException(status_code=400, detail="Invitation not found or expired.")
+    inv = db.query(ManagerInvitation).filter(
+        ManagerInvitation.token == norm_token,
+        ManagerInvitation.status == "pending",
+        ManagerInvitation.expires_at > datetime.now(timezone.utc),
+    ).first()
+    if not inv:
+        raise HTTPException(status_code=400, detail="Invitation not found or expired.")
+    if inv.email.strip().lower() != (current_user.email or "").strip().lower():
+        raise HTTPException(status_code=403, detail="This invitation was sent to a different email address.")
+    existing_assignment = db.query(PropertyManagerAssignment).filter(
+        PropertyManagerAssignment.property_id == inv.property_id,
+        PropertyManagerAssignment.user_id == current_user.id,
+    ).first()
+    if existing_assignment:
+        return {"status": "success", "message": "You are already assigned to this property."}
+    assn = PropertyManagerAssignment(
+        property_id=inv.property_id,
+        user_id=current_user.id,
+        assigned_by_user_id=inv.invited_by_user_id,
+    )
+    db.add(assn)
+    inv.status = "accepted"
+    inv.accepted_at = datetime.now(timezone.utc)
+    create_ledger_event(
+        db,
+        ACTION_MANAGER_INVITE_ACCEPTED,
+        target_object_type="ManagerInvitation",
+        target_object_id=inv.id,
+        property_id=inv.property_id,
+        actor_user_id=current_user.id,
+        meta={"email": current_user.email, "property_id": inv.property_id},
+        ip_address=request.client.host if request.client else None,
+        user_agent=(request.headers.get("user-agent") or "").strip() or None,
+    )
+    create_ledger_event(
+        db,
+        ACTION_MANAGER_ASSIGNED,
+        target_object_type="PropertyManagerAssignment",
+        target_object_id=assn.id,
+        property_id=inv.property_id,
+        actor_user_id=inv.invited_by_user_id,
+        meta={"manager_email": current_user.email, "manager_user_id": current_user.id, "property_id": inv.property_id},
+        ip_address=request.client.host if request.client else None,
+        user_agent=(request.headers.get("user-agent") or "").strip() or None,
+    )
+    db.commit()
+    return {"status": "success", "message": "Invitation accepted. You can now manage this property."}
 
 
 def _complete_pending_owner(db: Session, pending: PendingRegistration) -> User:
@@ -1441,8 +1504,8 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             create_log(
                 db,
                 CATEGORY_FAILED_ATTEMPT,
-                "Tenant register: invalid or expired invitation code",
-                f"Tenant registration attempted with invalid or expired invitation code: {code}.",
+                "Tenant register: invalid or no longer valid invitation code",
+                f"Tenant registration attempted with invalid or no longer valid invitation code: {code}.",
                 property_id=None,
                 actor_email=data.email,
                 ip_address=request.client.host if request.client else None,
@@ -1450,7 +1513,7 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
                 meta={"invitation_code_attempted": code},
             )
             db.commit()
-            raise HTTPException(status_code=400, detail="Invalid or expired tenant invitation code.")
+            raise HTTPException(status_code=400, detail="Invalid or no longer valid tenant invitation code.")
         inv_kind = (getattr(inv, "invitation_kind", None) or "").strip().lower()
         if inv_kind != "tenant":
             create_log(
@@ -1563,6 +1626,20 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
         prop_for_shield = db.query(Property).filter(Property.id == inv.property_id).first()
         if prop_for_shield and getattr(prop_for_shield, "shield_mode_enabled", 0) == 1:
             prop_for_shield.shield_mode_enabled = 0
+            owner_profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop_for_shield.owner_profile_id).first()
+            owner_user = db.query(User).filter(User.id == owner_profile.user_id).first() if owner_profile else None
+            owner_email = (owner_user.email or "").strip() if owner_user else ""
+            manager_emails = [
+                (u.email or "").strip()
+                for a in db.query(PropertyManagerAssignment).filter(PropertyManagerAssignment.property_id == prop_for_shield.id).all()
+                for u in [db.query(User).filter(User.id == a.user_id).first()]
+                if u and (u.email or "").strip()
+            ]
+            property_name = (prop_for_shield.name or "").strip() or (f"{prop_for_shield.city}, {prop_for_shield.state}".strip(", ") if (prop_for_shield.city or prop_for_shield.state) else "Property")
+            try:
+                send_shield_mode_turned_off_notification(owner_email, manager_emails, property_name, turned_off_by="system (new guest accepted invitation)")
+            except Exception:
+                pass
         ip = request.client.host if request.client else None
         ua = (request.headers.get("user-agent") or "").strip() or None
         create_log(
@@ -1915,6 +1992,20 @@ def accept_invite(
     _prop = db.query(Property).filter(Property.id == inv.property_id).first()
     if _prop and getattr(_prop, "shield_mode_enabled", 0) == 1:
         _prop.shield_mode_enabled = 0
+        owner_profile = db.query(OwnerProfile).filter(OwnerProfile.id == _prop.owner_profile_id).first()
+        owner_user = db.query(User).filter(User.id == owner_profile.user_id).first() if owner_profile else None
+        owner_email = (owner_user.email or "").strip() if owner_user else ""
+        manager_emails = [
+            (u.email or "").strip()
+            for a in db.query(PropertyManagerAssignment).filter(PropertyManagerAssignment.property_id == _prop.id).all()
+            for u in [db.query(User).filter(User.id == a.user_id).first()]
+            if u and (u.email or "").strip()
+        ]
+        property_name = (_prop.name or "").strip() or (f"{_prop.city}, {_prop.state}".strip(", ") if (_prop.city or _prop.state) else "Property")
+        try:
+            send_shield_mode_turned_off_notification(owner_email, manager_emails, property_name, turned_off_by="system (new guest accepted invitation)")
+        except Exception:
+            pass
     ip = request.client.host if request.client else None
     ua = (request.headers.get("user-agent") or "").strip() or None
     create_log(

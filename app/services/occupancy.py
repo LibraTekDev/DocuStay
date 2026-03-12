@@ -17,6 +17,7 @@ from app.models.stay import Stay
 from app.models.invitation import Invitation
 from app.models.user import User
 from app.models.tenant_assignment import TenantAssignment
+from app.services.privacy_lanes import is_tenant_lane_invitation, is_tenant_lane_stay
 
 
 def is_unit_effectively_occupied(db: Session, unit: Unit) -> bool:
@@ -69,11 +70,12 @@ def get_property_display_occupancy_status(
 
 
 def get_units_occupancy_display(
-    db: Session, unit_ids: list[int]
+    db: Session, unit_ids: list[int], anonymize_tenant_lane: bool = False
 ) -> dict[int, dict]:
     """
     For each unit_id, return { "occupied_by": str | None, "invite_id": str | None }.
     Priority: active guest stay (with invite_id) > pending invitation > property manager resident > tenant.
+    When anonymize_tenant_lane=True (owner/manager view), tenant-invited guest names are shown as "Occupied".
     """
     if not unit_ids:
         return {}
@@ -105,14 +107,17 @@ def get_units_occupancy_display(
         if s.unit_id not in out:
             continue
         inv = invitations_by_id.get(s.invitation_id) if s.invitation_id else None
-        guest_user = users_by_id.get(s.guest_id)
-        name = None
-        if inv:
-            name = (inv.guest_name or "").strip()
-        if not name and guest_user:
-            name = (guest_user.full_name or "").strip() or guest_user.email
-        if not name:
-            name = "Guest"
+        if anonymize_tenant_lane and is_tenant_lane_stay(db, s):
+            name = "Occupied"
+        else:
+            guest_user = users_by_id.get(s.guest_id)
+            name = None
+            if inv:
+                name = (inv.guest_name or "").strip()
+            if not name and guest_user:
+                name = (guest_user.full_name or "").strip() or guest_user.email
+            if not name:
+                name = "Guest"
         out[s.unit_id] = {
             "occupied_by": name,
             "invite_id": inv.invitation_code if inv else None,
@@ -132,7 +137,10 @@ def get_units_occupancy_display(
         for inv in invs:
             if inv.unit_id not in out or out[inv.unit_id]["occupied_by"] is not None:
                 continue
-            name = (inv.guest_name or "").strip() or "Guest (pending)"
+            if anonymize_tenant_lane and is_tenant_lane_invitation(db, inv):
+                name = "Occupied"
+            else:
+                name = (inv.guest_name or "").strip() or "Guest (pending)"
             out[inv.unit_id] = {"occupied_by": name, "invite_id": inv.invitation_code}
 
     # Property manager on-site resident

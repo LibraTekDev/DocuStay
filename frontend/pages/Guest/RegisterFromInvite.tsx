@@ -304,11 +304,11 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
               <div className="pt-8 border-t border-slate-200 space-y-4">
                 <label className="flex items-start gap-3 cursor-pointer group w-full max-w-2xl">
                   <input type="checkbox" name="terms_agreed" checked={formData.terms_agreed} onChange={handleCheckboxChange} className="w-5 h-5 rounded border-slate-300 bg-white text-blue-600 focus:ring-blue-500 shrink-0 mt-0.5" required />
-                  <span className="text-sm text-slate-600 group-hover:text-slate-800 pt-0.5">I agree to the <a href="#" className="text-[#6B90F2] font-semibold hover:underline">Terms of Service</a>.</span>
+                  <span className="text-sm text-slate-600 group-hover:text-slate-800 pt-0.5">I agree to the <a href="#terms" target="_blank" rel="noopener noreferrer" className="text-[#6B90F2] font-semibold hover:underline">Terms of Service</a>.</span>
                 </label>
                 <label className="flex items-start gap-3 cursor-pointer group w-full max-w-2xl">
                   <input type="checkbox" name="privacy_agreed" checked={formData.privacy_agreed} onChange={handleCheckboxChange} className="w-5 h-5 rounded border-slate-300 bg-white text-blue-600 focus:ring-blue-500 shrink-0 mt-0.5" required />
-                  <span className="text-sm text-slate-600 group-hover:text-slate-800 pt-0.5">I agree to the <a href="#" className="text-[#6B90F2] font-semibold hover:underline">Privacy Policy</a>.</span>
+                  <span className="text-sm text-slate-600 group-hover:text-slate-800 pt-0.5">I agree to the <a href="#privacy" target="_blank" rel="noopener noreferrer" className="text-[#6B90F2] font-semibold hover:underline">Privacy Policy</a>.</span>
                 </label>
 
                 <div className="flex flex-col items-center gap-3 mt-6 text-center">

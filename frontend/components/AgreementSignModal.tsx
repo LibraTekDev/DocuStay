@@ -439,20 +439,24 @@ export default function AgreementSignModal(props: {
 
         <div className="rounded-xl border border-slate-200 bg-white p-5 space-y-3">
           <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Agreements</p>
-          {[
-            { key: "terms_agreed" as const, label: "I agree to the Terms of Service." },
-            { key: "privacy_agreed" as const, label: "I agree to the Privacy Policy." },
-          ].map(({ key, label }) => (
-            <label key={key} className="flex items-start gap-3 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={d[key]}
-                onChange={(e) => setStep1FormData({ ...d, [key]: e.target.checked })}
-                className="mt-0.5 w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 shrink-0"
-              />
-              <span className="text-sm text-slate-700">{label}</span>
-            </label>
-          ))}
+          <label className="flex items-start gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={d.terms_agreed}
+              onChange={(e) => setStep1FormData({ ...d, terms_agreed: e.target.checked })}
+              className="mt-0.5 w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 shrink-0"
+            />
+            <span className="text-sm text-slate-700">I agree to the <a href="#terms" target="_blank" rel="noopener noreferrer" className="text-[#6B90F2] font-medium hover:underline" onClick={(e) => e.stopPropagation()}>Terms of Service</a>.</span>
+          </label>
+          <label className="flex items-start gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={d.privacy_agreed}
+              onChange={(e) => setStep1FormData({ ...d, privacy_agreed: e.target.checked })}
+              className="mt-0.5 w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 shrink-0"
+            />
+            <span className="text-sm text-slate-700">I agree to the <a href="#privacy" target="_blank" rel="noopener noreferrer" className="text-[#6B90F2] font-medium hover:underline" onClick={(e) => e.stopPropagation()}>Privacy Policy</a>.</span>
+          </label>
         </div>
 
         {step1Error && <p className="text-sm text-red-600 font-medium" role="alert">{step1Error}</p>}

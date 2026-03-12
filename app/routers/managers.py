@@ -17,8 +17,8 @@ from app.services.occupancy import (
     get_units_occupancy_display,
 )
 from app.models.guest import PurposeOfStay, RelationshipToOwner
-from app.dependencies import get_current_user, require_property_manager, require_property_manager_identity_verified
-from app.services.permissions import can_view_audit_logs
+from app.dependencies import get_current_user, require_property_manager, require_property_manager_identity_verified, get_context_mode
+from app.services.permissions import can_view_audit_logs, get_manager_personal_mode_units
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE
 from app.services.event_ledger import create_ledger_event, ACTION_TENANT_INVITED
 from app.models.audit_log import AuditLog
@@ -62,8 +62,9 @@ class UnitSummary(BaseModel):
 def list_assigned_properties(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_property_manager_identity_verified),
+    context_mode: str = Depends(get_context_mode),
 ):
-    """List properties assigned to this property manager."""
+    """List properties. Business mode: assigned properties (management scope). Personal mode: only properties where manager lives (ResidentMode)."""
     assignments = (
         db.query(PropertyManagerAssignment)
         .filter(PropertyManagerAssignment.user_id == current_user.id)
@@ -72,6 +73,15 @@ def list_assigned_properties(
     property_ids = [a.property_id for a in assignments]
     if not property_ids:
         return []
+    if context_mode == "personal":
+        personal_unit_ids = get_manager_personal_mode_units(db, current_user.id)
+        if not personal_unit_ids:
+            return []
+        units = db.query(Unit).filter(Unit.id.in_(personal_unit_ids)).all()
+        personal_property_ids = {u.property_id for u in units}
+        property_ids = [pid for pid in property_ids if pid in personal_property_ids]
+        if not property_ids:
+            return []
     props = (
         db.query(Property)
         .filter(Property.id.in_(property_ids), Property.deleted_at.is_(None))
@@ -99,6 +109,7 @@ def list_assigned_properties(
                 unit_count=unit_count,
                 occupied_count=occupied,
                 region_code=getattr(p, "region_code", None),
+                shield_mode_enabled=bool(getattr(p, "shield_mode_enabled", 0)),
             )
         )
     return out
@@ -155,8 +166,9 @@ def list_property_units(
     property_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_property_manager_identity_verified),
+    context_mode: str = Depends(get_context_mode),
 ):
-    """List units for an assigned property."""
+    """List units for an assigned property. Business mode: no guest names (occupied_by, invite_id) for privacy."""
     if not db.query(PropertyManagerAssignment).filter(
         PropertyManagerAssignment.property_id == property_id,
         PropertyManagerAssignment.user_id == current_user.id,
@@ -178,14 +190,14 @@ def list_property_units(
             )
         ]
     unit_ids = [u.id for u in units]
-    occupancy_display = get_units_occupancy_display(db, unit_ids)
+    occupancy_display = get_units_occupancy_display(db, unit_ids, anonymize_tenant_lane=(context_mode == "personal")) if context_mode == "personal" else {}
     return [
         UnitSummary(
             id=u.id,
             unit_label=u.unit_label,
             occupancy_status=get_unit_display_occupancy_status(db, u),
-            occupied_by=occupancy_display.get(u.id, {}).get("occupied_by"),
-            invite_id=occupancy_display.get(u.id, {}).get("invite_id"),
+            occupied_by=occupancy_display.get(u.id, {}).get("occupied_by") if context_mode == "personal" else None,
+            invite_id=occupancy_display.get(u.id, {}).get("invite_id") if context_mode == "personal" else None,
         )
         for u in units
     ]

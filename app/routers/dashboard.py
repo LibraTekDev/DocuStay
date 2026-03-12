@@ -22,7 +22,7 @@ from app.models.region_rule import StayClassification, RiskLevel
 from app.schemas.dashboard import OwnerStayView, OwnerInvitationView, GuestStayView, GuestPendingInviteView, JurisdictionStatuteInDashboard, OwnerAuditLogEntry, BillingResponse, BillingInvoiceView, BillingPaymentView, BillingPortalSessionResponse, PortfolioLinkResponse
 from app.services.jle import resolve_jurisdiction
 from app.services.jurisdiction_sot import get_jurisdiction_for_property
-from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_PRESENCE, CATEGORY_DEAD_MANS_SWITCH, CATEGORY_FAILED_ATTEMPT, CATEGORY_BILLING
+from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_PRESENCE, CATEGORY_DEAD_MANS_SWITCH, CATEGORY_FAILED_ATTEMPT, CATEGORY_BILLING, CATEGORY_SHIELD_MODE
 from app.services.event_ledger import (
     create_ledger_event,
     ledger_event_to_display,
@@ -48,12 +48,14 @@ from app.services.event_ledger import (
     ACTION_AWAY_ACTIVATED,
     ACTION_AWAY_ENDED,
     ACTION_BILLING_INVOICE_PAID,
+    ACTION_SHIELD_MODE_ON,
+    ACTION_SHIELD_MODE_OFF,
 )
 from app.services.invitation_cleanup import get_invitation_expire_cutoff
 from app.services.billing import sync_subscription_quantities
-from app.services.notifications import send_vacate_12h_notice, send_owner_guest_checkout_email, send_guest_checkout_confirmation_email, send_owner_guest_cancelled_stay_email, send_removal_notice_to_guest, send_removal_confirmation_to_owner, send_dead_mans_switch_enabled_notification
+from app.services.notifications import send_vacate_12h_notice, send_owner_guest_checkout_email, send_guest_checkout_confirmation_email, send_owner_guest_cancelled_stay_email, send_removal_notice_to_guest, send_removal_confirmation_to_owner, send_dead_mans_switch_enabled_notification, send_shield_mode_turned_on_notification, send_shield_mode_turned_off_notification, send_dms_turned_off_notification
 from app.schemas.jle import JLEInput
-from app.dependencies import get_current_user, require_owner, require_owner_onboarding_complete, require_guest, require_tenant, require_guest_or_tenant, require_owner_or_manager, require_property_manager, require_property_manager_identity_verified
+from app.dependencies import get_current_user, require_owner, require_owner_onboarding_complete, require_guest, require_tenant, require_guest_or_tenant, require_owner_or_manager, require_property_manager, require_property_manager_identity_verified, get_context_mode
 from app.models.audit_log import AuditLog
 from app.models.event_ledger import EventLedger
 from app.services.agreements import fill_guest_signature_in_content, agreement_content_to_pdf
@@ -64,6 +66,15 @@ from app.models.property_manager_assignment import PropertyManagerAssignment
 from app.models.resident_presence import ResidentPresence, PresenceStatus
 from app.models.stay_presence import StayPresence, PresenceAwayPeriod
 from app.services.permissions import can_access_unit, can_access_property, can_confirm_occupancy, can_perform_action, Action, get_owner_personal_mode_units, get_manager_personal_mode_units
+from app.services.privacy_lanes import (
+    is_tenant_lane_invitation,
+    is_tenant_lane_stay,
+    filter_property_lane_invitations_for_owner,
+    filter_property_lane_stays_for_owner,
+    filter_property_lane_invitations_for_manager,
+    filter_property_lane_stays_for_manager,
+    filter_tenant_lane_from_ledger_rows,
+)
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -73,6 +84,11 @@ class TenantGuestInvitationCreate(BaseModel):
     guest_name: str = Field("", description="Guest full name")
     checkin_date: str = Field("", description="Start date (YYYY-MM-DD)")
     checkout_date: str = Field("", description="End date (YYYY-MM-DD)")
+
+
+class BulkShieldModeRequest(BaseModel):
+    property_ids: list[int] = Field(..., description="Property IDs to update")
+    shield_mode_enabled: bool = Field(..., description="True to turn Shield ON, False to turn OFF")
 
 
 @router.get("/guest/pending-invites", response_model=list[GuestPendingInviteView])
@@ -323,9 +339,13 @@ def guest_add_pending_invite(
 def owner_invitations(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
+    context_mode: str = Depends(get_context_mode),
 ):
-    """Owner view: all invitations (pending, accepted, cancelled) with property name. Pending invites older than the configured window (12h or 5m in test_mode) are marked is_expired."""
-    invs = db.query(Invitation).filter(Invitation.owner_id == current_user.id).order_by(Invitation.created_at.desc()).all()
+    """Owner view: invitations with property name. Business mode: returns [] (no guest data). Personal mode: property-lane invitations only (owner/manager-invited; NEVER tenant-invited guest data)."""
+    if context_mode == "business":
+        return []
+    all_invs = db.query(Invitation).filter(Invitation.owner_id == current_user.id).order_by(Invitation.created_at.desc()).all()
+    invs = filter_property_lane_invitations_for_owner(db, all_invs, current_user.id)
     return _invitations_to_owner_views(invs, db, get_invitation_expire_cutoff)
 
 
@@ -378,17 +398,25 @@ def _invitations_to_owner_views(invs: list, db: Session, get_invitation_expire_c
 def manager_invitations(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_property_manager_identity_verified),
+    context_mode: str = Depends(get_context_mode),
 ):
-    """Manager view: invitations for assigned properties. Same schema as owner invitations."""
-    property_ids = _manager_property_ids(db, current_user.id)
+    """Manager view: invitations. Business mode: returns [] (no guest data for privacy). Personal mode: only invitations the manager created (property lane); NEVER tenant-invited guest data."""
+    if context_mode == "business":
+        return []
+    personal_unit_ids = get_manager_personal_mode_units(db, current_user.id)
+    if not personal_unit_ids:
+        return []
+    units = db.query(Unit).filter(Unit.id.in_(personal_unit_ids)).all()
+    property_ids = list({u.property_id for u in units})
     if not property_ids:
         return []
-    invs = (
+    all_invs = (
         db.query(Invitation)
         .filter(Invitation.property_id.in_(property_ids))
         .order_by(Invitation.created_at.desc())
         .all()
     )
+    invs = filter_property_lane_invitations_for_manager(db, all_invs, current_user.id)
     return _invitations_to_owner_views(invs, db, get_invitation_expire_cutoff)
 
 
@@ -399,12 +427,15 @@ def owner_cancel_invitation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Cancel a pending invitation. Owner or the user who created the invite (invited_by_user_id) can cancel."""
+    """Cancel a pending invitation. Owner or the inviter can cancel. Owner cannot cancel tenant-invited invitations (tenant lane)."""
     inv = db.query(Invitation).filter(Invitation.id == invitation_id).first()
     if not inv:
         raise HTTPException(status_code=404, detail="Invitation not found")
-    is_owner = inv.owner_id == current_user.id
     is_inviter = getattr(inv, "invited_by_user_id", None) == current_user.id
+    is_owner = inv.owner_id == current_user.id
+    is_tenant_lane = is_tenant_lane_invitation(db, inv)
+    if is_tenant_lane and is_owner and not is_inviter:
+        raise HTTPException(status_code=403, detail="Tenant-invited guest data is private to the tenant. Only the tenant who created the invitation can cancel it.")
     if not is_owner and not is_inviter:
         raise HTTPException(status_code=403, detail="Only the property owner or the person who created the invitation can cancel it")
     if inv.status not in ("pending", "ongoing"):
@@ -495,12 +526,97 @@ def owner_confirm_vacant(
     return {"status": "success", "message": "Vacancy confirmed. Next prompt will be sent at the next interval."}
 
 
+@router.post("/properties/bulk-shield-mode")
+def bulk_shield_mode(
+    request: Request,
+    data: BulkShieldModeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_or_manager),
+):
+    """Bulk update Shield Mode for multiple properties. Owner or assigned manager can update. Each property is verified via can_access_property."""
+    if not data.property_ids:
+        return {"status": "success", "updated_count": 0, "message": "No properties selected."}
+    ip = request.client.host if request.client else None
+    ua = (request.headers.get("user-agent") or "").strip() or None
+    turned_by = "property manager" if current_user.role == UserRole.property_manager else "property owner"
+    updated_count = 0
+    owner_profiles_to_sync = set()
+    for property_id in data.property_ids:
+        if not can_access_property(db, current_user, property_id, "business"):
+            continue
+        prop = db.query(Property).filter(Property.id == property_id, Property.deleted_at.is_(None)).first()
+        if not prop:
+            continue
+        new_val = 1 if data.shield_mode_enabled else 0
+        old_val = getattr(prop, "shield_mode_enabled", 0) or 0
+        if new_val == old_val:
+            continue
+        prop.shield_mode_enabled = new_val
+        property_name = (prop.name or "").strip() or (f"{prop.city}, {prop.state}".strip(", ") if (prop.city or prop.state) else f"Property {property_id}")
+        create_log(
+            db,
+            CATEGORY_SHIELD_MODE,
+            "Shield Mode turned off" if new_val == 0 else "Shield Mode turned on",
+            f"{turned_by.title()} turned {'off' if new_val == 0 else 'on'} Shield Mode for {property_name} (bulk).",
+            property_id=prop.id,
+            actor_user_id=current_user.id,
+            actor_email=current_user.email,
+            ip_address=ip,
+            user_agent=ua,
+            meta={"property_id": property_id, "property_name": property_name},
+        )
+        create_ledger_event(
+            db,
+            ACTION_SHIELD_MODE_OFF if new_val == 0 else ACTION_SHIELD_MODE_ON,
+            target_object_type="Property",
+            target_object_id=prop.id,
+            property_id=prop.id,
+            actor_user_id=current_user.id,
+            meta={"property_id": property_id, "property_name": property_name},
+            ip_address=ip,
+            user_agent=ua,
+        )
+        if getattr(prop, "owner_profile_id", None):
+            owner_profiles_to_sync.add(prop.owner_profile_id)
+        owner_user = None
+        if getattr(prop, "owner_profile_id", None):
+            prof = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+            owner_user = db.query(User).filter(User.id == prof.user_id).first() if prof else None
+        owner_email = (owner_user.email or "").strip() if owner_user else ""
+        manager_emails = [
+            (u.email or "").strip()
+            for a in db.query(PropertyManagerAssignment).filter(PropertyManagerAssignment.property_id == prop.id).all()
+            for u in [db.query(User).filter(User.id == a.user_id).first()]
+            if u and (u.email or "").strip()
+        ]
+        try:
+            if new_val == 1:
+                send_shield_mode_turned_on_notification(owner_email, manager_emails, property_name, turned_on_by=turned_by)
+            else:
+                send_shield_mode_turned_off_notification(owner_email, manager_emails, property_name, turned_off_by=turned_by)
+        except Exception as e:
+            print(f"[Dashboard] Shield mode notification failed for property {property_id}: {e}", flush=True)
+        updated_count += 1
+    db.commit()
+    for profile_id in owner_profiles_to_sync:
+        profile = db.query(OwnerProfile).filter(OwnerProfile.id == profile_id).first()
+        if profile:
+            try:
+                sync_subscription_quantities(db, profile)
+            except Exception as e:
+                print(f"[Dashboard] Subscription sync failed after bulk Shield: {e}", flush=True)
+    return {"status": "success", "updated_count": updated_count, "message": f"Shield Mode turned {'on' if data.shield_mode_enabled else 'off'} for {updated_count} propert{'y' if updated_count == 1 else 'ies'}."}
+
+
 @router.get("/owner/stays", response_model=list[OwnerStayView])
 def owner_stays(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
+    context_mode: str = Depends(get_context_mode),
 ):
-    """Owner view: guest name, stay dates, region, legal classification, max stay, risk, applicable laws."""
+    """Owner view: guest stays. Business mode: returns [] (no guest data). Personal mode: property-lane stays only (owner/manager-invited; NEVER tenant-invited guest stays)."""
+    if context_mode == "business":
+        return []
     # Load stays by owner_id and also by invitation ownership (covers all stays for this owner's invitations)
     stays_by_owner = db.query(Stay).filter(Stay.owner_id == current_user.id).all()
     inv_ids = [r[0] for r in db.query(Invitation.id).filter(Invitation.owner_id == current_user.id).all()]
@@ -511,6 +627,7 @@ def owner_stays(
         if s.id not in seen_ids:
             seen_ids.add(s.id)
             stays.append(s)
+    stays = filter_property_lane_stays_for_owner(db, stays, current_user.id)
     out = []
     for s in stays:
         guest = db.query(User).filter(User.id == s.guest_id).first()
@@ -610,7 +727,7 @@ def owner_stays(
     )
     if invitation_ids_with_stay:
         q = q.filter(~Invitation.id.in_(invitation_ids_with_stay))
-    invs_no_stay = q.all()
+    invs_no_stay = filter_property_lane_invitations_for_owner(db, q.all(), current_user.id)
     profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
     for inv in invs_no_stay:
         if (inv.property_id, inv.stay_start_date, inv.stay_end_date) in stay_key:
@@ -688,9 +805,16 @@ def _manager_property_ids(db: Session, user_id: int) -> list[int]:
 def manager_stays(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_property_manager_identity_verified),
+    context_mode: str = Depends(get_context_mode),
 ):
-    """Manager view: stays for assigned properties. Same schema as owner stays."""
-    property_ids = _manager_property_ids(db, current_user.id)
+    """Manager view: stays. Business mode: returns [] (no guest data for privacy). Personal mode: only stays for guests the manager invited (property lane); NEVER tenant-invited guest stays."""
+    if context_mode == "business":
+        return []
+    personal_unit_ids = get_manager_personal_mode_units(db, current_user.id)
+    if not personal_unit_ids:
+        return []
+    units = db.query(Unit).filter(Unit.id.in_(personal_unit_ids)).all()
+    property_ids = list({u.property_id for u in units})
     if not property_ids:
         return []
     stays = db.query(Stay).filter(Stay.property_id.in_(property_ids)).all()
@@ -703,6 +827,7 @@ def manager_stays(
         if s.id not in seen_ids:
             seen_ids.add(s.id)
             stays.append(s)
+    stays = filter_property_lane_stays_for_manager(db, stays, current_user.id)
     out = []
     for s in stays:
         guest = db.query(User).filter(User.id == s.guest_id).first()
@@ -749,7 +874,8 @@ def manager_stays(
     )
     if invitation_ids_with_stay:
         q = q.filter(~Invitation.id.in_(invitation_ids_with_stay))
-    for inv in q.all():
+    invs_for_invitation_only = filter_property_lane_invitations_for_manager(db, q.all(), current_user.id)
+    for inv in invs_for_invitation_only:
         if (inv.property_id, inv.stay_start_date, inv.stay_end_date) in stay_key:
             continue
         prop = db.query(Property).filter(Property.id == inv.property_id).first()
@@ -785,10 +911,12 @@ def revoke_stay(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
 ):
-    """Revoke a stay (Kill Switch): set revoked_at, guest must vacate in 12 hours. Invite token -> REVOKED. Sends email to guest."""
+    """Revoke a stay (Kill Switch): set revoked_at, guest must vacate in 12 hours. Owner cannot revoke tenant-invited guest stays (tenant lane)."""
     stay = db.query(Stay).filter(Stay.id == stay_id, Stay.owner_id == current_user.id).first()
     if not stay:
         raise HTTPException(status_code=404, detail="Stay not found")
+    if is_tenant_lane_stay(db, stay):
+        raise HTTPException(status_code=403, detail="Tenant-invited guest stays are private to the tenant. Only the tenant who invited can revoke.")
     if stay.revoked_at:
         return {"status": "success", "message": "Stay was already revoked."}
     now = datetime.now(timezone.utc)
@@ -847,8 +975,21 @@ def revoke_stay(
     guest_name = (guest.full_name if guest else None) or guest_email or "Guest"
     prop = db.query(Property).filter(Property.id == stay.property_id).first()
     property_name = (prop.name if prop else None) or (f"{prop.city}, {prop.state}" if prop else None) or "the property"
+    prop_parts = [prop.street, prop.city, prop.state, (prop.zip_code or "").strip()] if prop else []
+    property_address = ", ".join(p for p in prop_parts if p) if prop else ""
     if guest_email:
-        send_vacate_12h_notice(guest_email, guest_name, property_name, vacate_by_iso, stay.region_code or "")
+        send_vacate_12h_notice(
+            guest_email,
+            guest_name,
+            property_name,
+            vacate_by_iso,
+            stay.region_code or "",
+            property_address=property_address,
+            stay_start_date=stay.stay_start_date.isoformat() if stay.stay_start_date else "",
+            stay_end_date=stay.stay_end_date.isoformat() if stay.stay_end_date else "",
+            revoked_at=now.strftime("%Y-%m-%d %H:%M UTC"),
+            invite_code=invite_code or "",
+        )
     return {"status": "success", "message": "Stay revoked. Guest must vacate within 12 hours. Email sent."}
 
 
@@ -859,10 +1000,12 @@ def initiate_removal(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
 ):
-    """Initiate formal removal for an overstayed guest: revoke USAT token, send emails to guest and owner, log action."""
+    """Initiate formal removal for an overstayed guest. Owner cannot initiate removal for tenant-invited guest stays (tenant lane)."""
     stay = db.query(Stay).filter(Stay.id == stay_id, Stay.owner_id == current_user.id).first()
     if not stay:
         raise HTTPException(status_code=404, detail="Stay not found")
+    if is_tenant_lane_stay(db, stay):
+        raise HTTPException(status_code=403, detail="Tenant-invited guest stays are private to the tenant. Only the tenant who invited can initiate removal.")
 
     # Only allow initiate-removal for overstayed guests
     today = date.today()
@@ -909,12 +1052,39 @@ def initiate_removal(
     guest_name = (guest.full_name if guest else None) or guest_email or "Guest"
     property_name = (prop.name if prop else None) or (f"{prop.city}, {prop.state}" if prop else None) or "the property"
     owner_email = current_user.email
+    prop_parts = [prop.street, prop.city, prop.state, (prop.zip_code or "").strip()] if prop else []
+    property_address = ", ".join(p for p in prop_parts if p) if prop else ""
+    invite_code = ""
+    if getattr(stay, "invitation_id", None):
+        inv = db.query(Invitation).filter(Invitation.id == stay.invitation_id).first()
+        if inv:
+            invite_code = inv.invitation_code or ""
 
     # Send emails
     if guest_email:
-        send_removal_notice_to_guest(guest_email, guest_name, property_name, stay.region_code or "")
+        send_removal_notice_to_guest(
+            guest_email,
+            guest_name,
+            property_name,
+            stay.region_code or "",
+            property_address=property_address,
+            stay_start_date=stay.stay_start_date.isoformat() if stay.stay_start_date else "",
+            stay_end_date=stay.stay_end_date.isoformat() if stay.stay_end_date else "",
+            revoked_at=now.strftime("%Y-%m-%d %H:%M UTC"),
+            invite_code=invite_code,
+        )
     if owner_email:
-        send_removal_confirmation_to_owner(owner_email, guest_name, property_name, stay.region_code or "")
+        send_removal_confirmation_to_owner(
+            owner_email,
+            guest_name,
+            property_name,
+            stay.region_code or "",
+            property_address=property_address,
+            stay_start_date=stay.stay_start_date.isoformat() if stay.stay_start_date else "",
+            stay_end_date=stay.stay_end_date.isoformat() if stay.stay_end_date else "",
+            revoked_at=now.strftime("%Y-%m-%d %H:%M UTC"),
+            invite_code=invite_code,
+        )
 
     # Create audit log and event ledger (guest authorization change – visible in activity logs)
     removal_message = (
@@ -976,10 +1146,12 @@ def confirm_occupancy_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_or_manager),
 ):
-    """Owner or assigned manager confirms unit status: Unit Vacated, Lease Renewed (requires new_lease_end_date), or Holdover."""
+    """Owner or assigned manager confirms unit status. Cannot confirm for tenant-invited guest stays (tenant lane)."""
     stay = db.query(Stay).filter(Stay.id == stay_id).first()
     if not stay:
         raise HTTPException(status_code=404, detail="Stay not found")
+    if is_tenant_lane_stay(db, stay):
+        raise HTTPException(status_code=403, detail="Tenant-invited guest stays are private to the tenant. Only the tenant can confirm occupancy.")
     if not can_confirm_occupancy(db, current_user, stay):
         raise HTTPException(status_code=403, detail="You do not have permission to confirm occupancy for this stay")
     action = (action or "").strip().lower()
@@ -1004,6 +1176,20 @@ def confirm_occupancy_status(
         prop.occupancy_status = OccupancyStatus.vacant.value
         if getattr(prop, "shield_mode_enabled", 0) == 1:
             prop.shield_mode_enabled = 0  # Unit status update: vacated → Shield off; billing prorated
+            owner_profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+            owner_user = db.query(User).filter(User.id == owner_profile.user_id).first() if owner_profile else None
+            owner_email = (owner_user.email or "").strip() if owner_user else ""
+            manager_emails = [
+                (u.email or "").strip()
+                for a in db.query(PropertyManagerAssignment).filter(PropertyManagerAssignment.property_id == prop.id).all()
+                for u in [db.query(User).filter(User.id == a.user_id).first()]
+                if u and (u.email or "").strip()
+            ]
+            property_name = (prop.name or "").strip() or (f"{prop.city}, {prop.state}".strip(", ") if (prop.city or prop.state) else "Property")
+            try:
+                send_shield_mode_turned_off_notification(owner_email, manager_emails, property_name, turned_off_by="system (unit vacated)")
+            except Exception:
+                pass
         if prop.usat_token_state == USAT_TOKEN_RELEASED:
             prop.usat_token_state = USAT_TOKEN_STAGED
             prop.usat_token_released_at = None
@@ -1050,6 +1236,25 @@ def confirm_occupancy_status(
                 sync_subscription_quantities(db, profile)
         except Exception:
             pass
+        # DMS turned off when stay ends (vacated)
+        if getattr(stay, "dead_mans_switch_enabled", 0) == 1:
+            owner_profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+            owner_user = db.query(User).filter(User.id == owner_profile.user_id).first() if owner_profile else None
+            owner_email = (owner_user.email or "").strip() if owner_user else ""
+            manager_emails = [
+                (u.email or "").strip()
+                for a in db.query(PropertyManagerAssignment).filter(PropertyManagerAssignment.property_id == prop.id).all()
+                for u in [db.query(User).filter(User.id == a.user_id).first()]
+                if u and (u.email or "").strip()
+            ]
+            guest_user = db.query(User).filter(User.id == stay.guest_id).first()
+            guest_profile = db.query(GuestProfile).filter(GuestProfile.user_id == stay.guest_id).first()
+            guest_name = (guest_profile.full_legal_name if guest_profile else None) or (guest_user.full_name if guest_user else None) or (guest_user.email if guest_user else None) or "Guest"
+            property_name = (prop.name or "").strip() or (f"{prop.city}, {prop.state}".strip(", ") if (prop.city or prop.state) else "Property")
+            try:
+                send_dms_turned_off_notification(owner_email, manager_emails, property_name, guest_name, stay.stay_end_date.isoformat(), reason="unit vacated")
+            except Exception:
+                pass
         return {"status": "success", "message": "Unit marked as vacated.", "occupancy_status": "vacant"}
 
     if action == "renewed":
@@ -1094,6 +1299,23 @@ def confirm_occupancy_status(
                 user_agent=ua,
                 meta={"new_lease_end_date": new_end.isoformat(), "new_duration_days": new_duration_days},
             )
+            owner_profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+            owner_user = db.query(User).filter(User.id == owner_profile.user_id).first() if owner_profile else None
+            owner_email = (owner_user.email or "").strip() if owner_user else ""
+            manager_emails = [
+                (u.email or "").strip()
+                for a in db.query(PropertyManagerAssignment).filter(PropertyManagerAssignment.property_id == prop.id).all()
+                for u in [db.query(User).filter(User.id == a.user_id).first()]
+                if u and (u.email or "").strip()
+            ]
+            guest_user = db.query(User).filter(User.id == stay.guest_id).first()
+            guest_profile = db.query(GuestProfile).filter(GuestProfile.user_id == stay.guest_id).first()
+            guest_name = (guest_profile.full_legal_name if guest_profile else None) or (guest_user.full_name if guest_user else None) or (guest_user.email if guest_user else None) or "Guest"
+            property_name = (prop.name or "").strip() or (f"{prop.city}, {prop.state}".strip(", ") if (prop.city or prop.state) else "Property")
+            try:
+                send_dms_turned_off_notification(owner_email, manager_emails, property_name, guest_name, new_end.isoformat(), reason="lease extended beyond 48h")
+            except Exception:
+                pass
         prop.occupancy_status = OccupancyStatus.occupied.value
         db.add(stay)
         db.add(prop)
@@ -1310,6 +1532,20 @@ def guest_check_in(
         prop.occupancy_status = OccupancyStatus.occupied.value
         if getattr(prop, "shield_mode_enabled", 0) == 1:
             prop.shield_mode_enabled = 0
+            owner_profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+            owner_user = db.query(User).filter(User.id == owner_profile.user_id).first() if owner_profile else None
+            owner_email = (owner_user.email or "").strip() if owner_user else ""
+            manager_emails = [
+                (u.email or "").strip()
+                for a in db.query(PropertyManagerAssignment).filter(PropertyManagerAssignment.property_id == prop.id).all()
+                for u in [db.query(User).filter(User.id == a.user_id).first()]
+                if u and (u.email or "").strip()
+            ]
+            property_name = (prop.name or "").strip() or (f"{prop.city}, {prop.state}".strip(", ") if (prop.city or prop.state) else "Property")
+            try:
+                send_shield_mode_turned_off_notification(owner_email, manager_emails, property_name, turned_off_by="system (guest checked in)")
+            except Exception:
+                pass
         db.add(prop)
     unit_id = getattr(stay, "unit_id", None)
     if unit_id:
@@ -1611,11 +1847,26 @@ def guest_end_stay(
         meta=checkout_meta,
     )
     db.commit()
-    # Notify owner and guest about checkout
+    # Notify owner and guest about checkout; DMS turned off when stay ends
     owner = db.query(User).filter(User.id == stay.owner_id).first()
     property_obj = db.query(Property).filter(Property.id == stay.property_id).first()
     guest_name = (current_user.full_name or "").strip() or "Guest"
     property_name = (property_obj.name if property_obj else None) or "your property"
+    if getattr(stay, "dead_mans_switch_enabled", 0) == 1 and property_obj:
+        owner_profile = db.query(OwnerProfile).filter(OwnerProfile.id == property_obj.owner_profile_id).first()
+        owner_user = db.query(User).filter(User.id == owner_profile.user_id).first() if owner_profile else None
+        owner_email = (owner_user.email or "").strip() if owner_user else ""
+        manager_emails = [
+            (u.email or "").strip()
+            for a in db.query(PropertyManagerAssignment).filter(PropertyManagerAssignment.property_id == stay.property_id).all()
+            for u in [db.query(User).filter(User.id == a.user_id).first()]
+            if u and (u.email or "").strip()
+        ]
+        prop_name = (property_obj.name or "").strip() or (f"{property_obj.city}, {property_obj.state}".strip(", ") if property_obj and (property_obj.city or property_obj.state) else "Property")
+        try:
+            send_dms_turned_off_notification(owner_email, manager_emails, prop_name, guest_name, today.isoformat(), reason="guest checked out")
+        except Exception:
+            pass
     # Email to owner
     if owner and owner.email:
         send_owner_guest_checkout_email(
@@ -1806,7 +2057,7 @@ def tenant_cancel_future_assignment(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_tenant),
 ):
-    """Let the tenant cancel their future unit assignment (effective before start date). Sets assignment end_date to day before start and revokes the tenant invitation."""
+    """Let the tenant cancel their future unit assignment (effective before start date). Sets assignment end_date to day before start and marks the tenant invitation as cancelled."""
     today = date.today()
     ta = (
         db.query(TenantAssignment)
@@ -1834,11 +2085,11 @@ def tenant_cancel_future_assignment(
     ta.end_date = original_start - timedelta(days=1)
     db.add(ta)
     db.flush()
-    # Revoke the tenant invitation used for this assignment (tenant_inv already loaded above)
+    # Mark the tenant invitation as cancelled (tenant self-cancel; DocuStay does not revoke tenants)
     invite_code = None
     if tenant_inv:
         invite_code = tenant_inv.invitation_code
-        tenant_inv.token_state = "REVOKED"
+        tenant_inv.token_state = "CANCELLED"
         db.add(tenant_inv)
     unit = db.query(Unit).filter(Unit.id == ta.unit_id).first()
     prop = db.query(Property).filter(Property.id == unit.property_id).first() if unit else None
@@ -1856,7 +2107,7 @@ def tenant_cancel_future_assignment(
     ua = (request.headers.get("user-agent") or "").strip() or None
     log_message = (
         f"Tenant cancelled future assignment (unit_id={ta.unit_id}, original start {original_start.isoformat()})."
-        + (f" Invite ID {invite_code} token_state -> REVOKED." if invite_code else "")
+        + (f" Invite ID {invite_code} token_state -> CANCELLED." if invite_code else "")
         + (f" Occupancy -> vacant." if occ_prev else "")
     )
     create_log(
@@ -2887,6 +3138,7 @@ def owner_logs(
     from sqlalchemy import desc
     q = q.order_by(desc(EventLedger.created_at))
     rows = q.all()
+    rows = filter_tenant_lane_from_ledger_rows(db, rows)
 
     prop_ids = {r.property_id for r in rows if r.property_id}
     props = {p.id: p.name or f"{p.city}, {p.state}" for p in db.query(Property).filter(Property.id.in_(prop_ids)).all()} if prop_ids else {}
@@ -2956,6 +3208,8 @@ def manager_logs(
         term = f"%{search.strip()}%"
         q = q.filter((EventLedger.action_type.ilike(term)) | (cast(EventLedger.meta, String).ilike(term)))
     rows = q.order_by(desc(EventLedger.created_at)).all()
+    rows = filter_tenant_lane_from_ledger_rows(db, rows)
+
     prop_ids = {r.property_id for r in rows if r.property_id}
     props = {p.id: p.name or f"{p.city}, {p.state}" for p in db.query(Property).filter(Property.id.in_(prop_ids)).all()} if prop_ids else {}
 

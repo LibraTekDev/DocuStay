@@ -58,6 +58,7 @@ const ManagerPropertyDetail: React.FC<{
   const [contextMode, setContextModeState] = useState<'business' | 'personal'>(() => getContextMode());
   const [inviteGuestOpen, setInviteGuestOpen] = useState(false);
   const [inviteGuestUnitId, setInviteGuestUnitId] = useState<number | null>(null);
+  const [shieldToggling, setShieldToggling] = useState(false);
 
   const loadData = useCallback(async () => {
     if (!id || isNaN(id)) {
@@ -109,6 +110,7 @@ const ManagerPropertyDetail: React.FC<{
 
   useEffect(() => {
     if (contextMode === 'personal' && activeSection === 'logs') setActiveSection('overview');
+    if (contextMode === 'business' && (activeSection === 'guests' || activeSection === 'invitations')) setActiveSection('overview');
   }, [contextMode, activeSection]);
 
   useEffect(() => {
@@ -129,7 +131,11 @@ const ManagerPropertyDetail: React.FC<{
   const isOccupied = activeStaysForProperty.length > 0;
   const activeStay = activeStaysForProperty[0];
   const upcomingStayForProperty = propertyStays.find((s) => !s.checked_in_at && !s.cancelled_at);
-  const displayStatus = isOccupied ? 'OCCUPIED' : (property?.occupancy_status ?? 'unknown').toUpperCase();
+  // Business mode: use property status only (no guest data). Personal mode: use stays for occupancy.
+  const isOccupiedForDisplay = contextMode === 'business'
+    ? (property?.occupancy_status || '').toLowerCase() === 'occupied'
+    : activeStaysForProperty.length > 0;
+  const displayStatus = isOccupiedForDisplay ? 'OCCUPIED' : (property?.occupancy_status ?? 'unknown').toUpperCase();
   const shieldOn = Boolean(property?.shield_mode_enabled);
   const propertyLogs = logs.filter((l) => l.property_id === id);
   const hasPersonalModeUnitHere = units.some((u) => u.id > 0 && personalModeUnits.includes(u.id));
@@ -147,8 +153,11 @@ const ManagerPropertyDetail: React.FC<{
     flushSync(() => {
       setContextModeState(mode);
       if (mode === 'personal' && activeSection === 'logs') setActiveSection('overview');
+      if (mode === 'business' && (activeSection === 'guests' || activeSection === 'invitations')) setActiveSection('overview');
+      if (mode === 'business') setStays([]);
     });
-  }, [activeSection]);
+    loadData();
+  }, [activeSection, loadData]);
 
   if (loading) {
     return (
@@ -179,7 +188,7 @@ const ManagerPropertyDetail: React.FC<{
 
   const contentTabs: Section[] = contextMode === 'personal'
     ? ['overview', 'guests', 'invitations', 'documentation']
-    : ['overview', 'guests', 'invitations', 'documentation', 'logs'];
+    : ['overview', 'documentation', 'logs'];
   const regionKey = property?.region_code === 'NYC' ? 'NY' : (property?.region_code || 'FL');
   const jurisdictionInfo = JURISDICTION_RULES[regionKey as keyof typeof JURISDICTION_RULES] ?? JURISDICTION_RULES.FL;
 
@@ -194,8 +203,8 @@ const ManagerPropertyDetail: React.FC<{
   const sidebarNavBase: { id: Section | 'properties'; label: string; icon: string }[] = [
     { id: 'properties', label: 'Properties', icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' },
     { id: 'overview', label: 'Overview', icon: 'M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z' },
-    { id: 'guests', label: 'Guests', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' },
-    { id: 'invitations', label: 'Invitations', icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' },
+    ...(contextMode === 'personal' ? [{ id: 'guests' as Section, label: 'Guests', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' }] : []),
+    ...(contextMode === 'personal' ? [{ id: 'invitations' as Section, label: 'Invitations', icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' }] : []),
     { id: 'documentation', label: 'Documentation', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
     ...(contextMode !== 'personal' ? [{ id: 'logs' as Section, label: 'Event ledger', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' }] : []),
     { id: 'settings', label: 'Settings', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z' },
@@ -247,7 +256,6 @@ const ManagerPropertyDetail: React.FC<{
             <header className="flex flex-col sm:flex-row justify-between items-start gap-4 mb-8">
               <div>
                 <h1 className="text-4xl font-extrabold text-slate-800 tracking-tight">Properties</h1>
-                <p className="text-slate-600 mt-1">Properties assigned to you. View details to see units, occupancy, event ledger, and billing for each property.</p>
               </div>
             </header>
             <div className="space-y-6">
@@ -384,7 +392,7 @@ const ManagerPropertyDetail: React.FC<{
             </dl>
           </Card>
 
-          {/* Occupancy status, Shield Mode, Dead Man's Switch – same 3-card layout as owner (manager view is read-only for Shield) */}
+          {/* Occupancy status, Shield Mode, Stay end reminders – same 3-card layout as owner (manager view is read-only for Shield) */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
             <Card className="p-5 md:p-6 border-slate-200 bg-slate-50/80 flex flex-col">
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Occupancy status</h3>
@@ -402,7 +410,7 @@ const ManagerPropertyDetail: React.FC<{
                   }`} />
                   {displayStatus}
                 </span>
-                {isOccupied && activeStay && (
+                {contextMode === 'personal' && isOccupied && activeStay && (
                   <div className="text-sm text-slate-600 space-y-0.5">
                     <p>Current guest: <span className="font-medium text-slate-800">{activeStay.guest_name}</span></p>
                     <p>Lease end: <span className="font-medium text-slate-800">{activeStay.stay_end_date}</span></p>
@@ -417,27 +425,47 @@ const ManagerPropertyDetail: React.FC<{
               <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Shield Mode</h3>
               <div className="flex flex-col gap-3 flex-1 min-h-0">
                 <div className="flex items-center gap-2">
-                  <span className={`inline-flex h-6 w-11 flex-shrink-0 rounded-full border-2 border-transparent ${shieldOn ? 'bg-emerald-600' : 'bg-slate-200'}`}>
-                    <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 translate-y-0.5 ${shieldOn ? 'translate-x-5' : 'translate-x-1'}`} />
-                  </span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={shieldOn}
+                    disabled={shieldToggling || !property}
+                    title={shieldOn ? 'Turn Shield Mode off' : 'Turn Shield Mode on'}
+                    onClick={async () => {
+                      if (!property) return;
+                      setShieldToggling(true);
+                      try {
+                        await dashboardApi.bulkShieldMode([id], !shieldOn);
+                        notify('success', shieldOn ? 'Shield Mode turned off.' : 'Shield Mode turned on.');
+                        loadData();
+                      } catch (e) {
+                        notify('error', (e as Error)?.message ?? 'Failed to update Shield Mode.');
+                      } finally {
+                        setShieldToggling(false);
+                      }
+                    }}
+                    className={`relative inline-flex h-6 w-11 flex-shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 ${shieldOn ? 'cursor-pointer bg-emerald-600' : 'cursor-pointer bg-slate-200 hover:bg-slate-300'} ${shieldToggling ? 'opacity-50' : ''}`}
+                  >
+                    <span className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition-transform ${shieldOn ? 'translate-x-5' : 'translate-x-1'}`} />
+                  </button>
                   <span className="text-sm font-medium text-slate-800">{shieldOn ? 'ON' : 'OFF'}</span>
                 </div>
                 {!shieldOn && (
-                  <span className="text-xs text-slate-500">Turn on anytime. Also turns on automatically on the last day of a guest&apos;s stay and when Dead Man&apos;s Switch runs (48h after stay end).</span>
+                  <span className="text-xs text-slate-500">Turn on anytime. Also turns on automatically on the last day of a guest&apos;s stay and when stay end reminders run (48h after stay end).</span>
                 )}
               </div>
             </Card>
             <Card className="p-5 md:p-6 border-slate-200 flex flex-col">
-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Dead Man&apos;s Switch</h3>
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Stay end reminders</h3>
               <div className="flex flex-col gap-2 flex-1 min-h-0">
-                {isOccupied && activeStay ? (
+                {contextMode === 'personal' && isOccupied && activeStay ? (
                   <>
                     <span className={`text-sm font-medium ${activeStay.dead_mans_switch_enabled ? 'text-amber-700' : 'text-slate-600'}`}>
                       {activeStay.dead_mans_switch_enabled ? 'On' : 'Off'}
                     </span>
                     <p className="text-xs text-slate-500">Alerts owner if the stay ends without checkout or renewal. Shown for current guest stay.</p>
                   </>
-                ) : upcomingStayForProperty ? (
+                ) : contextMode === 'personal' && upcomingStayForProperty ? (
                   <>
                     <span className="text-sm font-medium text-slate-600">Off</span>
                     <p className="text-xs text-slate-500">Activates when the guest checks in. Alerts owner if the stay ends without checkout or renewal.</p>
@@ -541,9 +569,9 @@ const ManagerPropertyDetail: React.FC<{
                 <div key={u.id} className="bg-slate-50 rounded-lg p-3 border border-slate-200 flex flex-col gap-2">
                   <p className="font-medium text-slate-900">Unit {u.unit_label}</p>
                   {statusBadge(u.occupancy_status)}
-                  {u.occupied_by && <p className="text-xs text-slate-600">Occupied by {u.occupied_by}</p>}
-                  {u.invite_id && <p className="text-xs text-slate-500">Invite ID {u.invite_id}</p>}
-                  {(u.occupancy_status || '').toLowerCase() === 'vacant' && u.id > 0 && (
+                  {contextMode === 'personal' && u.occupied_by && <p className="text-xs text-slate-600">Occupied by {u.occupied_by}</p>}
+                  {contextMode === 'personal' && u.invite_id && <p className="text-xs text-slate-500">Invite ID {u.invite_id}</p>}
+                  {(u.occupancy_status || '').toLowerCase() === 'vacant' && u.id > 0 && contextMode === 'personal' && (
                     <Button variant="outline" onClick={() => { setInviteRoleChoiceUnit({ unitId: u.id, unitLabel: u.unit_label }); }}>Invite</Button>
                   )}
                 </div>
@@ -553,7 +581,7 @@ const ManagerPropertyDetail: React.FC<{
         </div>
       )}
 
-      {activeSection === 'guests' && (
+      {activeSection === 'guests' && contextMode === 'personal' && (
         <Card className="p-6 overflow-x-auto">
           <h2 className="font-semibold text-slate-900 mb-2">Guests</h2>
           <p className="text-slate-500 text-sm mb-4">View-only. Guest stays at this property.</p>
@@ -591,7 +619,7 @@ const ManagerPropertyDetail: React.FC<{
         </Card>
       )}
 
-      {activeSection === 'invitations' && (
+      {activeSection === 'invitations' && contextMode === 'personal' && (
         <Card className="p-6">
           <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
             <div>
@@ -621,11 +649,12 @@ const ManagerPropertyDetail: React.FC<{
                     state === 'BURNED' ? 'bg-emerald-100 text-emerald-800' :
                     state === 'EXPIRED' ? 'bg-slate-200 text-slate-700' :
                     state === 'REVOKED' ? 'bg-red-100 text-red-800' : 'bg-slate-100 text-slate-600';
+                  const displayLabel = state === 'BURNED' ? 'Active' : state === 'STAGED' ? 'Pending' : state === 'REVOKED' ? 'Revoked' : state === 'EXPIRED' ? 'Expired' : state === 'CANCELLED' ? 'Cancelled' : state;
                   return (
                     <li key={s.stay_id} className="p-4 rounded-xl border border-slate-200 bg-slate-50/50">
                       <div className="flex flex-wrap items-center gap-2 mb-2">
                         <span className="font-medium text-slate-900">{s.guest_name}</span>
-                        {state && <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${stateBadge}`}>{state}</span>}
+                        {state && <span className={`inline-flex px-2 py-0.5 rounded text-xs font-medium ${stateBadge}`}>{displayLabel}</span>}
                         {s.checked_in_at && !s.checked_out_at && !s.cancelled_at && (
                           <span className="text-xs font-medium text-emerald-700">Active</span>
                         )}
