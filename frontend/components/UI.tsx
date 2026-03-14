@@ -158,7 +158,7 @@ export const ErrorModal: React.FC<{
 }> = ({ open, title = "Error", message, onClose, actionLabel, onAction }) => {
   if (!open) return null;
   return createPortal(
-    <div className="fixed inset-0 z-[60]">
+    <div className="fixed inset-0 z-[200]">
       <div className="absolute inset-0 bg-slate-900/60" onClick={onClose} aria-hidden />
       <div className="absolute inset-0 p-4 flex items-center justify-center">
         <div
@@ -216,7 +216,7 @@ export const SuccessModal: React.FC<{
 }> = ({ open, title = "Success", message, onClose, buttonLabel = "Continue" }) => {
   if (!open) return null;
   return createPortal(
-    <div className="fixed inset-0 z-[60]">
+    <div className="fixed inset-0 z-[200]">
       <div className="absolute inset-0 bg-slate-900/60" onClick={onClose} aria-hidden />
       <div className="absolute inset-0 p-4 flex items-center justify-center">
         <div

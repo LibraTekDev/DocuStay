@@ -18,3 +18,6 @@ class JLEResult(BaseModel):
     applicable_statutes: list[str]
     risk_level: RiskLevel
     message: str | None = None
+    legal_threshold_days: int | None = None
+    platform_renewal_cycle_days: int | None = None
+    jurisdiction_group: str | None = None

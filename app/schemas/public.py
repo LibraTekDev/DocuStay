@@ -138,10 +138,29 @@ class VerifyRequest(BaseModel):
     phone: str | None = None  # Optional; logged only
 
 
+class VerifyAssignedTenant(BaseModel):
+    """Tenant assigned to a unit, shown on verify page."""
+    name: str
+    status: str  # present | away
+
+
+class VerifyGuestAuthorization(BaseModel):
+    """Archived / historical guest authorization record."""
+    authorization_number: int
+    guest_name: str
+    start_date: date | None = None
+    end_date: date | None = None
+    status: str  # ACTIVE | REVOKED | EXPIRED | CANCELLED | COMPLETED | PENDING
+    revoked_at: datetime | None = None
+    expired_at: date | None = None
+    cancelled_at: datetime | None = None
+    checked_out_at: datetime | None = None
+
+
 class VerifyResponse(BaseModel):
     """Response for POST /public/verify. Read-only, live state. Full record returned whenever invitation/stay exists."""
     valid: bool
-    reason: str | None = None  # Short reason when invalid
+    reason: str | None = None
     property_name: str | None = None
     property_address: str | None = None
     occupancy_status: str | None = None
@@ -153,11 +172,19 @@ class VerifyResponse(BaseModel):
     live_slug: str | None = None
     generated_at: datetime | None = None
     audit_entries: list[LiveLogEntry] = []
-    # Status and dates for full record display (pending, active, revoked, expired, cancelled, completed)
     status: str | None = None  # PENDING | ACTIVE | REVOKED | EXPIRED | CANCELLED | COMPLETED
     checked_in_at: datetime | None = None
     checked_out_at: datetime | None = None
     revoked_at: datetime | None = None
     cancelled_at: datetime | None = None
     signed_agreement_available: bool = False
-    signed_agreement_url: str | None = None  # Path for GET (frontend prepends API_URL)
+    signed_agreement_url: str | None = None
+    # New: live property status snapshot
+    assigned_tenants: list[VerifyAssignedTenant] = []
+    resident_status: str | None = None  # present | away
+    poa_url: str | None = None
+    ledger_url: str | None = None
+    verified_at: datetime | None = None
+    verification_source: str = "DocuStay Verification Portal"
+    # Authorization archive (all authorizations for this unit, numbered)
+    authorization_history: list[VerifyGuestAuthorization] = []

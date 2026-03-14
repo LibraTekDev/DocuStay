@@ -1,0 +1,271 @@
+Bug A: Tenant invite accepted through wrong role
+Test 1 — Tenant invite forced to tenant flow
+
+From the owner/business dashboard, create a tenant invite for a property
+Copy the invite link (#invite/INV-XXXX)
+Open it in a new browser / incognito window
+InviteLanding should route you to RegisterFromInvite with the banner showing "Tenant Invitation", "Start date" / "End date" (not Check-in/Check-out)
+Fill out the form — confirm it registers as tenant and navigates to tenant-dashboard
+Test 2 — Guest signup blocks wrong role
+
+Copy a tenant invite code (e.g. INV-XXXX)
+Navigate directly to #guest-signup
+Paste the invite code into the "Invitation link" field
+The role selector should lock to Tenant and show "Role is determined by your invitation and cannot be changed."
+You should not be able to select "Guest"
+Test 3 — Guest login redirects tenant invites
+
+Navigate to #guest-login/INV-XXXX where the code is a tenant invite
+Instead of showing the guest login form, it should redirect to #register-from-invite/INV-XXXX
+Test 4 — Guest invite stays guest-only
+
+Repeat tests 2-3 with a guest invite code
+On #guest-signup, role should lock to "Guest"
+On #guest-login, it should stay on the guest login page (no redirect)
+Test 5 — Backend enforcement (Mailgun path)
+
+If Mailgun is configured, try to register via #guest-signup with a tenant invite code but somehow force role: "guest" (e.g. via browser devtools / API call)
+The backend should return 400: "This invitation is for a tenant, not a guest."
+Bug B: Tenant dashboard language
+Test 6 — Tenant dashboard after accepting invite
+
+Create a tenant invite, accept it through the tenant flow
+After email verification (if applicable), land on the tenant dashboard
+Select your assigned unit in the "My stays" tab
+Verify the detail panel shows:
+"Assigned residence" (not "Current stay")
+"START DATE" / "END DATE" (not CHECK-IN / CHECK-OUT)
+"Residency progress" (not "Stay progress")
+"RESIDENCY PERIOD" section with "Residency timeline", "End date" legend (not "Check-out day")
+"End residency" button (not "Complete checkout")
+No "Check in" buttons on unit cards
+Future unit cards should show "Cancel assignment" (not "Cancel stay")
+Toast messages should say "assignment" / "residency" language
+Test 7 — Guest stays on tenant dashboard still use guest language
+
+If the tenant also has a guest stay at another property, select it
+Confirm it still shows "Check in", "Checkout", "Stay progress", "TIME LEFT ON YOUR STAY" — guest language is correct here since the tenant is acting as a guest
+Bug C: Verify/QR/status record handling
+Test 8 — Active authorization
+
+Create a guest invite, accept it, check in
+Go to #check, enter the invite code (e.g. INV-XXXX)
+Should show green "Active authorization" with:
+Current status: ACTIVE badge
+Authorization start and Authorization end dates
+Became active timestamp
+Signed agreement link
+Print button works
+Test 9 — Revoked record
+
+Revoke the guest's authorization from the owner dashboard
+Go to #check, enter the same invite code
+Should show gray "Verification record" with:
+Current status: REVOKED (red badge)
+Authorization start/end dates still visible
+Revoked at timestamp
+Signed agreement still accessible
+Status history / audit entries
+Test 10 — Expired record
+
+Find or create a guest invite where stay_end_date is in the past
+Verify via #check — should show EXPIRED status with the authorization dates and expired date
+Test 11 — Pending record
+
+Create a guest invite but don't accept it
+Verify via #check — should show PENDING status with authorization start/end dates from the invitation
+Test 12 — Cancelled record
+
+Cancel a guest invite from the owner dashboard
+Verify via #check — should show CANCELLED with cancelled date
+Test 13 — Tenant invite verify
+
+Create and accept a tenant invite
+From the tenant dashboard, click "Verify with QR code" or go to #check with the invite code
+Should show ACTIVE with the tenant's name (not "Guest" or blank), authorization dates, and signed agreement if applicable
+Test 14 — Print
+
+On any verify result, click "Print page"
+The printed output should include all factual record data (status, dates, property address, name, agreement link)
+
+
+
+
+
+Pre-requisite: Reset the database
+Since the schema has new columns and the seed data is completely new (50 states instead of 5), you need to recreate the tables. The easiest way with PostgreSQL:
+
+# Drop and recreate the jurisdiction-related tables so create_all picks up new columns
+# and the seed function re-populates with all 50 states
+psql -U postgres -d docustay_demo -c "DROP TABLE IF EXISTS jurisdiction_zip_mappings, jurisdiction_statutes, jurisdictions, region_rules CASCADE;"
+Then restart the backend server. On startup, create_all will recreate the tables with the new columns, and the seed functions will populate all 50 states.
+
+Test 1 — Verify all 50 states are seeded
+After restarting the server, confirm the data is correct:
+
+psql -U postgres -d docustay_demo -c "SELECT state_code, jurisdiction_group, legal_threshold_days, platform_renewal_cycle_days, reminder_days_before FROM jurisdictions ORDER BY state_code;"
+You should see 50 rows. Spot-check:
+
+CA → group A, legal threshold 14, renewal cycle 13, reminder 3
+NY → group B, legal threshold 30, renewal cycle 29, reminder 5
+TX → group D, legal threshold NULL, renewal cycle 14, reminder 3
+AZ → group E, legal threshold 29, renewal cycle 28, reminder 5
+MT → group E, legal threshold 7, renewal cycle 7, reminder 2
+Test 2 — Property Documentation tab (Owner dashboard)
+Log in as an owner
+Go to any property detail page
+Click the Documentation tab
+Verify the jurisdiction section shows accurate legal threshold — not the old "29 days":
+For a Florida property: "The legal tenancy threshold for Florida is 14 days. The platform creates renewed authorization records every 13 days..."
+For a New York property: "The legal tenancy threshold for New York is 30 days. The platform renews authorizations every 29 days..."
+For a Texas property: "Tenancy in Texas is behavior-based (no fixed day threshold). The platform uses a 14-day renewal cycle..."
+The status categories should say "Within cycle", "Approaching renewal", "Past cycle" — not the old "Within limit" / "Approaching limit" / "Past limit" language
+Test 3 — Manager Documentation tab
+Log in as a manager
+Go to a managed property detail page
+Click the Documentation section
+Same verification as Test 2 — accurate threshold, renewal cycle language, and correct numbers for that state
+Test 4 — Risk Assessment (if visible on stays)
+From the owner dashboard, view a stay that shows the risk assessment component
+The progress bar should say "Renewal Cycle Progress" (not "Limit Progress")
+Below the bar, if the state has a defined legal threshold, it should show a line like: "Legal threshold: 14 days · Platform renewal cycle: 13 days"
+The numbers on the bar should use the renewal cycle days, not the old fake "29" number
+Test 5 — State dropdown (Guest/Tenant signup)
+Go to #guest-signup
+Look at the state dropdown (for permanent address)
+It should now list all 50 US states sorted alphabetically (Alabama through Wyoming)
+Previously it only showed 5 states (CA, FL, NY, TX, WA)
+Test 6 — Invite flow uses correct limits
+Create a guest invite for a property in Florida (Group A state)
+The stay end date should be constrained by the 13-day renewal cycle (not the old 29)
+Create another invite for a property in New York (Group B state)
+That should allow up to 29-day periods
+Test 7 — JLE API response (optional, via DevTools)
+Open browser DevTools → Network tab
+Navigate to a property detail page or create an invite
+Look for any API call that returns jurisdiction/JLE data
+The response should include legal_threshold_days, platform_renewal_cycle_days, and jurisdiction_group as separate fields
+legal_threshold_days should be the real number (14 for FL, 30 for NY)
+platform_renewal_cycle_days should be one less (13 for FL, 29 for NY)
+Test 8 — Verify no "29-day" fake numbers anywhere
+Do a visual scan across the app:
+
+Owner property detail → Documentation tab: should show real threshold
+Manager property detail → Documentation: same
+Risk assessment on any stay: should reference "renewal cycle" not "safe stay days"
+No page should say "the max stay is 29 days" for a 30-day state
+
+
+Pre-requisite: Reset the database
+The new columns need a fresh schema. Run this then restart the backend:
+
+psql -U postgres -d docustay_demo -c "DROP TABLE IF EXISTS jurisdiction_zip_mappings, jurisdiction_statutes, jurisdictions, region_rules, resident_presences CASCADE;"
+Then restart the server so create_all recreates the tables and the seed populates all 50 states.
+
+3. Guest Authorization Lifecycle
+Test: Ledger events appear for each lifecycle stage
+
+Log in as an owner, create a guest invite for a property
+Open the invite link in incognito, register as guest, sign the agreement
+From the guest dashboard, click Check in
+Go back to the owner dashboard → Event ledger tab
+You should see events like:
+"Guest authorization created by [owner name]"
+"Guest authorization active by [guest name]"
+Now revoke the stay from the owner dashboard
+Check the ledger again — you should see "Guest authorization revoked by [owner name]"
+For expired: create a guest invite with an end date in the past (or wait for the daily job to run). The ledger should show "Guest authorization expired"
+4. Tenant Dashboard Structure
+Test: New tabs and property info
+
+Log in as a tenant (accept a tenant invite if you don't have one)
+On the tenant dashboard, the sidebar should now show:
+My stays
+Property info (new)
+Add invitation
+Event ledger
+Documents (new)
+Help Center
+Click Property info — verify it shows:
+Property address
+Unit number
+Assigned tenants (your name with Present/Away badge)
+Resident status (Present or Away)
+Guest authorization activity (if you've invited guests)
+Click Documents — verify it shows:
+Any signed agreements
+Legal documents section mentioning POA access
+5. Away Mode
+Test: Ledger events for away status
+
+From the tenant dashboard, select your unit in My stays
+In the unit detail panel, toggle your presence to Away
+Go to Event ledger tab — you should see "Away status activated by [your name]"
+Toggle back to Present — ledger should show "Away status ended by [your name]"
+Go to Property info tab — your resident status should update accordingly
+6. QR Verification / Verify Page
+Test: Live property status snapshot
+
+Create a guest invite, have it accepted and checked in
+Navigate to #check
+Enter the invitation code (e.g. INV-XXXX)
+The result should now show:
+Property Status banner with "Resident Present" or "Resident Away" badge
+Property information — name and address
+Assigned tenants — each tenant with their own Present/Away status
+Guest authorization — guest name, authorized dates, status badge (ACTIVE)
+Documents section with buttons
+Verification timestamp at the bottom: "Verified: [date time] / Source: DocuStay Verification Portal"
+Test: Resident Away scenario
+
+Have the tenant switch to Away mode
+Re-verify the same token at #check
+Should now show "Resident Away" in the banner
+Assigned tenants should show "Away" badge
+7. Documents on Verify Page
+Test: Document buttons
+
+On any verify result, look for the Documents section
+If a signed agreement exists: View Authorization Agreement button should open the PDF
+If the owner has a signed POA: View Power of Attorney button should open the POA PDF
+View Activity Ledger button should toggle the ledger view (expands below)
+Print Evidence Snapshot button should open the browser print dialog
+When printing, the ledger should always be included in the printout even if it was hidden on screen
+8. Event Ledger — User Attribution
+Test: Every event shows who triggered it
+
+From the owner dashboard, go to Event ledger
+Perform several actions: create invite, revoke a stay, toggle shield mode
+Check the ledger — each message should end with "by [name]"
+Also verify on the verify page (#check): the activity ledger entries should include attribution like "Guest authorization created by Jane Doe (tenant)"
+9. Authorization Archiving
+Test: Numbered historical records
+
+Create multiple guest invites for the same unit, have them go through different states:
+Invite #1: accepted, checked in, checked out (COMPLETED)
+Invite #2: accepted, revoked (REVOKED)
+Invite #3: accepted, checked in (ACTIVE)
+Go to #check, verify any of those invite codes
+The Authorization history section should show:
+Authorization #1 – COMPLETED
+Authorization #2 – REVOKED
+Authorization #3 – ACTIVE
+Each shows guest name, date range, and status badge
+10. Multiple Tenants per Unit
+Test: Multiple tenants visible
+
+From the owner dashboard, create two tenant invites for the same unit (different emails)
+Accept both invites (use two different incognito windows)
+Go to #check and verify the invite code
+The Assigned tenants section should list both tenants with their individual presence status
+If one tenant is Away and one is Present, the banner should show "Resident Present" (since at least one is present)
+If both are Away, the banner should show "Resident Away"
+11. Verification Timestamp
+Test: Timestamp appears on every verification
+
+Go to #check, verify any token
+At the bottom of the result, you should see:
+"Verified: March 15, 2026, 4:02 PM" (actual current time)
+"Source: DocuStay Verification Portal"
+Record ID (the live slug)
+Click Print Evidence Snapshot — the printed output should include this timestamp in the header

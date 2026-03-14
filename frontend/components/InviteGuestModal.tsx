@@ -48,7 +48,7 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
   propertiesLoader,
   unitsLoader,
 }) => {
-  const [formData, setFormData] = useState({ guest_name: '', checkin_date: '', checkout_date: '' });
+  const [formData, setFormData] = useState({ guest_name: '', guest_email: '', checkin_date: '', checkout_date: '' });
   const [inviteLink, setInviteLink] = useState('');
   const [showLinkResult, setShowLinkResult] = useState(false);
   const [properties, setProperties] = useState<Array<{ id: number; name: string | null; street: string; city: string; state: string; zip_code: string | null; owner_occupied?: boolean; is_multi_unit?: boolean }>>([]);
@@ -58,6 +58,7 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
   const [unitsLoading, setUnitsLoading] = useState(false);
   const [propertiesLoading, setPropertiesLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const linkGeneratedRef = useRef(false);
 
   useEffect(() => {
@@ -67,7 +68,8 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
         setShowLinkResult(false);
         setInviteLink('');
       }
-      setFormData({ guest_name: '', checkin_date: '', checkout_date: '' });
+      setFormData({ guest_name: '', guest_email: '', checkin_date: '', checkout_date: '' });
+      setFormError(null);
       setSelectedUnitId(null);
       setUnits([]);
       setPropertiesLoading(false);
@@ -178,35 +180,39 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setFormError(null);
     if (unitId == null && !propertyId) {
-      notify('error', 'Please add a property first, then create an invitation.');
+      setFormError('Please add a property first, then create an invitation.');
       return;
     }
     const prop = properties.find((p) => p.id === propertyId);
     if (unitId == null && propertyId && prop?.is_multi_unit && (!selectedUnitId || selectedUnitId === 0)) {
-      notify('error', 'Please select which unit to invite the guest to.');
+      setFormError('Please select which unit to invite the guest to.');
+      return;
+    }
+    if (!(formData.guest_email || '').trim()) {
+      setFormError('Guest email is required.');
       return;
     }
     if (!formData.checkin_date || !formData.checkout_date) {
-      notify('error', 'Please select both start and end dates for the stay.');
+      setFormError('Please select both start and end dates.');
       return;
     }
     if (new Date(formData.checkout_date) <= new Date(formData.checkin_date)) {
-      notify('error', 'End date must be after start date.');
+      setFormError('End date must be after start date.');
       return;
     }
     const todayStr = getTodayLocal();
     if (formData.checkin_date < todayStr) {
-      notify('error', 'Check-in date cannot be in the past.');
+      setFormError('Authorization start date cannot be in the past.');
       return;
     }
-    // Tenant: guest dates must fall within tenant's stay
     if (tenantStayStartDate && formData.checkin_date < tenantStayStartDate) {
-      notify('error', `Guest check-in cannot be before your stay starts (${tenantStayStartDate}).`);
+      setFormError(`Guest authorization start date cannot be before your stay starts (${tenantStayStartDate}).`);
       return;
     }
     if (tenantStayEndDate && formData.checkout_date > tenantStayEndDate) {
-      notify('error', `Guest check-out cannot be after your stay ends (${tenantStayEndDate}).`);
+      setFormError(`Guest authorization end date cannot be after your stay ends (${tenantStayEndDate}).`);
       return;
     }
     setSubmitting(true);
@@ -214,7 +220,7 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
       const isTenant = (user?.user_type ?? '').toUpperCase() === 'TENANT';
       const effectiveUnitId = unitId ?? (selectedUnitId && selectedUnitId > 0 ? selectedUnitId : undefined);
       if (isTenant && !effectiveUnitId) {
-        notify('error', 'Could not determine your assigned unit for this invitation.');
+        setFormError('Could not determine your assigned unit for this invitation.');
         setSubmitting(false);
         return;
       }
@@ -222,6 +228,7 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
         ? await dashboardApi.tenantCreateInvitation({
             unit_id: effectiveUnitId as number,
             guest_name: formData.guest_name,
+            guest_email: formData.guest_email.trim(),
             checkin_date: formData.checkin_date,
             checkout_date: formData.checkout_date,
           })
@@ -230,6 +237,7 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
             property_id: unitId == null ? (propertyId ?? undefined) : undefined,
             unit_id: effectiveUnitId ?? undefined,
             guest_name: formData.guest_name,
+            guest_email: formData.guest_email.trim(),
             checkin_date: formData.checkin_date,
             checkout_date: formData.checkout_date,
           });
@@ -237,6 +245,7 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
         const base = APP_ORIGIN || (typeof window !== "undefined" ? window.location.origin : "");
         const link = `${base}${window.location.pathname}#invite/${result.data.invitation_code}`;
         linkGeneratedRef.current = true;
+        setFormError(null);
         notify('success', 'Invitation link generated.');
         if (onLinkGenerated) {
           onLinkGenerated(link);
@@ -246,12 +255,10 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
           setShowLinkResult(true);
         }
       } else {
-        onClose();
-        notify('error', result.message || 'We couldn\'t create a valid invitation link. Please try again.');
+        setFormError(result.message || 'We couldn\'t create a valid invitation link. Please try again.');
       }
     } catch (err) {
-      onClose();
-      notify('error', toUserFriendlyInvitationError((err as Error)?.message ?? 'Invitation failed.'));
+      setFormError(toUserFriendlyInvitationError((err as Error)?.message ?? 'Invitation failed.'));
     } finally {
       setSubmitting(false);
     }
@@ -359,8 +366,16 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
               label="Guest name"
               name="guest_name"
               value={formData.guest_name}
-              onChange={(e) => setFormData({ ...formData, guest_name: e.target.value })}
+              onChange={(e) => { setFormError(null); setFormData({ ...formData, guest_name: e.target.value }); }}
               placeholder="Full name of your guest"
+            />
+            <Input
+              label="Guest email"
+              name="guest_email"
+              type="email"
+              value={formData.guest_email}
+              onChange={(e) => { setFormError(null); setFormData({ ...formData, guest_email: e.target.value }); }}
+              placeholder="email@example.com"
               required
             />
 
@@ -372,7 +387,7 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
                 min={tenantStayStartDate ? (tenantStayStartDate > getTodayLocal() ? tenantStayStartDate : getTodayLocal()) : getTodayLocal()}
                 max={tenantStayEndDate ?? undefined}
                 value={formData.checkin_date}
-                onChange={(e) => setFormData({ ...formData, checkin_date: e.target.value })}
+                onChange={(e) => { setFormError(null); setFormData({ ...formData, checkin_date: e.target.value }); }}
                 required
               />
               <Input
@@ -382,7 +397,7 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
                 min={formData.checkin_date || getTodayLocal()}
                 max={tenantStayEndDate ?? undefined}
                 value={formData.checkout_date}
-                onChange={(e) => setFormData({ ...formData, checkout_date: e.target.value })}
+                onChange={(e) => { setFormError(null); setFormData({ ...formData, checkout_date: e.target.value }); }}
                 required
               />
             </div>
@@ -390,6 +405,12 @@ export const InviteGuestModal: React.FC<InviteGuestModalProps> = ({
               <p className="text-xs text-slate-500">
                 Guests can only stay during your stay ({tenantStayStartDate} – {tenantStayEndDate ?? 'ongoing'}).
               </p>
+            )}
+
+            {formError && (
+              <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700 font-medium">
+                {formError}
+              </div>
             )}
 
             <div className="flex gap-3 pt-2">

@@ -273,7 +273,7 @@ const ManagerDashboard: React.FC<{
                   {activeTab === 'properties' ? 'Properties assigned to you.' : activeTab === 'guests' ? 'Guests currently staying at managed properties and their stay details.' : activeTab === 'invitations' ? 'Pending invitations for properties you manage.' : activeTab === 'logs' ? 'Event ledger for managed properties.' : 'Billing visibility for the properties you manage.'}
                 </p>
               </div>
-              {(activeTab === 'properties' || activeTab === 'guests' || activeTab === 'invitations') && properties.length > 0 && contextMode === 'personal' && (
+              {(activeTab === 'properties' || activeTab === 'guests' || activeTab === 'invitations') && properties.length > 0 && (
                 <Button
                   variant="outline"
                   onClick={() => {
@@ -680,7 +680,7 @@ const ManagerDashboard: React.FC<{
                             <div key={u.id} className="bg-white rounded-lg p-3 border border-slate-200 flex flex-col gap-2">
                               <p className="font-medium text-slate-900">Unit {u.unit_label}</p>
                               {statusBadge(u.occupancy_status)}
-                              {(u.occupancy_status || '').toLowerCase() === 'vacant' && u.id > 0 && contextMode === 'personal' && (
+                              {(u.occupancy_status || '').toLowerCase() === 'vacant' && u.id > 0 && (
                                 <Button variant="outline" onClick={() => { setInviteRoleChoiceUnit({ unitId: u.id, unitLabel: u.unit_label }); }}>Invite</Button>
                               )}
                             </div>

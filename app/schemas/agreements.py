@@ -37,11 +37,17 @@ class AgreementSignRequest(BaseModel):
     acks: AgreementAcks
     document_hash: str = Field(..., min_length=16, max_length=128)
     ip_address: str | None = Field(None, max_length=64)
+    """When true, this is a tenant invite; only read and electronic acks required (no guest stay language)."""
+    is_tenant_invite: bool = False
 
     @model_validator(mode="after")
     def validate_acks(self):
-        if not (self.acks.read and self.acks.temporary and self.acks.vacate and self.acks.electronic):
-            raise ValueError("All acknowledgments must be accepted to sign")
+        if self.is_tenant_invite:
+            if not (self.acks.read and self.acks.electronic):
+                raise ValueError("You must acknowledge that you have read the agreement and consent to electronic signature")
+        else:
+            if not (self.acks.read and self.acks.temporary and self.acks.vacate and self.acks.electronic):
+                raise ValueError("All acknowledgments must be accepted to sign")
         return self
 
 

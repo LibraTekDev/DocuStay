@@ -46,10 +46,12 @@ export const InviteTenantModal: React.FC<InviteTenantModalProps> = ({
   const [unitsLoading, setUnitsLoading] = useState(false);
   const [inviteLink, setInviteLink] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) {
       setInviteLink('');
+      setFormError(null);
       setFormData({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
       setPropertyId(properties.length > 0 ? properties[0].id : null);
       setUnitId(null);
@@ -89,18 +91,23 @@ export const InviteTenantModal: React.FC<InviteTenantModalProps> = ({
   };
 
   const handleSubmit = async () => {
+    setFormError(null);
     const effectivePropertyId = preselectedUnit ? 0 : propertyId;
     const effectiveUnitId = preselectedUnit ? preselectedUnit.unitId : (unitId ?? null);
     if (!preselectedUnit && !effectivePropertyId) {
-      notify('error', 'Please select a property.');
+      setFormError('Please select a property.');
       return;
     }
-    if (!formData.tenant_name.trim() || !formData.lease_start_date || !formData.lease_end_date) {
-      notify('error', 'Please fill in tenant name and lease dates.');
+    if (!formData.tenant_name.trim() || !(formData.tenant_email || '').trim() || !formData.lease_start_date || !formData.lease_end_date) {
+      setFormError('Please fill in tenant name, tenant email, and lease dates.');
       return;
     }
     if (formData.lease_start_date < getTodayLocal()) {
-      notify('error', 'Lease start date cannot be in the past.');
+      setFormError('Lease start date cannot be in the past.');
+      return;
+    }
+    if (new Date(formData.lease_end_date) <= new Date(formData.lease_start_date)) {
+      setFormError('Lease end date must be after lease start date.');
       return;
     }
     setSubmitting(true);
@@ -118,13 +125,15 @@ export const InviteTenantModal: React.FC<InviteTenantModalProps> = ({
         const base = typeof window !== 'undefined' ? window.location.origin : '';
         const path = typeof window !== 'undefined' ? window.location.pathname : '';
         setInviteLink(`${base}${path}#invite/${code}`);
+        setFormError(null);
         notify('success', 'Tenant invitation created. Share the invite link with the tenant.');
         setFormData({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
       } else {
-        notify('error', "We couldn't create a valid invitation link. Please try again.");
+        setFormError("We couldn't create a valid invitation link. Please try again.");
       }
     } catch (e) {
-      notify('error', toUserFriendlyInvitationError((e as Error)?.message ?? 'Failed to create invitation.'));
+      const raw = (e as Error)?.message ?? '';
+      setFormError(raw.includes('overlap') ? raw : toUserFriendlyInvitationError(raw || 'Failed to create invitation.'));
     } finally {
       setSubmitting(false);
     }
@@ -219,7 +228,7 @@ export const InviteTenantModal: React.FC<InviteTenantModalProps> = ({
               name="tenant_name"
               label="Tenant name"
               value={formData.tenant_name}
-              onChange={(e) => setFormData({ ...formData, tenant_name: e.target.value })}
+              onChange={(e) => { setFormError(null); setFormData({ ...formData, tenant_name: e.target.value }); }}
               placeholder="Full name"
               required
             />
@@ -228,8 +237,9 @@ export const InviteTenantModal: React.FC<InviteTenantModalProps> = ({
               label="Tenant email"
               type="email"
               value={formData.tenant_email}
-              onChange={(e) => setFormData({ ...formData, tenant_email: e.target.value })}
+              onChange={(e) => { setFormError(null); setFormData({ ...formData, tenant_email: e.target.value }); }}
               placeholder="email@example.com"
+              required
             />
             <Input
               name="lease_start_date"
@@ -237,7 +247,7 @@ export const InviteTenantModal: React.FC<InviteTenantModalProps> = ({
               type="date"
               min={getTodayLocal()}
               value={formData.lease_start_date}
-              onChange={(e) => setFormData({ ...formData, lease_start_date: e.target.value })}
+              onChange={(e) => { setFormError(null); setFormData({ ...formData, lease_start_date: e.target.value }); }}
               required
             />
             <Input
@@ -246,9 +256,14 @@ export const InviteTenantModal: React.FC<InviteTenantModalProps> = ({
               type="date"
               min={formData.lease_start_date || getTodayLocal()}
               value={formData.lease_end_date}
-              onChange={(e) => setFormData({ ...formData, lease_end_date: e.target.value })}
+              onChange={(e) => { setFormError(null); setFormData({ ...formData, lease_end_date: e.target.value }); }}
               required
             />
+            {formError && (
+              <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700 font-medium">
+                {formError}
+              </div>
+            )}
             <div className="flex gap-3 pt-2">
               <Button variant="outline" onClick={onClose} className="flex-1">
                 Cancel

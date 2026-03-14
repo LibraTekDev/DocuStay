@@ -1,19 +1,15 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Button, Input, Modal } from '../../components/UI';
 import { InviteGuestModal } from '../../components/InviteGuestModal';
-import AgreementSignModal, { type PrefilledGuestInfo } from '../../components/AgreementSignModal';
-import PendingSignatureModal from '../../components/PendingSignatureModal';
 import HelpCenter from '../Support/HelpCenter';
 import { UserSession } from '../../types';
-import { dashboardApi, authApi, agreementsApi, invitationsApi, APP_ORIGIN } from '../../services/api';
-import type { OwnerInvitationView, OwnerAuditLogEntry, GuestPendingInviteView, GuestStayView } from '../../services/api';
+import { dashboardApi, authApi, invitationsApi, APP_ORIGIN } from '../../services/api';
+import type { OwnerInvitationView, OwnerAuditLogEntry, GuestPendingInviteView, GuestStayView, TenantSignedDocument } from '../../services/api';
 import { copyToClipboard } from '../../utils/clipboard';
 import { PENDING_INVITE_STORAGE_KEY } from '../Guest/GuestLogin';
 
-type TenantTab = 'stays' | 'invitations' | 'logs' | 'help';
+type TenantTab = 'stays' | 'property' | 'invitations' | 'logs' | 'documents' | 'help';
 
-const DROPBOX_REDIRECT_INVITATION_CODE = 'docustay_dropbox_redirect_invitation_code';
-const DROPBOX_REDIRECT_SIGNATURE_ID = 'docustay_dropbox_redirect_signature_id';
 
 /** One "stay" for tenant = their assigned unit (here/away is per property/unit). */
 type TenantUnitCard = {
@@ -21,6 +17,9 @@ type TenantUnitCard = {
   unit_label: string;
   property_name: string;
   property_address: string;
+  stay_start_date: string | null;
+  stay_end_date: string | null;
+  token_state: string | null;
 };
 
 type StayFilter = 'all' | 'ongoing' | 'future' | 'completed' | 'future_invites';
@@ -83,7 +82,20 @@ const TenantDashboard: React.FC<{
   setLoading?: (l: boolean) => void;
   notify?: (t: 'success' | 'error', m: string) => void;
 }> = ({ user, navigate, setLoading = () => {}, notify = (_t: 'success' | 'error', _m: string) => {} }) => {
-  const [unitData, setUnitData] = useState<{ unit: { id: number; unit_label: string; occupancy_status: string } | null; property: { id: number; name: string; address: string } | null } | null>(null);
+  const [unitsData, setUnitsData] = useState<Array<{
+    unit: { id: number; unit_label: string; occupancy_status: string } | null;
+    property: { id: number; name: string; address: string } | null;
+    invite_id: string | null;
+    token_state: string | null;
+    stay_start_date: string | null;
+    stay_end_date: string | null;
+    live_slug: string | null;
+    region_code: string | null;
+    jurisdiction_state_name: string | null;
+    jurisdiction_statutes: Array<{ citation: string; plain_english?: string | null }>;
+    removal_guest_text: string | null;
+    removal_tenant_text: string | null;
+  }>>([]);
   const [loading, setLoadingState] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedUnit, setSelectedUnit] = useState<TenantUnitCard | null>(null);
@@ -107,22 +119,36 @@ const TenantDashboard: React.FC<{
   const [logsCategory, setLogsCategory] = useState('');
   const [logsSearch, setLogsSearch] = useState('');
   const [logMessageModalEntry, setLogMessageModalEntry] = useState<OwnerAuditLogEntry | null>(null);
-  const [agreementModalCode, setAgreementModalCode] = useState<string | null>(null);
-  const [prefilledGuestInfoForModal, setPrefilledGuestInfoForModal] = useState<PrefilledGuestInfo | null>(null);
   const [addingInvite, setAddingInvite] = useState(false);
   const [showLiveLinkModal, setShowLiveLinkModal] = useState(false);
   const [liveLinkSlug, setLiveLinkSlug] = useState<string | null>(null);
   const [showVerifyQRModal, setShowVerifyQRModal] = useState(false);
   const [verifyQRInviteId, setVerifyQRInviteId] = useState<string | null>(null);
   const [copyToast, setCopyToast] = useState<string | null>(null);
+  const [signedDocs, setSignedDocs] = useState<TenantSignedDocument[]>([]);
+  const [verificationRecord, setVerificationRecord] = useState<{
+    poa_signed_at: string | null;
+    poa_url: string | null;
+    guest_agreements: Array<{
+      signature_id: number;
+      invitation_code: string;
+      document_title: string;
+      guest_name: string;
+      signed_at: string | null;
+      stay_start_date: string | null;
+      stay_end_date: string | null;
+      token_state: string | null;
+    }>;
+    property_status: string | null;
+  } | null>(null);
   const [activeTab, setActiveTab] = useState<TenantTab>('stays');
   const [stayFilter, setStayFilter] = useState<StayFilter>('all');
   const [showCancelStayConfirm, setShowCancelStayConfirm] = useState(false);
+  const [selectedUnitForCancel, setSelectedUnitForCancel] = useState<TenantUnitCard | null>(null);
   const [cancellingStay, setCancellingStay] = useState(false);
   const [showEndStayConfirm, setShowEndStayConfirm] = useState(false);
   const [endingStay, setEndingStay] = useState(false);
   const [pendingInvites, setPendingInvites] = useState<GuestPendingInviteView[]>([]);
-  const [pendingSignatureModalInvite, setPendingSignatureModalInvite] = useState<GuestPendingInviteView | null>(null);
   const [selectedStay, setSelectedStay] = useState<GuestStayView | null>(null);
   const [checkingInStay, setCheckingInStay] = useState<GuestStayView | null>(null);
   const [endStayConfirm, setEndStayConfirm] = useState<GuestStayView | null>(null);
@@ -131,30 +157,31 @@ const TenantDashboard: React.FC<{
   const [cancellingGuestStay, setCancellingGuestStay] = useState(false);
   const [generatedInviteLink, setGeneratedInviteLink] = useState<string | null>(null);
   const acceptFailedRef = useRef<Set<string>>(new Set());
-  // Tracks keys currently being accepted or already accepted this session to prevent double-firing
   const acceptInFlightRef = useRef<Set<string>>(new Set());
+  const acceptedInviteRef = useRef<Set<string>>(new Set());
 
-  const openAgreementModal = useCallback((code: string) => {
-    // Clear any stale Dropbox redirect state so we don't accept an invite from a previous attempt
-    try {
-      sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
-      sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
-    } catch { /* ignore */ }
-    setPrefilledGuestInfoForModal({
-      full_name: (user?.user_name || '').trim(),
-      email: (user?.email || '').trim(),
-      phone: (user as { phone?: string })?.phone ?? '',
-      permanent_address: '',
-    });
-    setAgreementModalCode(code);
-  }, [user]);
+  // Tenant invite confirmation modal state
+  const [confirmInviteModal, setConfirmInviteModal] = useState<{
+    code: string;
+    property_name: string;
+    property_address: string;
+    stay_start_date: string;
+    stay_end_date: string;
+    host_name: string;
+    /** When set (guest invite already signed), pass to acceptInvite to create Stay. */
+    accept_now_signature_id?: number | null;
+  } | null>(null);
+  const [confirmTermsAgreed, setConfirmTermsAgreed] = useState(false);
+  const [confirmPrivacyAgreed, setConfirmPrivacyAgreed] = useState(false);
+  const [confirmAccepting, setConfirmAccepting] = useState(false);
+
 
   const loadData = useCallback(async () => {
     setError(null);
     try {
       const data = await dashboardApi.tenantUnit();
-      setUnitData(data);
-      const [invites, history, pendingData, staysData] = await Promise.all([
+      setUnitsData(data.units || []);
+      const [invites, history, pendingData, staysData, docs, verRecord] = await Promise.all([
         dashboardApi.tenantInvitations().catch(() => []),
         dashboardApi.tenantGuestHistory().then((s) =>
           s.map((x) => ({
@@ -168,12 +195,16 @@ const TenantDashboard: React.FC<{
         ).catch(() => []),
         dashboardApi.guestPendingInvites().catch(() => [] as GuestPendingInviteView[]),
         dashboardApi.guestStays().catch(() => [] as GuestStayView[]),
+        dashboardApi.tenantSignedDocuments().catch(() => [] as TenantSignedDocument[]),
+        dashboardApi.tenantPropertyVerification().catch(() => null),
       ]);
       setInvitations(invites);
       setGuestHistory(history);
       setPendingInvites(pendingData);
       const uniqueStays = [...new Map(staysData.map((s) => [s.stay_id, s])).values()];
       setStays(uniqueStays);
+      setSignedDocs(docs);
+      setVerificationRecord(verRecord);
     } catch (e) {
       const msg = (e as Error)?.message || 'Failed to load dashboard.';
       setError(msg);
@@ -183,146 +214,76 @@ const TenantDashboard: React.FC<{
     }
   }, [notify]);
 
+  const openConfirmInviteModal = useCallback(async (code: string, inviteData?: GuestPendingInviteView) => {
+    if (inviteData) {
+      setConfirmInviteModal({
+        code,
+        property_name: inviteData.property_name || 'Property',
+        property_address: inviteData.unit_label ? `Unit ${inviteData.unit_label}` : '',
+        stay_start_date: inviteData.stay_start_date || '',
+        stay_end_date: inviteData.stay_end_date || '',
+        host_name: inviteData.host_name || '',
+        accept_now_signature_id: inviteData.accept_now_signature_id ?? null,
+      });
+      setConfirmTermsAgreed(false);
+      setConfirmPrivacyAgreed(false);
+      return;
+    }
+    try {
+      const details = await invitationsApi.getDetails(code);
+      if (!details.valid) {
+        const msg = details.expired
+          ? 'This invitation has expired. Please ask your host for a new invitation.'
+          : details.used || details.already_accepted
+            ? 'This invitation has already been accepted.'
+            : 'This invitation link is invalid or could not be found.';
+        notify('error', msg);
+        if (details.already_accepted) loadData();
+        return;
+      }
+      setConfirmInviteModal({
+        code,
+        property_name: details.property_name || 'Property',
+        property_address: details.property_address || '',
+        stay_start_date: details.stay_start_date || '',
+        stay_end_date: details.stay_end_date || '',
+        host_name: details.host_name || '',
+        accept_now_signature_id: null,
+      });
+      setConfirmTermsAgreed(false);
+      setConfirmPrivacyAgreed(false);
+    } catch {
+      notify('error', 'Could not load invitation details. Please try again.');
+    }
+  }, [notify, loadData]);
+
   useEffect(() => {
     loadData();
   }, [loadData]);
 
-  // After redirect back from Dropbox: poll signature until completed, then accept invite so unit/stay appears
+  // When pending invites arrive, show the confirmation modal for the first unprocessed one
   useEffect(() => {
-    const code = sessionStorage.getItem(DROPBOX_REDIRECT_INVITATION_CODE);
-    const sigIdStr = sessionStorage.getItem(DROPBOX_REDIRECT_SIGNATURE_ID);
-    if (!code || !sigIdStr) return;
-    const sigId = parseInt(sigIdStr, 10);
-    if (!Number.isFinite(sigId)) {
-      sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
-      sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
-      return;
+    if (!pendingInvites.length || confirmInviteModal) return;
+    const first = pendingInvites.find((inv) => !acceptFailedRef.current.has(inv.invitation_code) && !acceptInFlightRef.current.has(inv.invitation_code) && !acceptedInviteRef.current.has(inv.invitation_code));
+    if (first) {
+      openConfirmInviteModal(first.invitation_code, first);
     }
-    const POLL_INTERVAL_MS = 3000;
-    const MAX_POLLS = 40;
-    let pollCount = 0;
-    const t = setInterval(() => {
-      pollCount += 1;
-      agreementsApi.getSignatureStatus(sigId).then((res) => {
-        if (res.completed) {
-          clearInterval(t);
-          sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
-          sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
-          authApi.acceptInvite(code, sigId).then(async () => {
-            await loadData();
-            notify('success', 'Your stay is confirmed. It will appear in your current or upcoming stays.');
-          }).catch((e) => {
-            notify('error', (e as Error)?.message ?? 'Could not confirm your stay.');
-            loadData();
-          });
-        }
-      }).catch(() => {});
-
-      if (pollCount >= MAX_POLLS) {
-        clearInterval(t);
-        sessionStorage.removeItem(DROPBOX_REDIRECT_INVITATION_CODE);
-        sessionStorage.removeItem(DROPBOX_REDIRECT_SIGNATURE_ID);
-      }
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(t);
-  }, [loadData, notify]);
-
-  // When backend reports signature complete but not yet accepted, accept so stay appears
-  useEffect(() => {
-    if (!pendingInvites.length) return;
-    const toAccept = pendingInvites.filter(
-      (inv): inv is GuestPendingInviteView & { accept_now_signature_id: number } => {
-        const sid = (inv as GuestPendingInviteView).accept_now_signature_id;
-        if (typeof sid !== 'number') return false;
-        const key = `${inv.invitation_code}:${sid}`;
-        if (acceptFailedRef.current.has(key)) return false;
-        if (acceptInFlightRef.current.has(key)) return false;
-        return true;
-      }
-    );
-    if (toAccept.length === 0) return;
-    // Mark in-flight before firing so re-renders triggered by loadData don't double-fire
-    toAccept.forEach((inv) => acceptInFlightRef.current.add(`${inv.invitation_code}:${inv.accept_now_signature_id}`));
-    Promise.all(
-      toAccept.map((inv) => authApi.acceptInvite(inv.invitation_code, inv.accept_now_signature_id))
-    ).then(() => {
-      loadData();
-      notify('success', 'Your stay is confirmed. It will appear in your dashboard.');
-    }).catch((e) => {
-      toAccept.forEach((inv) => {
-        const key = `${inv.invitation_code}:${inv.accept_now_signature_id}`;
-        acceptInFlightRef.current.delete(key);
-        acceptFailedRef.current.add(key);
-      });
-      notify('error', (e as Error)?.message ?? 'Could not confirm your stay.');
-      loadData();
-    });
-  }, [pendingInvites, loadData, notify]);
-
-  // When user returns to the tab (e.g. after signing in Dropbox in another tab), refetch
-  useEffect(() => {
-    const hasPendingDropbox = () => pendingInvites.some((inv) => inv.needs_dropbox_signature);
-    if (!hasPendingDropbox()) return;
-    const onFocus = () => loadData();
-    window.addEventListener('focus', onFocus);
-    return () => window.removeEventListener('focus', onFocus);
-  }, [pendingInvites, loadData]);
-
-  // Delayed refetch when there are pending Dropbox invites
-  useEffect(() => {
-    const hasPendingDropbox = pendingInvites.some((inv) => inv.needs_dropbox_signature);
-    if (!hasPendingDropbox) return;
-    const t = setTimeout(() => loadData(), 5000);
-    return () => clearTimeout(t);
-  }, [pendingInvites, loadData]);
-
-  // When "Complete signing" modal is open: poll signature status; when completed, accept invite and close modal
-  useEffect(() => {
-    const inv = pendingSignatureModalInvite;
-    const sigId = inv?.pending_signature_id;
-    if (!inv || sigId == null || typeof sigId !== 'number') return;
-    const POLL_MS = 3000;
-    const MAX_POLLS = 80;
-    let count = 0;
-    const t = setInterval(() => {
-      count += 1;
-      agreementsApi.getSignatureStatus(sigId).then((res) => {
-        if (res.completed) {
-          clearInterval(t);
-          authApi.acceptInvite(inv.invitation_code, sigId).then(() => {
-            setPendingSignatureModalInvite(null);
-            loadData();
-            notify('success', 'Your stay is confirmed. It will appear in your dashboard.');
-          }).catch((e) => {
-            notify('error', (e as Error)?.message ?? 'Could not confirm your stay.');
-            loadData();
-          });
-        }
-      }).catch(() => {});
-      if (count >= MAX_POLLS) clearInterval(t);
-    }, POLL_MS);
-    return () => clearInterval(t);
-  }, [pendingSignatureModalInvite, loadData, notify]);
+  }, [pendingInvites, confirmInviteModal, openConfirmInviteModal]);
 
   // Process invite code stored during login/signup (e.g. after email verification).
-  // Flow: 1) validate link  2) if already_accepted → silently refresh (stay was auto-accepted at verification)
-  //        3) if valid → add pending invite then open signing modal
-  //        4) if genuinely invalid → show clear error
+  // Show confirmation modal instead of auto-accepting.
   useEffect(() => {
     const code = sessionStorage.getItem(PENDING_INVITE_STORAGE_KEY);
     if (!code) return;
     sessionStorage.removeItem(PENDING_INVITE_STORAGE_KEY);
 
     invitationsApi.getDetails(code)
-      .then((details) => {
+      .then(async (details) => {
         if (details.already_accepted) {
-          // Invitation was accepted at email-verification time (pre-signed RegisterFromInvite flow).
-          // The stay is already on the dashboard; just refresh silently.
           loadData();
           return;
         }
         if (!details.valid) {
-          // Genuinely invalid or expired invitation.
           loadData();
           const msg = details.expired
             ? 'This invitation has expired. Please ask your host for a new invitation.'
@@ -332,54 +293,33 @@ const TenantDashboard: React.FC<{
           notify('error', msg);
           return;
         }
-        // Valid invitation: add to pending list.
-        // If the signature is already complete (accept_now_signature_id set), skip the modal and accept directly.
-        dashboardApi.guestAddPendingInvite(code)
-          .then(async (pendingView) => {
-            if (pendingView?.accept_now_signature_id) {
-              // Signature already completed — accept the invite immediately without re-opening the modal.
-              try {
-                await authApi.acceptInvite(code, pendingView.accept_now_signature_id);
-                notify('success', 'Invitation accepted.');
-              } catch (acceptErr) {
-                const acceptMsg = (acceptErr as Error)?.message ?? '';
-                if (!acceptMsg.toLowerCase().includes('already')) {
-                  notify('error', acceptMsg || 'Could not accept invitation. Please try again.');
-                }
-              }
-              loadData();
-            } else {
-              loadData();
-              openAgreementModal(code);
-            }
-          })
-          .catch((e) => {
-            loadData();
-            const msg = (e as Error)?.message ?? '';
-            if (msg.toLowerCase().includes('invalid') || msg.toLowerCase().includes('expired')) {
-              notify('error', 'Could not add this invitation. Please try pasting the link on your dashboard.');
-            } else {
-              notify('error', msg || 'Could not add this invitation. Please try again.');
-            }
-          });
+        try {
+          await dashboardApi.guestAddPendingInvite(code);
+        } catch { /* may fail if already added */ }
+        openConfirmInviteModal(code);
+        loadData();
       })
       .catch(() => {
         loadData();
         notify('error', 'Could not verify this invitation link. Please try pasting it on your dashboard.');
       });
-  }, [loadData, notify, openAgreementModal]);
+  }, [loadData, notify, openConfirmInviteModal]);
 
-  // When unit data loads, set selected unit to the only one if we have it
+  // When unit data loads, set selected unit to the first one if we have it
   useEffect(() => {
-    if (unitData?.unit && unitData?.property && !selectedUnit) {
+    const first = unitsData.find((u) => u.unit && u.property);
+    if (first?.unit && first?.property && !selectedUnit) {
       setSelectedUnit({
-        unit_id: unitData.unit.id,
-        unit_label: unitData.unit.unit_label,
-        property_name: unitData.property.name || 'Property',
-        property_address: unitData.property.address || '',
+        unit_id: first.unit.id,
+        unit_label: first.unit.unit_label,
+        property_name: first.property.name || 'Property',
+        property_address: first.property.address || '',
+        stay_start_date: first.stay_start_date,
+        stay_end_date: first.stay_end_date,
+        token_state: first.token_state,
       });
     }
-  }, [unitData, selectedUnit]);
+  }, [unitsData, selectedUnit]);
 
   // Fetch presence for the selected unit (here/away per property)
   useEffect(() => {
@@ -446,67 +386,90 @@ const TenantDashboard: React.FC<{
     doSetPresence('present');
   }, [selectedUnit?.unit_id, presence, doSetPresence]);
 
-  const handleAddInviteLink = useCallback(() => {
+  const handleAddInviteLink = useCallback(async () => {
     const code = parseInviteCode(inviteLinkInput);
     if (!code) {
       notify('error', 'Please enter a valid invitation link or code.');
       return;
     }
     setAddingInvite(true);
-    dashboardApi.guestAddPendingInvite(code)
-      .then(() => {
-        setInviteLinkInput('');
-        loadData();
-        openAgreementModal(code);
-        notify('success', 'Invitation added. Review and sign the agreement below.');
-      })
-      .catch((e) => {
-        notify('error', (e as Error)?.message ?? 'Invalid or expired invitation. Please check the link.');
-      })
-      .finally(() => setAddingInvite(false));
-  }, [inviteLinkInput, loadData, notify, openAgreementModal]);
-
-  const handleAgreementSigned = useCallback(async (signatureId: number) => {
-    if (!agreementModalCode) return;
     try {
-      await authApi.acceptInvite(agreementModalCode, signatureId);
-      notify('success', 'Invitation accepted.');
-      setAgreementModalCode(null);
+      await dashboardApi.guestAddPendingInvite(code);
+      setInviteLinkInput('');
       loadData();
+      openConfirmInviteModal(code);
     } catch (e) {
-      notify('error', (e as Error)?.message ?? 'Could not accept invitation.');
+      notify('error', (e as Error)?.message ?? 'Invalid or expired invitation. Please check the link.');
+    } finally {
+      setAddingInvite(false);
     }
-  }, [agreementModalCode, loadData, notify]);
+  }, [inviteLinkInput, loadData, notify, openConfirmInviteModal]);
+
+  const handleConfirmAcceptInvite = useCallback(async () => {
+    if (!confirmInviteModal) return;
+    if (!confirmTermsAgreed || !confirmPrivacyAgreed) {
+      notify('error', 'Please agree to the Terms of Service and Privacy Policy to continue.');
+      return;
+    }
+    setConfirmAccepting(true);
+    const code = confirmInviteModal.code;
+    const sigId = confirmInviteModal.accept_now_signature_id ?? null;
+    try {
+      await dashboardApi.guestAddPendingInvite(code).catch(() => {});
+      await authApi.acceptInvite(code, sigId);
+      acceptedInviteRef.current.add(code);
+      notify('success', 'Invitation accepted.');
+      setConfirmInviteModal(null);
+      await loadData();
+      setActiveTab('stays');
+      setStayFilter('all');
+    } catch (e) {
+      const msg = (e as Error)?.message ?? '';
+      if (msg.toLowerCase().includes('already')) {
+        acceptedInviteRef.current.add(code);
+        notify('success', 'Invitation already accepted.');
+        setConfirmInviteModal(null);
+        await loadData();
+        setActiveTab('stays');
+        setStayFilter('all');
+      } else {
+        notify('error', msg || 'Could not accept invitation. Please try again.');
+      }
+    } finally {
+      setConfirmAccepting(false);
+    }
+  }, [confirmInviteModal, confirmTermsAgreed, confirmPrivacyAgreed, notify, loadData]);
 
   const handleCancelStay = useCallback(async () => {
     setCancellingStay(true);
     try {
-      await dashboardApi.tenantCancelFutureAssignment();
-      notify('success', 'Future stay cancelled. Your assignment has been removed.');
+      await dashboardApi.tenantCancelFutureAssignment(selectedUnitForCancel?.unit_id);
+      notify('success', 'Future assignment cancelled. Your unit assignment has been removed.');
       setShowCancelStayConfirm(false);
+      setSelectedUnitForCancel(null);
       loadData();
     } catch (e) {
-      notify('error', (e as Error)?.message ?? 'Could not cancel stay.');
+      notify('error', (e as Error)?.message ?? 'Could not cancel assignment.');
     } finally {
       setCancellingStay(false);
     }
-  }, [loadData, notify]);
+  }, [loadData, notify, selectedUnitForCancel?.unit_id]);
 
   const handleEndStay = useCallback(async () => {
     setEndingStay(true);
     try {
-      await dashboardApi.tenantEndAssignment();
-      notify('success', 'Checkout complete. Your stay has ended and status has been updated.');
+      await dashboardApi.tenantEndAssignment(selectedUnit?.unit_id);
+      notify('success', 'Residency ended. Your assignment has been closed and status updated.');
       setShowEndStayConfirm(false);
       setSelectedUnit(null);
       setSelectedStay(null);
       await loadData();
     } catch (e) {
-      notify('error', (e as Error)?.message ?? 'Could not end stay.');
+      notify('error', (e as Error)?.message ?? 'Could not end residency.');
     } finally {
       setEndingStay(false);
     }
-  }, [loadData, notify]);
+  }, [loadData, notify, selectedUnit?.unit_id]);
 
   const handleGuestCheckIn = useCallback(async (s: GuestStayView) => {
     setCheckingInStay(s);
@@ -572,19 +535,23 @@ const TenantDashboard: React.FC<{
     );
   }
 
-  const isEmpty = !unitData?.unit && stays.length === 0 && pendingInvites.length === 0;
-  const unitCards: TenantUnitCard[] = unitData?.unit && unitData?.property
-    ? [{
-        unit_id: unitData.unit.id,
-        unit_label: unitData.unit.unit_label,
-        property_name: unitData.property.name || 'Property',
-        property_address: unitData.property.address || '',
-      }]
-    : [];
+  const isEmpty = unitsData.length === 0 && stays.length === 0 && pendingInvites.length === 0;
+  const unitCards: TenantUnitCard[] = unitsData
+    .filter((u) => u.unit && u.property)
+    .map((u) => ({
+      unit_id: u.unit!.id,
+      unit_label: u.unit!.unit_label,
+      property_name: u.property!.name || 'Property',
+      property_address: u.property!.address || '',
+      stay_start_date: u.stay_start_date,
+      stay_end_date: u.stay_end_date,
+      token_state: u.token_state,
+    }));
   const today = getTodayStr();
-  const startDate = unitData?.stay_start_date ?? null;
-  const endDate = unitData?.stay_end_date ?? null;
-  const isUnitCancelled = unitData?.token_state === 'REVOKED' || unitData?.token_state === 'CANCELLED';
+  const selectedUnitData = selectedUnit ? unitsData.find((u) => u.unit?.id === selectedUnit.unit_id) : null;
+  const startDate = selectedUnitData?.stay_start_date ?? null;
+  const endDate = selectedUnitData?.stay_end_date ?? null;
+  const isUnitCancelled = selectedUnitData?.token_state === 'REVOKED' || selectedUnitData?.token_state === 'CANCELLED';
   const isUnitFuture = !!(startDate && today < startDate && !isUnitCancelled);
   const isUnitCompleted = !!((endDate && today > endDate) || isUnitCancelled);
   const isUnitOngoing = !isUnitFuture && !isUnitCompleted;
@@ -599,15 +566,17 @@ const TenantDashboard: React.FC<{
     (s) => s.checked_out_at != null || s.cancelled_at != null || (s.approved_stay_end_date < today && s.checked_in_at)
   );
 
-  const ongoingCount = unitCards.filter(() => isUnitOngoing).length + ongoingStays.length;
-  const futureCount = unitCards.filter(() => isUnitFuture).length + futureStays.length;
-  const completedCount = unitCards.filter(() => isUnitCompleted).length + completedStays.length;
-  // Exclude pending invites that are already covered by an accepted stay OR an active unit assignment.
-  // A tenant invite creates a TenantAssignment (not a Stay), so we must check unitData dates too.
+  const isCardFuture = (c: TenantUnitCard) => !!(c.stay_start_date && today < c.stay_start_date && c.token_state !== 'REVOKED' && c.token_state !== 'CANCELLED');
+  const isCardCompleted = (c: TenantUnitCard) => !!((c.stay_end_date && today > c.stay_end_date) || c.token_state === 'REVOKED' || c.token_state === 'CANCELLED');
+  const isCardOngoing = (c: TenantUnitCard) => !isCardFuture(c) && !isCardCompleted(c);
+  const ongoingCount = unitCards.filter(isCardOngoing).length + ongoingStays.length;
+  const futureCount = unitCards.filter(isCardFuture).length + futureStays.length;
+  const completedCount = unitCards.filter(isCardCompleted).length + completedStays.length;
+  // Exclude pending invites that are already covered by an accepted stay OR any active unit assignment.
   const futureInvites = pendingInvites.filter((inv) => {
     if (stays.some((s) => datesOverlap(inv.stay_start_date, inv.stay_end_date, s.approved_stay_start_date, s.approved_stay_end_date))) return false;
-    if (unitData?.stay_start_date && unitData?.stay_end_date &&
-        datesOverlap(inv.stay_start_date, inv.stay_end_date, unitData.stay_start_date, unitData.stay_end_date)) return false;
+    if (unitsData.some((u) => u.stay_start_date && u.stay_end_date &&
+        datesOverlap(inv.stay_start_date, inv.stay_end_date, u.stay_start_date, u.stay_end_date))) return false;
     return true;
   });
   const futureInvitesCount = futureInvites.length;
@@ -625,16 +594,16 @@ const TenantDashboard: React.FC<{
     stayFilter === 'all'
       ? unitCards
       : stayFilter === 'ongoing'
-        ? unitCards.filter(() => isUnitOngoing)
+        ? unitCards.filter(isCardOngoing)
         : stayFilter === 'future'
-          ? unitCards.filter(() => isUnitFuture)
+          ? unitCards.filter(isCardFuture)
           : stayFilter === 'completed'
-            ? unitCards.filter(() => isUnitCompleted)
+            ? unitCards.filter(isCardCompleted)
             : [];
   const filterButtons: { id: StayFilter; label: string; count: number }[] = [
-    { id: 'all', label: 'All stays', count: unitCards.length + stays.length },
-    { id: 'ongoing', label: 'Ongoing stay', count: ongoingCount },
-    { id: 'future', label: 'Future stay', count: futureCount },
+    { id: 'all', label: 'All', count: unitCards.length + stays.length },
+    { id: 'ongoing', label: 'Current', count: ongoingCount },
+    { id: 'future', label: 'Future', count: futureCount },
     { id: 'completed', label: 'Completed', count: completedCount },
     { id: 'future_invites', label: 'Future invites', count: futureInvitesCount },
   ];
@@ -651,8 +620,10 @@ const TenantDashboard: React.FC<{
         <nav className="space-y-1">
           {[
             { id: 'stays' as TenantTab, label: 'My stays', icon: 'M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' },
+            { id: 'property' as TenantTab, label: 'Property info', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
             { id: 'invitations' as TenantTab, label: 'Add invitation', icon: 'M12 6v6m0 0v6m0-6h6m-6 0H6' },
             { id: 'logs' as TenantTab, label: 'Event ledger', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' },
+            { id: 'documents' as TenantTab, label: 'Documents', icon: 'M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z' },
             { id: 'help' as TenantTab, label: 'Help Center', icon: 'M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z' },
           ].map((item) => (
             <button
@@ -676,11 +647,307 @@ const TenantDashboard: React.FC<{
             className="w-full max-w-xs rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm"
           >
             <option value="stays">My stays</option>
+            <option value="property">Property info</option>
             <option value="invitations">Add invitation</option>
             <option value="logs">Event ledger</option>
+            <option value="documents">Documents</option>
             <option value="help">Help Center</option>
           </select>
         </div>
+
+        {/* Property info tab */}
+        {activeTab === 'property' && (
+          <div className="space-y-6 w-full">
+            {/* Property address & unit */}
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-slate-900 mb-4">Property information</h2>
+              {selectedUnitData?.property ? (
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Property address</p>
+                    <p className="text-base font-medium text-slate-800">{selectedUnitData.property.name}</p>
+                    <p className="text-sm text-slate-600 mt-0.5">{selectedUnitData.property.address}</p>
+                  </div>
+                  {selectedUnitData.unit && (
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-1">Unit</p>
+                      <p className="text-base font-medium text-slate-800">{selectedUnitData.unit.unit_label}</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-slate-500">No property assigned.</p>
+              )}
+            </div>
+
+            {/* Assigned tenants */}
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-slate-900 mb-4">Assigned tenants</h2>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-100">
+                  <span className="text-sm font-medium text-slate-800">{user.user_name || user.email}</span>
+                  <span className={`text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded ${presence === 'away' ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
+                    {presence === 'away' ? 'Away' : 'Present'}
+                  </span>
+                </div>
+              </div>
+              <p className="text-xs text-slate-400 mt-3">Multiple tenants may be assigned to the same unit. Each tenant has their own account and can trigger actions independently.</p>
+            </div>
+
+            {/* Resident status */}
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-slate-900 mb-4">Resident status</h2>
+              <div className="flex items-center gap-4">
+                <span className={`text-lg font-bold ${presence === 'away' ? 'text-amber-600' : 'text-emerald-600'}`}>
+                  {presence === 'away' ? 'Away' : 'Present'}
+                </span>
+                {awayStartedAt && presence === 'away' && (
+                  <span className="text-sm text-slate-500">since {formatDate(awayStartedAt)}</span>
+                )}
+              </div>
+              {guestsAuthorizedDuringAway && presence === 'away' && (
+                <p className="text-sm text-slate-600 mt-2">Guests authorized during this away period.</p>
+              )}
+            </div>
+
+            {/* Property status */}
+            {verificationRecord?.property_status && (
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-slate-900 mb-4">Property status</h2>
+                <div className="flex items-center gap-3">
+                  <span className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-semibold ${
+                    verificationRecord.property_status === 'occupied' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                    verificationRecord.property_status === 'vacant' ? 'bg-amber-50 text-amber-700 border border-amber-200' :
+                    'bg-slate-100 text-slate-600 border border-slate-200'
+                  }`}>
+                    <span className={`w-2 h-2 rounded-full ${
+                      verificationRecord.property_status === 'occupied' ? 'bg-emerald-500' :
+                      verificationRecord.property_status === 'vacant' ? 'bg-amber-500' : 'bg-slate-400'
+                    }`} />
+                    {verificationRecord.property_status === 'occupied' ? 'Occupied' :
+                     verificationRecord.property_status === 'vacant' ? 'Vacant' : 'Unknown'}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Guest authorization activity (summary) */}
+            {guestHistory.length > 0 && (
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-slate-900 mb-4">Guest authorization activity</h2>
+                <div className="space-y-2">
+                  {guestHistory.slice(0, 10).map((gh, i) => (
+                    <div key={gh.stay_id || i} className="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-100 text-sm">
+                      <div>
+                        <span className="font-medium text-slate-800">{gh.guest_name}</span>
+                        <span className="text-slate-400 ml-2 text-xs">{formatDate(gh.stay_start_date)} – {formatDate(gh.stay_end_date)}</span>
+                      </div>
+                      <span className={`text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded ${gh.checked_out_at ? 'bg-blue-50 text-blue-700 border border-blue-200' : new Date(gh.stay_end_date) < new Date() ? 'bg-slate-100 text-slate-600 border border-slate-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
+                        {gh.checked_out_at ? 'Completed' : new Date(gh.stay_end_date) < new Date() ? 'Expired' : 'Active'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Verification record */}
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-slate-900 mb-2">Verification record</h2>
+              <p className="text-sm text-slate-500 mb-4">Property authorization documents and guest agreements tied to this property.</p>
+
+              <div className="space-y-4">
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-100">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-sm font-semibold text-slate-800">Power of Attorney (POA)</h3>
+                    {verificationRecord?.poa_signed_at ? (
+                      <span className="inline-flex items-center gap-1 text-xs text-emerald-700 font-medium bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        Signed
+                      </span>
+                    ) : (
+                      <span className="text-xs text-slate-400 font-medium">Not available</span>
+                    )}
+                  </div>
+                  {verificationRecord?.poa_signed_at && (
+                    <p className="text-xs text-slate-500 mb-2">Signed on {formatDate(verificationRecord.poa_signed_at)}</p>
+                  )}
+                  {verificationRecord?.poa_url ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="text-sm h-9 px-4 rounded-lg"
+                      onClick={() => window.open(verificationRecord.poa_url!, '_blank', 'noopener,noreferrer')}
+                    >
+                      View Power of Attorney
+                    </Button>
+                  ) : (
+                    <p className="text-xs text-slate-500">The property owner's Power of Attorney document is available through the verification page or your host.</p>
+                  )}
+                </div>
+
+                {(verificationRecord?.guest_agreements ?? []).length > 0 && (
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-800 mb-2">Guest agreements for this property</h3>
+                    <div className="space-y-2">
+                      {(verificationRecord?.guest_agreements ?? []).map((ga) => (
+                        <div key={ga.signature_id} className="p-3 rounded-lg bg-slate-50 border border-slate-100">
+                          <div className="flex items-center justify-between mb-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-medium text-slate-800">{ga.guest_name}</span>
+                              {ga.token_state && (
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${
+                                  ga.token_state === 'BURNED' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                                  ga.token_state === 'REVOKED' ? 'bg-red-50 text-red-700 border border-red-200' :
+                                  ga.token_state === 'EXPIRED' ? 'bg-slate-100 text-slate-600 border border-slate-200' :
+                                  ga.token_state === 'CANCELLED' ? 'bg-amber-50 text-amber-700 border border-amber-200' :
+                                  'bg-slate-100 text-slate-600 border border-slate-200'
+                                }`}>
+                                  {ga.token_state === 'BURNED' ? 'Active' : ga.token_state === 'STAGED' ? 'Pending' : ga.token_state}
+                                </span>
+                              )}
+                            </div>
+                            <span className="inline-flex items-center gap-1 text-xs text-emerald-700 font-medium bg-emerald-50 px-2 py-0.5 rounded-full">
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                              Signed
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-500">
+                            {ga.document_title}
+                            {ga.stay_start_date && ga.stay_end_date && ` · ${formatDate(ga.stay_start_date)} – ${formatDate(ga.stay_end_date)}`}
+                          </p>
+                          {ga.signed_at && (
+                            <p className="text-xs text-slate-400 mt-0.5">Signed on {formatDate(ga.signed_at)}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {(verificationRecord?.guest_agreements ?? []).length === 0 && (
+                  <p className="text-sm text-slate-500">No guest agreements have been signed for this property yet.</p>
+                )}
+              </div>
+            </div>
+
+            {/* Invite a guest */}
+            {selectedUnitData?.unit && (
+              <div className="rounded-2xl border border-[#6B90F2]/30 bg-[#6B90F2]/5 p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-slate-900 mb-2">Invite a guest</h2>
+                <p className="text-sm text-slate-600 mb-4">Generate an invitation link for a guest to sign and stay at this property.</p>
+                <Button variant="primary" className="rounded-lg font-medium" onClick={() => setInviteModalOpen(true)}>
+                  Invite guest to this property
+                </Button>
+              </div>
+            )}
+
+            {/* Guest invitation links */}
+            {invitations.length > 0 && (
+              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                <h2 className="text-lg font-semibold text-slate-900 mb-4">Guest invitation links</h2>
+                <p className="text-sm text-slate-500 mb-3">Active invitation links for guests at this property.</p>
+                <div className="space-y-2">
+                  {invitations.filter((inv) => inv.status === 'pending' || inv.status === 'ongoing').map((inv) => {
+                    const inviteUrl = `${APP_ORIGIN || (typeof window !== 'undefined' ? window.location.origin : '')}${typeof window !== 'undefined' ? window.location.pathname : ''}#invite/${inv.invitation_code}`;
+                    return (
+                      <div key={inv.id} className="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-100 text-sm">
+                        <div>
+                          <span className="font-medium text-slate-800">{inv.guest_name || inv.guest_email || 'Pending guest'}</span>
+                          {inv.stay_start_date && inv.stay_end_date && (
+                            <span className="text-slate-400 ml-2 text-xs">{formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</span>
+                          )}
+                          <span className={`ml-2 text-xs font-medium px-1.5 py-0.5 rounded ${inv.status === 'pending' ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                            {inv.status}
+                          </span>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="rounded-lg text-xs h-8 px-3 shrink-0"
+                          onClick={async (e) => {
+                            e.preventDefault();
+                            const ok = await copyToClipboard(inviteUrl);
+                            if (ok) notify('success', 'Invitation link copied.');
+                            else notify('error', 'Could not copy.');
+                          }}
+                        >
+                          Copy link
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Documents tab */}
+        {activeTab === 'documents' && (
+          <div className="space-y-6 w-full">
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+              <h2 className="text-lg font-semibold text-slate-900 mb-4">Documents</h2>
+              <p className="text-sm text-slate-600 mb-4">Access your signed agreements and legal documents.</p>
+              <div className="space-y-3">
+                {signedDocs.length > 0 ? (
+                  signedDocs.map((doc) => (
+                    <div key={doc.signature_id} className="p-4 rounded-lg bg-slate-50 border border-slate-100">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="font-medium text-slate-800 text-sm">{doc.document_title}</p>
+                        <span className="inline-flex items-center gap-1 text-xs text-emerald-700 font-medium bg-emerald-50 px-2 py-0.5 rounded-full">
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                          Signed
+                        </span>
+                      </div>
+                      {doc.property_name && (
+                        <p className="text-xs text-slate-600 mb-1"><span className="font-medium text-slate-700">Property:</span> {doc.property_name}</p>
+                      )}
+                      {doc.stay_start_date && doc.stay_end_date && (
+                        <p className="text-xs text-slate-600 mb-1">
+                          <span className="font-medium text-slate-700">Duration:</span> {formatDate(doc.stay_start_date)} – {formatDate(doc.stay_end_date)}
+                        </p>
+                      )}
+                      <div className="flex items-center justify-between mt-2">
+                        <p className="text-xs text-slate-500">
+                          Signed by {doc.signed_by}{doc.signed_at ? ` on ${formatDate(doc.signed_at)}` : ''}
+                        </p>
+                        <p className="text-xs text-slate-400">Invite {doc.invitation_code}</p>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-500">No signed documents yet. Documents will appear here after you sign agreements.</p>
+                )}
+                <div className="pt-3 border-t border-slate-100">
+                  <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Legal documents</p>
+                  {verificationRecord?.poa_signed_at ? (
+                    <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-100 mt-2">
+                      <div>
+                        <p className="text-sm font-medium text-slate-800">Power of Attorney (POA)</p>
+                        <p className="text-xs text-slate-500">Signed on {formatDate(verificationRecord.poa_signed_at)}</p>
+                      </div>
+                      {verificationRecord.poa_url ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          className="text-xs h-8 px-3 rounded-lg shrink-0"
+                          onClick={() => window.open(verificationRecord.poa_url!, '_blank', 'noopener,noreferrer')}
+                        >
+                          View POA
+                        </Button>
+                      ) : (
+                        <span className="text-xs text-slate-400">Available on verify page</span>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-slate-600">Power of Attorney and other property documents are available through the property owner or on the verification page.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Invitations tab */}
         {activeTab === 'invitations' && (
@@ -707,26 +974,22 @@ const TenantDashboard: React.FC<{
                   onClick={handleAddInviteLink}
                   disabled={addingInvite || !parseInviteCode(inviteLinkInput)}
                 >
-                  {addingInvite ? 'Adding…' : 'View & sign'}
+                  {addingInvite ? 'Loading…' : 'Review invitation'}
                 </Button>
               </div>
             </div>
-            {pendingInvites.filter((inv) => inv.needs_dropbox_signature).length > 0 && (
-              <div className="rounded-2xl border border-amber-200 bg-amber-50/80 p-6 shadow-sm">
-                <h2 className="text-base font-semibold text-slate-900 mb-1">Pending actions</h2>
-                <p className="text-sm text-slate-600 mb-2">Complete signing in Dropbox to confirm these stays.</p>
-                <p className="text-sm text-slate-500 mb-4">
-                  Already signed? <button type="button" onClick={() => loadData()} className="text-blue-600 hover:text-blue-800 font-medium underline">Check again</button>
-                </p>
+            {pendingInvites.length > 0 && (
+              <div className="rounded-2xl border border-blue-200 bg-blue-50/80 p-6 shadow-sm">
+                <h2 className="text-base font-semibold text-slate-900 mb-1">Pending invitations</h2>
+                <p className="text-sm text-slate-600 mb-4">Accept these invitations to confirm your assignments.</p>
                 <ul className="space-y-3">
-                  {pendingInvites.filter((inv) => inv.needs_dropbox_signature).map((inv) => (
-                    <li key={inv.invitation_code} className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl border border-amber-100 bg-white">
+                  {pendingInvites.map((inv) => (
+                    <li key={inv.invitation_code} className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-xl border border-blue-100 bg-white">
                       <div className="min-w-0 flex-1">
                         <p className="font-semibold text-slate-900">{inv.property_name}{inv.unit_label ? ` — Unit ${inv.unit_label}` : ''}</p>
                         <p className="text-sm text-slate-500 mt-0.5">{formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</p>
-                        <p className="text-xs text-amber-700 font-medium mt-1">Awaiting your signature in Dropbox</p>
                       </div>
-                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => setPendingSignatureModalInvite(inv)}>Complete signing</Button>
+                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => openConfirmInviteModal(inv.invitation_code, inv)}>Review & accept</Button>
                     </li>
                   ))}
                 </ul>
@@ -745,8 +1008,8 @@ const TenantDashboard: React.FC<{
                         <p className="font-semibold text-slate-900">{inv.property_name}{inv.unit_label ? ` — Unit ${inv.unit_label}` : ''}</p>
                         <p className="text-sm text-slate-500 mt-0.5">{formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</p>
                       </div>
-                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => (inv.needs_dropbox_signature ? setPendingSignatureModalInvite(inv) : openAgreementModal(inv.invitation_code))}>
-                        {inv.needs_dropbox_signature ? 'Complete signing' : 'Review & sign'}
+                      <Button variant="primary" className="shrink-0 h-10 rounded-lg font-medium px-4" onClick={() => openConfirmInviteModal(inv.invitation_code, inv)}>
+                        Review & accept
                       </Button>
                     </li>
                   ))}
@@ -858,26 +1121,42 @@ const TenantDashboard: React.FC<{
                       <li key={inv.invitation_code} className="rounded-lg border border-slate-200 bg-slate-50/50 p-3">
                         <p className="font-semibold text-slate-900 text-sm">{inv.property_name}{inv.unit_label ? ` — Unit ${inv.unit_label}` : ''}</p>
                         <p className="text-xs text-slate-500 mt-0.5">{formatDate(inv.stay_start_date)} – {formatDate(inv.stay_end_date)}</p>
-                        <Button variant="primary" className="mt-2 w-full text-xs h-8 py-1.5" onClick={() => (inv.needs_dropbox_signature ? setPendingSignatureModalInvite(inv) : openAgreementModal(inv.invitation_code))}>
-                          {inv.needs_dropbox_signature ? 'Complete signing' : 'Review & sign'}
+                        <Button variant="primary" className="mt-2 w-full text-xs h-8 py-1.5" onClick={() => openConfirmInviteModal(inv.invitation_code, inv)}>
+                          Review & accept
                         </Button>
                       </li>
                     ))}
                   </ul>
                 )
               ) : (filteredUnitCards.length === 0 && filteredStays.length === 0) ? (
-                <p className="text-slate-600 text-sm py-4">
-                  {stayFilter === 'all' ? 'No stays yet.' : stayFilter === 'completed' ? 'No completed stays.' : `No ${stayFilter} stays.`} Add an invitation link in the Add invitation tab.
-                </p>
+                <div className="py-4 space-y-2">
+                  <p className="text-slate-600 text-sm">
+                    {stayFilter === 'all' ? 'No assignments yet.' : stayFilter === 'completed' ? 'No completed assignments.' : `No ${stayFilter} assignments.`} Add an invitation link in the Add invitation tab.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const d = await dashboardApi.tenantDebug();
+                        notify('success', `Backend has ${d.tenant_assignments_count} unit assignment(s) and ${d.stays_count} stay(s) for your account.`);
+                      } catch {
+                        notify('error', 'Could not fetch debug info.');
+                      }
+                    }}
+                    className="text-xs text-slate-500 hover:text-slate-700 underline"
+                  >
+                    Check if my accepted invite is in the database
+                  </button>
+                </div>
               ) : (
             <div className="flex flex-col gap-2">
               {filteredUnitCards.length > 0 && (
                 <>
                   {filteredUnitCards.map((card) => {
                     const td = getTodayStr();
-                    const sd = unitData?.stay_start_date ?? null;
-                    const ed = unitData?.stay_end_date ?? null;
-                    const isCancelled = unitData?.token_state === 'REVOKED' || unitData?.token_state === 'CANCELLED';
+                    const sd = card.stay_start_date ?? null;
+                    const ed = card.stay_end_date ?? null;
+                    const isCancelled = card.token_state === 'REVOKED' || card.token_state === 'CANCELLED';
                     const isFuture = sd && td < sd && !isCancelled;
                     const isUpcoming = sd && ed && td >= sd && td <= ed && !isCancelled;
                     const isOngoing = !isFuture && !isUpcoming && (!ed || td <= ed) && !isCancelled;
@@ -890,6 +1169,7 @@ const TenantDashboard: React.FC<{
                           ? 'bg-[#FFC107] text-white border-0'
                           : 'bg-emerald-50 text-emerald-700 border border-emerald-100';
                     const isSelected = !selectedStay && selected?.unit_id === card.unit_id;
+                    const cardUnitData = unitsData.find((u) => u.unit?.id === card.unit_id);
                     const addressDisplay = card.property_address || `${card.property_name}${card.unit_label ? ` — Unit ${card.unit_label}` : ''}`;
                     return (
                       <div
@@ -909,9 +1189,9 @@ const TenantDashboard: React.FC<{
                             <span className={`px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide ${statusClass}`}>
                               {statusLabel}
                             </span>
-                            {unitData?.region_code && (
+                            {cardUnitData?.region_code && (
                               <span className="px-1.5 py-0.5 rounded text-[10px] font-medium text-slate-600 bg-slate-100 border border-slate-200">
-                                {unitData.region_code}
+                                {cardUnitData.region_code}
                               </span>
                             )}
                           </div>
@@ -920,24 +1200,10 @@ const TenantDashboard: React.FC<{
                             {sd && ed ? `${formatDate(sd)} – ${formatDate(ed)}` : sd ? `${formatDate(sd)} – Ongoing` : 'Your assigned unit'}
                           </p>
                         </button>
-                        {isUpcoming && (
-                          <div className="px-4 pb-4 pt-0">
-                            <button type="button" disabled className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-white bg-[#6F42C1] disabled:opacity-50 transition-colors flex items-center justify-center gap-2" onClick={(e) => e.stopPropagation()}>
-                              Check in
-                            </button>
-                          </div>
-                        )}
                         {isFuture && !isCancelled && (
                           <div className="px-4 pb-4 pt-0">
-                            <button type="button" className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2" onClick={(e) => { e.stopPropagation(); setShowCancelStayConfirm(true); }}>
-                              <span className="text-red-500 font-semibold">X</span> Cancel stay
-                            </button>
-                          </div>
-                        )}
-                        {isOngoing && !isUpcoming && (
-                          <div className="px-4 pb-4 pt-0">
-                            <button type="button" disabled className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-white bg-[#6F42C1] disabled:opacity-50 transition-colors flex items-center justify-center gap-2" onClick={(e) => e.stopPropagation()}>
-                              Check in
+                            <button type="button" className="w-full py-2.5 px-4 rounded-lg text-sm font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2" onClick={(e) => { e.stopPropagation(); setSelectedUnitForCancel(card); setShowCancelStayConfirm(true); }}>
+                              <span className="text-red-500 font-semibold">X</span> Cancel assignment
                             </button>
                           </div>
                         )}
@@ -1250,15 +1516,15 @@ const TenantDashboard: React.FC<{
       })()}
 
       {/* Unit detail when a unit is selected */}
-      {selected && unitData && !selectedStay && stayFilter !== 'future_invites' && (
+      {selected && selectedUnitData && !selectedStay && stayFilter !== 'future_invites' && (
         <div className="flex-1 min-w-0 space-y-6 overflow-y-auto">
           {/* Hero: Current stay card - same layout as reference (badge, address, Invite ID, BURNED, CHECK-IN/OUT, Stay progress, Open live link, Verify QR, Check in) */}
           <section className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
             {(() => {
               const today = getTodayStr();
-              const startDate = unitData.stay_start_date ?? null;
-              const endDate = unitData.stay_end_date ?? null;
-              const isCancelled = unitData.token_state === 'REVOKED' || unitData.token_state === 'CANCELLED';
+              const startDate = selectedUnitData.stay_start_date ?? null;
+              const endDate = selectedUnitData.stay_end_date ?? null;
+              const isCancelled = selectedUnitData.token_state === 'REVOKED' || selectedUnitData.token_state === 'CANCELLED';
               const isUpcoming = startDate && today < startDate && !isCancelled;
               const isOngoing = startDate && endDate && today >= startDate && today <= endDate && !isCancelled;
               const isPast = endDate && today > endDate;
@@ -1285,37 +1551,37 @@ const TenantDashboard: React.FC<{
                       </span>
                       <span className="text-slate-400 shrink-0">·</span>
                       <span className="text-slate-500 text-sm shrink-0 min-w-0 truncate">
-                        {selected.property_address || selected.property_name}{selected.unit_label ? ` — Unit ${selected.unit_label}` : ''}{unitData.region_code ? ` (${unitData.region_code})` : ''}
+                        {selected.property_address || selected.property_name}{selected.unit_label ? ` — Unit ${selected.unit_label}` : ''}{selectedUnitData.region_code ? ` (${selectedUnitData.region_code})` : ''}
                       </span>
-                      {unitData.invite_id && (
+                      {selectedUnitData.invite_id && (
                         <>
                           <span className="text-slate-400 shrink-0">·</span>
                           <span className="text-slate-500 text-sm shrink-0">
                             <span className="text-slate-500">Invite ID: </span>
-                            <span className="text-slate-600 font-medium font-mono">{unitData.invite_id}</span>
+                            <span className="text-slate-600 font-medium font-mono">{selectedUnitData.invite_id}</span>
                           </span>
-                          {unitData.token_state && (
+                          {selectedUnitData.token_state && (
                             <span className={`shrink-0 ml-0.5 px-1.5 py-0.5 rounded text-xs font-medium ${
-                              unitData.token_state === 'BURNED' ? 'bg-emerald-100 text-emerald-800' :
-                              unitData.token_state === 'EXPIRED' ? 'bg-slate-100 text-slate-600' :
-                              (unitData.token_state === 'REVOKED' || unitData.token_state === 'CANCELLED') ? 'bg-slate-100 text-slate-600' : 'bg-slate-100 text-slate-600'
+                              selectedUnitData.token_state === 'BURNED' ? 'bg-emerald-100 text-emerald-800' :
+                              selectedUnitData.token_state === 'EXPIRED' ? 'bg-slate-100 text-slate-600' :
+                              (selectedUnitData.token_state === 'REVOKED' || selectedUnitData.token_state === 'CANCELLED') ? 'bg-slate-100 text-slate-600' : 'bg-slate-100 text-slate-600'
                             }`}>
-                              {unitData.token_state === 'BURNED' ? 'Active' : (unitData.token_state === 'REVOKED' || unitData.token_state === 'CANCELLED') ? 'Cancelled' : unitData.token_state === 'STAGED' ? 'Pending' : unitData.token_state === 'EXPIRED' ? 'Expired' : unitData.token_state}
+                              {selectedUnitData.token_state === 'BURNED' ? 'Active' : (selectedUnitData.token_state === 'REVOKED' || selectedUnitData.token_state === 'CANCELLED') ? 'Cancelled' : selectedUnitData.token_state === 'STAGED' ? 'Pending' : selectedUnitData.token_state === 'EXPIRED' ? 'Expired' : selectedUnitData.token_state}
                             </span>
                           )}
                         </>
                       )}
                     </div>
                     <h1 className="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight">
-                      Current stay
+                      Assigned residence
                     </h1>
                     <div className="flex gap-6 mt-4">
                       <div>
-                        <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">CHECK-IN</p>
+                        <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">START DATE</p>
                         <p className="text-slate-900 font-medium mt-0.5">{startDate ? formatDate(startDate) : '—'}</p>
                       </div>
                       <div>
-                        <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">CHECK-OUT</p>
+                        <p className="text-xs font-medium text-slate-400 uppercase tracking-wide">END DATE</p>
                         <p className="text-slate-900 font-medium mt-0.5">{endDate ? formatDate(endDate) : 'Ongoing'}</p>
                       </div>
                     </div>
@@ -1324,27 +1590,27 @@ const TenantDashboard: React.FC<{
                     <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
                       <div className="h-full bg-slate-800 rounded-full transition-all duration-500" style={{ width: `${progressPercent}%` }} />
                     </div>
-                    <p className="text-xs text-slate-400 font-medium">Stay progress</p>
-                    {unitData.live_slug && (
+                    <p className="text-xs text-slate-400 font-medium">Residency progress</p>
+                    {selectedUnitData.live_slug && (
                       <Button
                         type="button"
                         className="w-full h-11 rounded-lg font-medium text-white border-0 bg-[#007BFF] hover:bg-[#006ee6] focus:ring-[#007BFF]"
-                        onClick={() => { setLiveLinkSlug(unitData.live_slug ?? null); setShowLiveLinkModal(true); }}
+                        onClick={() => { setLiveLinkSlug(selectedUnitData.live_slug ?? null); setShowLiveLinkModal(true); }}
                       >
                         Open live link
                       </Button>
                     )}
-                    {unitData.invite_id && (
+                    {selectedUnitData.invite_id && (
                       <Button
                         type="button"
                         variant="outline"
                         className="w-full h-11 rounded-lg font-medium bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed"
-                        onClick={() => { setVerifyQRInviteId(unitData.invite_id ?? null); setShowVerifyQRModal(true); }}
+                        onClick={() => { setVerifyQRInviteId(selectedUnitData.invite_id ?? null); setShowVerifyQRModal(true); }}
                       >
                         Verify with QR code
                       </Button>
                     )}
-                    {!unitData.invite_id && (
+                    {!selectedUnitData.invite_id && (
                       <Button type="button" variant="outline" disabled className="w-full h-11 rounded-lg font-medium bg-white border border-slate-300 text-slate-400">
                         Verify with QR code
                       </Button>
@@ -1356,20 +1622,11 @@ const TenantDashboard: React.FC<{
                         onClick={() => setShowEndStayConfirm(true)}
                       >
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                        Complete checkout
-                      </button>
-                    )}
-                    {isUpcoming && (
-                      <button
-                        type="button"
-                        disabled
-                        className="w-full h-11 rounded-lg font-medium text-white bg-[#6F42C1] hover:bg-[#5e35a8] disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
-                      >
-                        Check in
+                        End residency
                       </button>
                     )}
                     {isPast && !isCancelled && (
-                      <p className="text-sm text-slate-500 font-medium">Stay ended</p>
+                      <p className="text-sm text-slate-500 font-medium">Residency ended</p>
                     )}
                     {isCancelled && (
                       <p className="text-sm text-slate-600 font-medium">This assignment was cancelled.</p>
@@ -1380,13 +1637,13 @@ const TenantDashboard: React.FC<{
             })()}
           </section>
 
-          {/* Time left on your stay - target: countdown + timeline (when we have dates); else ongoing fallback */}
+          {/* Residency period - countdown + timeline (when we have dates); else ongoing fallback */}
           <section className="rounded-2xl border border-slate-200 bg-white p-6 md:p-8 shadow-sm">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-700 mb-4">TIME LEFT ON YOUR STAY</h3>
-            {unitData?.stay_start_date && unitData?.stay_end_date ? (
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-700 mb-4">RESIDENCY PERIOD</h3>
+            {selectedUnitData?.stay_start_date && selectedUnitData?.stay_end_date ? (
               (() => {
-                const startDate = unitData.stay_start_date;
-                const endDate = unitData.stay_end_date;
+                const startDate = selectedUnitData.stay_start_date;
+                const endDate = selectedUnitData.stay_end_date;
                 const today = getTodayStr();
                 const dLeft = daysLeft(endDate);
                 const allDays = dateRange(startDate, endDate);
@@ -1402,7 +1659,7 @@ const TenantDashboard: React.FC<{
                         </span>
                         <span className="text-xs font-semibold uppercase tracking-wider text-[#6F42C1] mt-1">
                           {dLeft === 0 && endDate >= today
-                            ? 'DAY (CHECK-OUT TODAY)'
+                            ? 'DAY (ENDS TODAY)'
                             : dLeft === 1
                               ? 'DAY LEFT'
                               : 'DAYS LEFT'}
@@ -1411,7 +1668,7 @@ const TenantDashboard: React.FC<{
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-xs font-medium text-slate-500 mb-2">
-                        Stay timeline – {formatDate(startDate)} → {formatDate(endDate)}
+                        Residency timeline – {formatDate(startDate)} → {formatDate(endDate)}
                       </p>
                       <div className="flex flex-wrap gap-1.5">
                         {showDays.map((dayStr) => {
@@ -1422,7 +1679,7 @@ const TenantDashboard: React.FC<{
                           return (
                             <div
                               key={dayStr}
-                              title={`${dayStr}${isToday ? ' (today)' : ''}${isEnd ? ' (check-out)' : ''}`}
+                              title={`${dayStr}${isToday ? ' (today)' : ''}${isEnd ? ' (end date)' : ''}`}
                               className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-medium transition-all ${
                                 isToday
                                   ? 'bg-[#6F42C1] text-white ring-2 ring-[#6F42C1]/30 ring-offset-1'
@@ -1439,14 +1696,14 @@ const TenantDashboard: React.FC<{
                         })}
                       </div>
                       {total > maxShow && (
-                        <p className="text-xs text-slate-400 mt-2">Showing last {maxShow} days of stay</p>
+                        <p className="text-xs text-slate-400 mt-2">Showing last {maxShow} days of residency</p>
                       )}
                       <div className="flex flex-wrap gap-4 mt-3 text-xs text-slate-500">
                         <span className="flex items-center gap-1.5">
                           <span className="w-3 h-3 rounded-full bg-[#6F42C1]" /> Today
                         </span>
                         <span className="flex items-center gap-1.5">
-                          <span className="w-3 h-3 rounded-full bg-[#FFC107]" /> Check-out day
+                          <span className="w-3 h-3 rounded-full bg-[#FFC107]" /> End date
                         </span>
                         <span className="flex items-center gap-1.5">
                           <span className="w-3 h-3 rounded-full bg-slate-200" /> Past
@@ -1464,7 +1721,7 @@ const TenantDashboard: React.FC<{
                     <span className="text-xs font-semibold uppercase tracking-wider text-slate-600 mt-1">Ongoing</span>
                   </div>
                 </div>
-                <p className="text-sm text-slate-500">Your assigned unit has no fixed end date. Stay progress is shown above.</p>
+                <p className="text-sm text-slate-500">Your assigned unit has no fixed end date. Residency progress is shown above.</p>
               </div>
             )}
           </section>
@@ -1550,12 +1807,8 @@ const TenantDashboard: React.FC<{
           )}
 
           <div className="grid lg:grid-cols-3 gap-6">
-            {/* Left: Signed agreement (match Guest) + Presence (here/away) + Invite guest */}
+            {/* Left: Presence (here/away) + Invite guest + Guest history */}
             <div className="lg:col-span-2 space-y-6">
-              <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-                <h3 className="text-base font-semibold text-slate-900 mb-4">Signed agreement</h3>
-                <p className="text-sm text-slate-600 mb-4">Your signed tenant agreement is associated with this unit. Contact your host for a copy if needed.</p>
-              </div>
               {/* Presence - same UI as Guest: here/away for this property (tenant keeps this) */}
               <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                 <h4 className="font-semibold text-slate-900 mb-3">Presence at this property</h4>
@@ -1622,7 +1875,12 @@ const TenantDashboard: React.FC<{
                 <h3 className="text-base font-semibold text-slate-900 mb-3">Your invitations</h3>
                 <p className="text-sm text-slate-500 mb-3">Manage guest invitations you created.</p>
                 {invitations.length === 0 ? (
-                  <p className="text-sm text-slate-500 py-2">No invitations yet. Use &quot;Invite guest to this property&quot; above to create one.</p>
+                  <div className="py-2 space-y-3">
+                    <p className="text-sm text-slate-500">No invitations yet.</p>
+                    <Button variant="primary" className="rounded-lg font-medium" onClick={() => setInviteModalOpen(true)}>
+                      Invite guest to this property
+                    </Button>
+                  </div>
                 ) : (
                   <ul className="space-y-2">
                     {invitations.map((inv) => {
@@ -1684,26 +1942,26 @@ const TenantDashboard: React.FC<{
               {/* Applicable law from Jurisdiction SOT (same as guest dashboard and live property page) */}
               <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                 <p className="text-xs font-semibold uppercase tracking-wider text-slate-700 mb-2">
-                  APPLICABLE LAW {unitData?.jurisdiction_state_name || unitData?.region_code ? `(${(unitData?.jurisdiction_state_name ?? unitData?.region_code ?? 'State').toUpperCase()})` : ''}
+                  APPLICABLE LAW {selectedUnitData?.jurisdiction_state_name || selectedUnitData?.region_code ? `(${(selectedUnitData?.jurisdiction_state_name ?? selectedUnitData?.region_code ?? 'State').toUpperCase()})` : ''}
                 </p>
-                {(unitData?.jurisdiction_statutes && unitData.jurisdiction_statutes.length > 0) ? (
+                {(selectedUnitData?.jurisdiction_statutes && selectedUnitData.jurisdiction_statutes.length > 0) ? (
                   <>
                     <ul className="mt-2 space-y-2">
-                      {unitData.jurisdiction_statutes.map((s, i) => (
+                      {selectedUnitData.jurisdiction_statutes.map((s, i) => (
                         <li key={i} className="text-sm text-slate-700">
                           <span className="font-medium text-slate-900">{s.citation}</span>
                           {s.plain_english && <span className="block text-slate-600 mt-0.5">{s.plain_english}</span>}
                         </li>
                       ))}
                     </ul>
-                    {unitData.removal_guest_text && (
+                    {selectedUnitData.removal_guest_text && (
                       <p className="text-slate-600 text-sm mt-2">
-                        <span className="font-medium text-slate-700">Guest removal: </span>{unitData.removal_guest_text}
+                        <span className="font-medium text-slate-700">Guest removal: </span>{selectedUnitData.removal_guest_text}
                       </p>
                     )}
-                    {unitData.removal_tenant_text && (
+                    {selectedUnitData.removal_tenant_text && (
                       <p className="text-slate-600 text-sm mt-0.5">
-                        <span className="font-medium text-slate-700">Tenant eviction: </span>{unitData.removal_tenant_text}
+                        <span className="font-medium text-slate-700">Tenant eviction: </span>{selectedUnitData.removal_tenant_text}
                       </p>
                     )}
                   </>
@@ -1721,17 +1979,85 @@ const TenantDashboard: React.FC<{
 
       </main>
 
-      {pendingSignatureModalInvite && (
-        <PendingSignatureModal
-          open={!!pendingSignatureModalInvite}
-          onClose={() => setPendingSignatureModalInvite(null)}
-          invitationCode={pendingSignatureModalInvite.invitation_code}
-          propertyName={pendingSignatureModalInvite.property_name}
-          stayStartDate={pendingSignatureModalInvite.stay_start_date}
-          stayEndDate={pendingSignatureModalInvite.stay_end_date}
-          guestEmail={user?.email ?? ''}
-          guestFullName={user?.user_name ?? ''}
-        />
+      {/* Tenant invite confirmation modal */}
+      {confirmInviteModal && (
+        <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+          <div className="max-w-lg w-full rounded-2xl bg-white shadow-xl border border-slate-200 overflow-hidden">
+            <div className="bg-gradient-to-r from-slate-800 to-slate-900 p-6 text-white relative">
+              <div className="absolute top-0 right-0 w-40 h-full bg-[#6B90F2]/20 blur-[40px] rounded-full"></div>
+              <div className="relative z-10">
+                <span className="inline-block px-3 py-1 rounded-full bg-[#6B90F2]/30 text-blue-300 text-xs font-bold uppercase tracking-widest mb-3">Tenant Invitation</span>
+                <h2 className="text-2xl font-bold">Accept this invitation?</h2>
+                {confirmInviteModal.host_name && (
+                  <p className="text-slate-300 text-sm mt-1">Invited by <span className="text-white font-semibold">{confirmInviteModal.host_name}</span></p>
+                )}
+              </div>
+            </div>
+
+            <div className="p-6 space-y-5">
+              <div className="rounded-xl bg-slate-50 border border-slate-200 p-4 space-y-3">
+                <div className="flex items-start gap-3">
+                  <svg className="w-5 h-5 text-[#6B90F2] mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                  <div>
+                    <p className="font-semibold text-slate-900">{confirmInviteModal.property_name}</p>
+                    {confirmInviteModal.property_address && <p className="text-sm text-slate-500">{confirmInviteModal.property_address}</p>}
+                  </div>
+                </div>
+                {(confirmInviteModal.stay_start_date || confirmInviteModal.stay_end_date) && (
+                  <div className="flex items-center gap-3 pl-8">
+                    <svg className="w-4 h-4 text-slate-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                    <p className="text-sm text-slate-600">
+                      {confirmInviteModal.stay_start_date ? formatDate(confirmInviteModal.stay_start_date) : '—'}
+                      {' — '}
+                      {confirmInviteModal.stay_end_date ? formatDate(confirmInviteModal.stay_end_date) : 'Ongoing'}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Agreements</p>
+                <label className="flex items-start gap-3 cursor-pointer p-3 rounded-xl border border-slate-200 bg-white hover:border-slate-300 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={confirmTermsAgreed}
+                    onChange={(e) => setConfirmTermsAgreed(e.target.checked)}
+                    className="w-5 h-5 rounded border-slate-300 text-[#6B90F2] focus:ring-[#6B90F2] shrink-0 mt-0.5"
+                  />
+                  <span className="text-sm text-slate-700">I agree to the <a href="#terms" target="_blank" rel="noopener noreferrer" className="text-[#6B90F2] font-semibold hover:underline">Terms of Service</a>.</span>
+                </label>
+                <label className="flex items-start gap-3 cursor-pointer p-3 rounded-xl border border-slate-200 bg-white hover:border-slate-300 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={confirmPrivacyAgreed}
+                    onChange={(e) => setConfirmPrivacyAgreed(e.target.checked)}
+                    className="w-5 h-5 rounded border-slate-300 text-[#6B90F2] focus:ring-[#6B90F2] shrink-0 mt-0.5"
+                  />
+                  <span className="text-sm text-slate-700">I agree to the <a href="#privacy" target="_blank" rel="noopener noreferrer" className="text-[#6B90F2] font-semibold hover:underline">Privacy Policy</a>.</span>
+                </label>
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  type="button"
+                  className="flex-1 h-11 rounded-lg font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 transition-colors"
+                  onClick={() => setConfirmInviteModal(null)}
+                  disabled={confirmAccepting}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!confirmTermsAgreed || !confirmPrivacyAgreed || confirmAccepting}
+                  className="flex-1 h-11 rounded-lg font-medium text-white bg-[#6B90F2] hover:bg-[#5a7ed9] disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center"
+                  onClick={handleConfirmAcceptInvite}
+                >
+                  {confirmAccepting ? 'Accepting…' : 'Confirm & Accept'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Log message modal */}
@@ -1836,18 +2162,18 @@ const TenantDashboard: React.FC<{
         </div>
       )}
 
-      {/* Checkout confirmation */}
+      {/* End residency confirmation */}
       {showEndStayConfirm && (
         <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
           <div className="max-w-md w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200">
-            <h3 className="text-lg font-semibold text-slate-900 mb-2">Checkout</h3>
+            <h3 className="text-lg font-semibold text-slate-900 mb-2">End residency</h3>
             <p className="text-sm text-slate-600 mb-4">
-              Have you vacated the unit? Completing checkout will end your stay and set your checkout date to today ({unitData?.stay_start_date && unitData?.stay_end_date ? formatDate(getTodayStr()) : getTodayStr()}). This cannot be undone.
+              Have you vacated the unit? Completing this will end your residency and set the end date to today ({selectedUnitData?.stay_start_date && selectedUnitData?.stay_end_date ? formatDate(getTodayStr()) : getTodayStr()}). This cannot be undone.
             </p>
-            {unitData?.property && (
+            {selectedUnitData?.property && (
               <p className="text-sm font-medium text-slate-700 mb-6">
-                {unitData.property.address || unitData.property.name}
-                {unitData?.unit?.unit_label ? ` — Unit ${unitData.unit.unit_label}` : ''}
+                {selectedUnitData.property.address || selectedUnitData.property.name}
+                {selectedUnitData?.unit?.unit_label ? ` — Unit ${selectedUnitData.unit.unit_label}` : ''}
               </p>
             )}
             <div className="flex gap-3">
@@ -1860,29 +2186,29 @@ const TenantDashboard: React.FC<{
                 className="flex-1 h-11 rounded-lg font-medium text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 flex items-center justify-center"
                 onClick={handleEndStay}
               >
-                {endingStay ? 'Completing…' : 'Complete checkout'}
+                {endingStay ? 'Completing…' : 'End residency'}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Cancel stay confirmation */}
+      {/* Cancel assignment confirmation */}
       {showCancelStayConfirm && (
         <div className="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
           <div className="max-w-md w-full rounded-2xl bg-white p-8 shadow-xl border border-slate-200">
-            <h3 className="text-lg font-semibold text-slate-900 mb-2">Cancel stay</h3>
+            <h3 className="text-lg font-semibold text-slate-900 mb-2">Cancel assignment</h3>
             <p className="text-sm text-slate-600 mb-4">
-              Cancel your upcoming stay? This will remove the stay from your dashboard and notify the host. This cannot be undone.
+              Cancel your upcoming assignment? This will remove the unit assignment from your dashboard and notify the host. This cannot be undone.
             </p>
-            {unitData?.property && (
+            {selectedUnitForCancel && (
               <p className="text-sm font-medium text-slate-700 mb-6">
-                {unitData.property.address || unitData.property.name}
-                {unitData?.unit?.unit_label ? ` — Unit ${unitData.unit.unit_label}` : ''}
+                {selectedUnitForCancel.property_address || selectedUnitForCancel.property_name}
+                {selectedUnitForCancel.unit_label ? ` — Unit ${selectedUnitForCancel.unit_label}` : ''}
               </p>
             )}
             <div className="flex gap-3">
-              <Button variant="outline" className="flex-1 h-11 rounded-lg font-medium" onClick={() => setShowCancelStayConfirm(false)} disabled={cancellingStay}>
+              <Button variant="outline" className="flex-1 h-11 rounded-lg font-medium" onClick={() => { setShowCancelStayConfirm(false); setSelectedUnitForCancel(null); }} disabled={cancellingStay}>
                 Keep stay
               </Button>
               <button
@@ -1891,7 +2217,7 @@ const TenantDashboard: React.FC<{
                 className="flex-1 h-11 rounded-lg font-medium text-white bg-slate-700 hover:bg-slate-800 disabled:opacity-60 flex items-center justify-center"
                 onClick={handleCancelStay}
               >
-                {cancellingStay ? 'Cancelling…' : 'Cancel stay'}
+                {cancellingStay ? 'Cancelling…' : 'Cancel assignment'}
               </button>
             </div>
           </div>
@@ -1946,29 +2272,6 @@ const TenantDashboard: React.FC<{
         </div>
       )}
 
-      {agreementModalCode && (
-        <AgreementSignModal
-          open={!!agreementModalCode}
-          invitationCode={agreementModalCode}
-          guestEmail={user?.email ?? ''}
-          guestFullName={user?.user_name ?? ''}
-          onClose={() => {
-            setAgreementModalCode(null);
-            setPrefilledGuestInfoForModal(null);
-            loadData();
-          }}
-          onSigned={handleAgreementSigned}
-          notify={notify}
-          onRedirectToDropbox={(invitationCode, signatureId, signUrl) => {
-            sessionStorage.setItem(DROPBOX_REDIRECT_INVITATION_CODE, invitationCode);
-            sessionStorage.setItem(DROPBOX_REDIRECT_SIGNATURE_ID, String(signatureId));
-            window.location.href = signUrl;
-          }}
-          inviteAcceptMode
-          onContinueToSign={() => {}}
-          prefilledGuestInfo={prefilledGuestInfoForModal}
-        />
-      )}
 
       <InviteGuestModal
         open={inviteModalOpen}
@@ -1978,10 +2281,10 @@ const TenantDashboard: React.FC<{
         notify={notify}
         navigate={navigate}
         onSuccess={() => loadData()}
-        unitId={unitData?.unit?.id ?? null}
+        unitId={selectedUnitData?.unit?.id ?? null}
         propertyOrStayLabel={selected ? `${selected.property_name}${selected.unit_label ? ` — Unit ${selected.unit_label}` : ''}` : null}
-        tenantStayStartDate={unitData?.stay_start_date ?? null}
-        tenantStayEndDate={unitData?.stay_end_date ?? null}
+        tenantStayStartDate={selectedUnitData?.stay_start_date ?? null}
+        tenantStayEndDate={selectedUnitData?.stay_end_date ?? null}
         onLinkGenerated={(link) => {
           setInviteModalOpen(false);
           setGeneratedInviteLink(link);

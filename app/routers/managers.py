@@ -3,7 +3,7 @@ import secrets
 from datetime import date, datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from app.database import get_db
 from app.models.user import User
 from app.models.owner import Property, OwnerProfile, OccupancyStatus
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/managers", tags=["managers"])
 
 class InviteTenantRequest(BaseModel):
     tenant_name: str
-    tenant_email: str
+    tenant_email: str = Field(..., min_length=1, description="Tenant email (required)")
     lease_start_date: str
     lease_end_date: str
 

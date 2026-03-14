@@ -16,12 +16,13 @@ from app.models.guest import GuestProfile
 from app.models.audit_log import AuditLog
 from app.models.event_ledger import EventLedger
 from app.models.invitation import Invitation
+from app.models.tenant_assignment import TenantAssignment
 from app.models.owner_poa_signature import OwnerPOASignature
 from app.models.agreement_signature import AgreementSignature
 from app.services.agreements import agreement_content_to_pdf, fill_guest_signature_in_content, poa_content_with_signature
 from app.services.dropbox_sign import get_signed_pdf
 from app.services.audit_log import create_log, CATEGORY_VERIFY_ATTEMPT, CATEGORY_FAILED_ATTEMPT
-from app.services.event_ledger import create_ledger_event, ledger_event_to_display, ACTION_VERIFY_ATTEMPT_VALID, ACTION_VERIFY_ATTEMPT_FAILED
+from app.services.event_ledger import create_ledger_event, ledger_event_to_display, ACTION_VERIFY_ATTEMPT_VALID, ACTION_VERIFY_ATTEMPT_FAILED, OWNER_BUSINESS_ACTIONS
 from app.schemas.public import (
     LivePropertyPagePayload,
     LivePropertyInfo,
@@ -37,7 +38,10 @@ from app.schemas.public import (
     PortfolioPropertyItem,
     VerifyRequest,
     VerifyResponse,
+    VerifyAssignedTenant,
+    VerifyGuestAuthorization,
 )
+from app.models.resident_presence import ResidentPresence, PresenceStatus
 
 router = APIRouter(prefix="/public", tags=["public"])
 
@@ -137,17 +141,17 @@ def get_live_property_page(slug: str, db: Session = Depends(get_db)):
         # Overstay: end date passed but not checked out
         current_stay = max(current_stays, key=lambda x: (x.stay_end_date, x.id))
 
-    # Logs for this property from event ledger (exclude tenant-lane: owners/managers/public must never see tenant guest activity)
+    # Logs for this property from event ledger (property/management lane only — no guest or tenant-private data)
     log_rows = (
         db.query(EventLedger)
-        .filter(EventLedger.property_id == prop.id)
+        .filter(EventLedger.property_id == prop.id, EventLedger.action_type.in_(OWNER_BUSINESS_ACTIONS))
         .order_by(EventLedger.created_at.desc())
         .limit(100)
     ).all()
     log_rows = filter_tenant_lane_from_ledger_rows(db, log_rows)
     logs = []
     for r in log_rows:
-        cat, title, msg = ledger_event_to_display(r)
+        cat, title, msg = ledger_event_to_display(r, db)
         logs.append(
             LiveLogEntry(
                 category=cat,
@@ -298,11 +302,19 @@ def _build_verify_record(
     token_state = getattr(inv, "token_state", None) or "STAGED"
     today = date.today()
 
-    # Guest name
+    # Guest / tenant name
+    inv_kind = (getattr(inv, "invitation_kind", None) or "").strip().lower()
     if stay:
         guest = db.query(User).filter(User.id == stay.guest_id).first()
         guest_profile = db.query(GuestProfile).filter(GuestProfile.user_id == stay.guest_id).first()
         guest_name = (guest_profile.full_legal_name if guest_profile else None) or (guest.full_name if guest else None) or (guest.email if guest else "Guest")
+    elif inv_kind == "tenant" and inv.unit_id:
+        ta = db.query(TenantAssignment).filter(TenantAssignment.unit_id == inv.unit_id).first()
+        if ta:
+            tenant = db.query(User).filter(User.id == ta.user_id).first()
+            guest_name = (tenant.full_name if tenant else None) or (tenant.email if tenant else inv.guest_name or "Tenant")
+        else:
+            guest_name = inv.guest_name or inv.guest_email or "Tenant"
     else:
         guest_name = inv.guest_name or inv.guest_email or "Guest"
 
@@ -320,6 +332,8 @@ def _build_verify_record(
             status = "CANCELLED"
         elif token_state == "EXPIRED":
             status = "EXPIRED"
+        elif valid:
+            status = "ACTIVE"
         else:
             status = "PENDING"
     elif revoked_at:
@@ -381,6 +395,89 @@ def _build_verify_record(
     if valid and (occ or "").lower() == "unknown":
         occ = "occupied"
 
+    # Assigned tenants and resident status for the unit
+    assigned_tenants: list[VerifyAssignedTenant] = []
+    resident_status: str | None = None
+    unit_id = stay.unit_id if stay else inv.unit_id
+    if unit_id:
+        tas = db.query(TenantAssignment).filter(TenantAssignment.unit_id == unit_id).all()
+        for ta in tas:
+            t_user = db.query(User).filter(User.id == ta.user_id).first()
+            t_name = (t_user.full_name if t_user else None) or (t_user.email if t_user else "Tenant")
+            pres = db.query(ResidentPresence).filter(
+                ResidentPresence.user_id == ta.user_id,
+                ResidentPresence.unit_id == unit_id,
+            ).first()
+            t_status = pres.status.value if pres else "present"
+            assigned_tenants.append(VerifyAssignedTenant(name=t_name, status=t_status))
+        if assigned_tenants:
+            has_away = any(t.status == "away" for t in assigned_tenants)
+            resident_status = "away" if has_away and all(t.status == "away" for t in assigned_tenants) else "present"
+
+    # POA URL
+    poa_url: str | None = None
+    if prop.live_slug and poa_signed_at:
+        poa_url = f"/public/live/{prop.live_slug}/poa"
+
+    # Event ledger entries with user attribution (property/management lane only)
+    ledger_rows = (
+        db.query(EventLedger)
+        .filter(EventLedger.property_id == prop.id, EventLedger.action_type.in_(OWNER_BUSINESS_ACTIONS))
+        .order_by(EventLedger.created_at.desc())
+        .limit(30)
+    ).all()
+    ledger_rows = filter_tenant_lane_from_ledger_rows(db, ledger_rows)
+    ledger_entries = []
+    for lr in ledger_rows:
+        cat, title, msg = ledger_event_to_display(lr, db)
+        ledger_entries.append(LiveLogEntry(
+            category=cat,
+            title=title,
+            message=msg,
+            created_at=lr.created_at if lr.created_at is not None else now,
+        ))
+
+    # Authorization history (all stays for this unit, numbered)
+    authorization_history: list[VerifyGuestAuthorization] = []
+    if unit_id:
+        all_stays = (
+            db.query(Stay)
+            .filter(Stay.unit_id == unit_id)
+            .order_by(Stay.created_at)
+            .all()
+        )
+        for idx, s in enumerate(all_stays, 1):
+            s_revoked = getattr(s, "revoked_at", None)
+            s_cancelled = getattr(s, "cancelled_at", None)
+            s_checkout = getattr(s, "checked_out_at", None)
+            s_checkin = getattr(s, "checked_in_at", None)
+            if s_revoked:
+                s_status = "REVOKED"
+            elif s_cancelled:
+                s_status = "CANCELLED"
+            elif s_checkout:
+                s_status = "COMPLETED"
+            elif s.stay_end_date and s.stay_end_date < today:
+                s_status = "EXPIRED"
+            elif s_checkin:
+                s_status = "ACTIVE"
+            else:
+                s_status = "PENDING"
+            g_user = db.query(User).filter(User.id == s.guest_id).first() if s.guest_id else None
+            g_profile = db.query(GuestProfile).filter(GuestProfile.user_id == s.guest_id).first() if s.guest_id else None
+            g_name = (g_profile.full_legal_name if g_profile else None) or (g_user.full_name if g_user else None) or "Guest"
+            authorization_history.append(VerifyGuestAuthorization(
+                authorization_number=idx,
+                guest_name=g_name,
+                start_date=s.stay_start_date,
+                end_date=s.stay_end_date,
+                status=s_status,
+                revoked_at=s_revoked,
+                expired_at=s.stay_end_date if s_status == "EXPIRED" else None,
+                cancelled_at=s_cancelled,
+                checked_out_at=s_checkout,
+            ))
+
     return VerifyResponse(
         valid=valid,
         reason=reason,
@@ -394,7 +491,7 @@ def _build_verify_record(
         poa_signed_at=poa_signed_at,
         live_slug=prop.live_slug,
         generated_at=now,
-        audit_entries=audit_entries,
+        audit_entries=ledger_entries if ledger_entries else audit_entries,
         status=status,
         checked_in_at=checked_in_at,
         checked_out_at=checked_out_at,
@@ -402,6 +499,11 @@ def _build_verify_record(
         cancelled_at=cancelled_at,
         signed_agreement_available=signed_agreement_available,
         signed_agreement_url=signed_agreement_url,
+        assigned_tenants=assigned_tenants,
+        resident_status=resident_status,
+        poa_url=poa_url,
+        verified_at=now,
+        authorization_history=authorization_history,
     )
 
 
@@ -549,6 +651,34 @@ def post_verify(
         )
 
     if not stay:
+        inv_kind = (getattr(inv, "invitation_kind", None) or "").strip().lower()
+        if inv_kind == "tenant":
+            ta = db.query(TenantAssignment).filter(TenantAssignment.unit_id == inv.unit_id).first()
+            if ta:
+                tenant = db.query(User).filter(User.id == ta.user_id).first()
+                tenant_name = (tenant.full_name if tenant else None) or (tenant.email if tenant else "Tenant")
+                ta_start = getattr(ta, "start_date", None) or inv.stay_start_date
+                ta_end = getattr(ta, "end_date", None) or inv.stay_end_date
+                ta_active = ta_start and ta_end and ta_start <= today and ta_end >= today if ta_start and ta_end else bool(ta_start and ta_start <= today)
+                create_log(
+                    db,
+                    CATEGORY_VERIFY_ATTEMPT,
+                    "Verify attempt – tenant assignment" + (" (active)" if ta_active else ""),
+                    f"Tenant assignment found for unit {inv.unit_id}",
+                    property_id=prop.id,
+                    invitation_id=inv.id,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    meta={"result": "valid" if ta_active else "invalid", "reason": "tenant_assignment"},
+                )
+                db.commit()
+                return _build_verify_record(
+                    db, inv, prop, None,
+                    valid=ta_active,
+                    reason="" if ta_active else "Status: Tenant assignment exists but dates are outside the current period.",
+                    token_id=token_id,
+                    now=now,
+                )
         create_log(
             db,
             CATEGORY_VERIFY_ATTEMPT,

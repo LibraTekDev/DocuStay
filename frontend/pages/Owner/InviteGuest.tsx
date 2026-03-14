@@ -7,7 +7,7 @@ import { copyToClipboard } from '../../utils/clipboard';
 import { toUserFriendlyInvitationError } from '../../utils/invitationErrors';
 
 const InviteGuest: React.FC<{ user: UserSession | null, navigate: (v: string) => void, setLoading: (l: boolean) => void, notify: (t: 'success' | 'error', m: string) => void }> = ({ user, navigate, setLoading, notify }) => {
-  const [formData, setFormData] = useState({ guest_name: '', checkin_date: '', checkout_date: '' });
+  const [formData, setFormData] = useState({ guest_name: '', guest_email: '', checkin_date: '', checkout_date: '' });
   const [inviteLink, setInviteLink] = useState('');
   const [showInviteModal, setShowInviteModal] = useState(false);
 
@@ -31,8 +31,14 @@ const InviteGuest: React.FC<{ user: UserSession | null, navigate: (v: string) =>
     }
     setLoading(true);
     try {
+      if (!(formData.guest_email || '').trim()) {
+        notify('error', 'Guest email is required.');
+        setLoading(false);
+        return;
+      }
       if (!formData.checkin_date || !formData.checkout_date) {
         notify('error', 'Please select both start and end dates for the stay.');
+        setLoading(false);
         return;
       }
       if (new Date(formData.checkout_date) <= new Date(formData.checkin_date)) {
@@ -43,6 +49,7 @@ const InviteGuest: React.FC<{ user: UserSession | null, navigate: (v: string) =>
         owner_id: user?.user_id ?? '',
         property_id: propertyId ?? undefined,
         guest_name: formData.guest_name,
+        guest_email: formData.guest_email.trim(),
         checkin_date: formData.checkin_date,
         checkout_date: formData.checkout_date,
       });
@@ -125,8 +132,9 @@ const InviteGuest: React.FC<{ user: UserSession | null, navigate: (v: string) =>
                   )}
                </div>
 
-              <div>
-                <Input label="Guest name" name="guest_name" value={formData.guest_name} onChange={e => setFormData({ ...formData, guest_name: e.target.value })} placeholder="Full name of your guest" required />
+              <div className="space-y-4">
+                <Input label="Guest name" name="guest_name" value={formData.guest_name} onChange={e => setFormData({ ...formData, guest_name: e.target.value })} placeholder="Full name of your guest" />
+                <Input label="Guest email" name="guest_email" type="email" value={formData.guest_email} onChange={e => setFormData({ ...formData, guest_email: e.target.value })} placeholder="email@example.com" required />
               </div>
 
               <div className="grid md:grid-cols-2 gap-4">

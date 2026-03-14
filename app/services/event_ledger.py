@@ -83,6 +83,11 @@ ACTION_INVITATION_EXPIRED = "InvitationExpired"
 ACTION_INVITATION_CREATED = "InvitationCreated"
 ACTION_OWNERSHIP_PROOF_UPLOADED = "OwnershipProofUploaded"
 ACTION_INVITATION_CREATED_CSV = "InvitationCreatedCSV"
+ACTION_GUEST_AUTHORIZATION_CREATED = "GuestAuthorizationCreated"
+ACTION_GUEST_AUTHORIZATION_ACTIVE = "GuestAuthorizationActive"
+ACTION_GUEST_AUTHORIZATION_REVOKED = "GuestAuthorizationRevoked"
+ACTION_GUEST_AUTHORIZATION_EXPIRED = "GuestAuthorizationExpired"
+ACTION_TENANT_ACCESS_ACTIVATED = "TenantAccessActivated"
 
 
 def _sanitize_json_value(v: Any) -> Any:
@@ -163,11 +168,64 @@ _ACTION_DISPLAY: dict[str, tuple[str, str]] = {
     ACTION_INVITATION_CREATED: ("status_change", "Invitation created"),
     ACTION_OWNERSHIP_PROOF_UPLOADED: ("status_change", "Ownership proof uploaded"),
     ACTION_INVITATION_CREATED_CSV: ("status_change", "Invitation created (CSV occupied)"),
+    ACTION_GUEST_AUTHORIZATION_CREATED: ("status_change", "Guest authorization created"),
+    ACTION_GUEST_AUTHORIZATION_ACTIVE: ("status_change", "Guest authorization active"),
+    ACTION_GUEST_AUTHORIZATION_REVOKED: ("status_change", "Guest authorization revoked"),
+    ACTION_GUEST_AUTHORIZATION_EXPIRED: ("status_change", "Guest authorization expired"),
+    ACTION_TENANT_ACCESS_ACTIVATED: ("status_change", "Tenant access activated"),
 }
 
 _CATEGORY_TO_ACTION_TYPES: dict[str, list[str]] = {
     k: [a for a in _ACTION_DISPLAY if _ACTION_DISPLAY[a][0] == k]
     for k in {"status_change", "guest_signature", "failed_attempt", "shield_mode", "dead_mans_switch", "billing", "verify_attempt", "presence", "tenant_assignment"}
+}
+
+# ---------------------------------------------------------------------------
+# Privacy-lane action type sets
+# ---------------------------------------------------------------------------
+
+OWNER_BUSINESS_ACTIONS: set[str] = {
+    ACTION_PROPERTY_CREATED, ACTION_PROPERTY_UPDATED, ACTION_PROPERTY_DELETED, ACTION_PROPERTY_REACTIVATED,
+    ACTION_MANAGER_ASSIGNED, ACTION_MANAGER_INVITED, ACTION_MANAGER_INVITE_ACCEPTED, ACTION_MANAGER_INVITATION_EXPIRED,
+    ACTION_TENANT_INVITED, ACTION_TENANT_ACCEPTED, ACTION_TENANT_ASSIGNMENT_CANCELLED, ACTION_TENANT_ACCESS_ACTIVATED,
+    ACTION_TENANT_CHECK_OUT,
+    ACTION_SHIELD_MODE_ON, ACTION_SHIELD_MODE_OFF,
+    ACTION_DMS_48H_ALERT, ACTION_DMS_AUTO_EXECUTED, ACTION_DMS_DISABLED,
+    ACTION_BILLING_INVOICE_PAID, ACTION_BILLING_INVOICE_CREATED, ACTION_BILLING_INVOICE_PAYMENT_FAILED,
+    ACTION_OWNERSHIP_PROOF_UPLOADED,
+    ACTION_INVITATION_CREATED_CSV,
+    ACTION_UNIT_VACATED, ACTION_LEASE_RENEWED, ACTION_HOLDOVER_CONFIRMED,
+    ACTION_VACANT_MONITORING_NO_RESPONSE, ACTION_CONFIRMED_STILL_VACANT,
+    ACTION_MASTER_POA_SIGNED,
+    ACTION_OVERSTAY_OCCURRED,
+    ACTION_INVITATION_EXPIRED,
+}
+
+TENANT_ALLOWED_ACTIONS: set[str] = {
+    ACTION_GUEST_INVITE_CREATED, ACTION_GUEST_INVITE_ACCEPTED, ACTION_GUEST_INVITE_REVOKED,
+    ACTION_GUEST_INVITE_CANCELLED,
+    ACTION_GUEST_CHECK_IN, ACTION_GUEST_CHECK_OUT,
+    ACTION_STAY_CANCELLED, ACTION_STAY_REVOKED, ACTION_STAY_CREATED,
+    ACTION_AWAY_ACTIVATED, ACTION_AWAY_ENDED, ACTION_PRESENCE_STATUS_CHANGED,
+    ACTION_TENANT_ACCEPTED, ACTION_TENANT_ASSIGNMENT_CANCELLED, ACTION_TENANT_CHECK_OUT,
+    ACTION_TENANT_ACCESS_ACTIVATED,
+    ACTION_AGREEMENT_SIGNED,
+    ACTION_INVITATION_EXPIRED,
+    ACTION_INVITATION_CREATED,
+    ACTION_GUEST_AUTHORIZATION_CREATED, ACTION_GUEST_AUTHORIZATION_ACTIVE,
+    ACTION_GUEST_AUTHORIZATION_REVOKED, ACTION_GUEST_AUTHORIZATION_EXPIRED,
+    ACTION_USER_LOGGED_IN,
+}
+
+GUEST_ALLOWED_ACTIONS: set[str] = {
+    ACTION_GUEST_INVITE_ACCEPTED, ACTION_GUEST_INVITE_REVOKED, ACTION_GUEST_INVITE_CANCELLED,
+    ACTION_GUEST_CHECK_IN, ACTION_GUEST_CHECK_OUT,
+    ACTION_STAY_CANCELLED, ACTION_STAY_REVOKED, ACTION_STAY_CREATED,
+    ACTION_AGREEMENT_SIGNED,
+    ACTION_GUEST_AUTHORIZATION_CREATED, ACTION_GUEST_AUTHORIZATION_ACTIVE,
+    ACTION_GUEST_AUTHORIZATION_REVOKED, ACTION_GUEST_AUTHORIZATION_EXPIRED,
+    ACTION_OVERSTAY_OCCURRED,
+    ACTION_VERIFY_ATTEMPT_VALID,
 }
 
 
@@ -180,18 +238,34 @@ def get_actor_email(db: Session, actor_user_id: int | None) -> str | None:
     return u.email if u else None
 
 
-def ledger_event_to_display(entry: EventLedger) -> tuple[str, str, str]:
-    """Map ledger entry to (category, title, message) for OwnerAuditLogEntry / LiveLogEntry."""
+def get_actor_display_name(db: Session, actor_user_id: int | None) -> str | None:
+    """Resolve actor full name (or email fallback) from user id for ledger display."""
+    if not actor_user_id:
+        return None
+    from app.models.user import User
+    u = db.query(User).filter(User.id == actor_user_id).first()
+    if not u:
+        return None
+    return (u.full_name or "").strip() or u.email
+
+
+def ledger_event_to_display(entry: EventLedger, db: Session | None = None) -> tuple[str, str, str]:
+    """Map ledger entry to (category, title, message) for OwnerAuditLogEntry / LiveLogEntry.
+    When db is provided, appends ' by <actor name>' to the message for user attribution."""
     cat, title = _ACTION_DISPLAY.get(
         entry.action_type or "",
         ("status_change", entry.action_type or "—"),
     )
-    # Message: use meta if available, else generic from title
     meta = entry.meta or {}
     if isinstance(meta, dict) and meta.get("message"):
         msg = str(meta["message"])
     else:
         msg = title
+    # User attribution
+    if db and entry.actor_user_id:
+        actor_name = get_actor_display_name(db, entry.actor_user_id)
+        if actor_name and f"by {actor_name}" not in msg:
+            msg = f"{msg} by {actor_name}"
     return (cat, title, msg)
 
 

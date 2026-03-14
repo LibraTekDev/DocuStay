@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Request, Body
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy import or_, func
 from pydantic import BaseModel, Field
 from app.database import get_db
 from app.models.user import User, UserRole
@@ -28,6 +28,9 @@ from app.services.event_ledger import (
     ledger_event_to_display,
     get_actor_email,
     _CATEGORY_TO_ACTION_TYPES,
+    OWNER_BUSINESS_ACTIONS,
+    TENANT_ALLOWED_ACTIONS,
+    GUEST_ALLOWED_ACTIONS,
     ACTION_PROPERTY_DELETED,
     ACTION_BILLING_INVOICE_PAID,
     ACTION_BILLING_INVOICE_CREATED,
@@ -64,6 +67,7 @@ from app.models.unit import Unit
 from app.models.tenant_assignment import TenantAssignment
 from app.models.property_manager_assignment import PropertyManagerAssignment
 from app.models.resident_presence import ResidentPresence, PresenceStatus
+from app.models.owner_poa_signature import OwnerPOASignature
 from app.models.stay_presence import StayPresence, PresenceAwayPeriod
 from app.services.permissions import can_access_unit, can_access_property, can_confirm_occupancy, can_perform_action, Action, get_owner_personal_mode_units, get_manager_personal_mode_units
 from app.services.privacy_lanes import (
@@ -82,6 +86,7 @@ router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 class TenantGuestInvitationCreate(BaseModel):
     unit_id: int = Field(..., gt=0, description="Unit ID (required)")
     guest_name: str = Field("", description="Guest full name")
+    guest_email: str = Field(..., min_length=1, description="Guest email (required)")
     checkin_date: str = Field("", description="Start date (YYYY-MM-DD)")
     checkout_date: str = Field("", description="End date (YYYY-MM-DD)")
 
@@ -199,6 +204,28 @@ def guest_add_pending_invite(
         )
         db.commit()
         raise HTTPException(status_code=400, detail="Invalid or expired invitation code")
+
+    # Reject if invitation was sent to a different email address
+    inv_guest_email = (getattr(inv, "guest_email", None) or "").strip().lower()
+    if inv_guest_email and (current_user.email or "").strip().lower() != inv_guest_email:
+        create_log(
+            db,
+            CATEGORY_FAILED_ATTEMPT,
+            "Add pending invite: email mismatch",
+            f"User {current_user.email} attempted to add invitation {code} intended for {inv.guest_email}.",
+            property_id=inv.property_id,
+            invitation_id=inv.id,
+            actor_user_id=current_user.id,
+            actor_email=current_user.email,
+            ip_address=request.client.host if request.client else None,
+            user_agent=(request.headers.get("user-agent") or "").strip() or None,
+            meta={"invitation_code": code, "invitation_guest_email": inv.guest_email},
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=403,
+            detail="This invitation was sent to a different email address. You cannot add an invitation intended for someone else.",
+        )
 
     # Reject if this invitation overlaps any existing stay for this guest (block before signing)
     existing_stays = db.query(Stay).filter(Stay.guest_id == current_user.id).all()
@@ -335,15 +362,139 @@ def guest_add_pending_invite(
     )
 
 
+@router.get("/owner/tenants")
+def owner_tenants(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_owner_onboarding_complete),
+):
+    """List tenants (assigned + pending invitation) for the owner's properties. Business-mode safe."""
+    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+    if not profile:
+        return []
+    prop_ids = [p.id for p in profile.properties]
+    if not prop_ids:
+        return []
+    unit_rows = db.query(Unit).filter(Unit.property_id.in_(prop_ids)).all()
+    unit_map = {u.id: u for u in unit_rows}
+    unit_ids = list(unit_map.keys())
+    prop_map = {p.id: p for p in db.query(Property).filter(Property.id.in_(prop_ids)).all()}
+    out = []
+    seen_unit_user = set()
+
+    if unit_ids:
+        assignments = (
+            db.query(TenantAssignment)
+            .filter(TenantAssignment.unit_id.in_(unit_ids))
+            .order_by(TenantAssignment.created_at.desc())
+            .all()
+        )
+        for ta in assignments:
+            tenant = db.query(User).filter(User.id == ta.user_id).first()
+            unit = unit_map.get(ta.unit_id)
+            prop = prop_map.get(unit.property_id) if unit else None
+            today = date.today()
+            active = ta.end_date is None or ta.end_date >= today
+            seen_unit_user.add((ta.unit_id, ta.user_id))
+            start = ta.start_date
+            end = ta.end_date
+            inv_code = None
+            tenant_email = (tenant.email or "").strip().lower() if tenant else ""
+            inv = None
+            if tenant_email:
+                inv = (
+                    db.query(Invitation)
+                    .filter(
+                        Invitation.unit_id == ta.unit_id,
+                        Invitation.invitation_kind == "tenant",
+                        Invitation.status == "accepted",
+                        func.lower(func.coalesce(Invitation.guest_email, "")) == tenant_email,
+                    )
+                    .order_by(Invitation.created_at.desc())
+                    .first()
+                )
+            if not inv:
+                inv = (
+                    db.query(Invitation)
+                    .filter(Invitation.unit_id == ta.unit_id, Invitation.invitation_kind == "tenant")
+                    .order_by(Invitation.created_at.desc())
+                    .first()
+                )
+            if inv:
+                start = start or inv.stay_start_date
+                end = end or inv.stay_end_date
+                inv_code = inv.invitation_code
+            out.append({
+                "id": ta.id,
+                "tenant_name": (tenant.full_name if tenant else None) or (tenant.email if tenant else "Unknown"),
+                "tenant_email": tenant.email if tenant else None,
+                "property_name": (prop.name if prop else None) or "Property",
+                "property_id": prop.id if prop else None,
+                "unit_label": unit.unit_label if unit else None,
+                "unit_id": ta.unit_id,
+                "start_date": str(start) if start else None,
+                "end_date": str(end) if end else None,
+                "active": active,
+                "status": "active" if active else "ended",
+                "invitation_code": inv_code,
+                "created_at": ta.created_at.isoformat() if ta.created_at else None,
+            })
+
+    tenant_invs = (
+        db.query(Invitation)
+        .filter(
+            Invitation.owner_id == current_user.id,
+            Invitation.invitation_kind == "tenant",
+            Invitation.status.notin_(["cancelled", "expired"]),
+            Invitation.token_state.notin_(["CANCELLED", "REVOKED", "EXPIRED"]),
+        )
+        .order_by(Invitation.created_at.desc())
+        .all()
+    )
+    for inv in tenant_invs:
+        has_assignment = (
+            db.query(TenantAssignment)
+            .filter(TenantAssignment.unit_id == inv.unit_id)
+            .first()
+        ) if inv.unit_id else None
+        if has_assignment:
+            continue
+        unit = unit_map.get(inv.unit_id) if inv.unit_id else None
+        prop = prop_map.get(inv.property_id)
+        out.append({
+            "id": -inv.id,
+            "tenant_name": (inv.guest_name or "").strip() or (inv.guest_email or "").strip() or "Invited tenant",
+            "tenant_email": inv.guest_email,
+            "property_name": (prop.name if prop else None) or "Property",
+            "property_id": prop.id if prop else None,
+            "unit_label": unit.unit_label if unit else None,
+            "unit_id": inv.unit_id,
+            "start_date": str(inv.stay_start_date) if inv.stay_start_date else None,
+            "end_date": str(inv.stay_end_date) if inv.stay_end_date else None,
+            "active": False,
+            "status": "pending_signup",
+            "invitation_code": inv.invitation_code,
+            "created_at": inv.created_at.isoformat() if inv.created_at else None,
+        })
+    return out
+
+
 @router.get("/owner/invitations", response_model=list[OwnerInvitationView])
 def owner_invitations(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
     context_mode: str = Depends(get_context_mode),
 ):
-    """Owner view: invitations with property name. Business mode: returns [] (no guest data). Personal mode: property-lane invitations only (owner/manager-invited; NEVER tenant-invited guest data)."""
+    """Owner view: invitations with property name.
+    Business mode: tenant invitations only (invitation_kind='tenant').
+    Personal mode: property-lane guest invitations only (owner/manager-invited; NEVER tenant-invited guest data)."""
     if context_mode == "business":
-        return []
+        invs = (
+            db.query(Invitation)
+            .filter(Invitation.owner_id == current_user.id, Invitation.invitation_kind == "tenant")
+            .order_by(Invitation.created_at.desc())
+            .all()
+        )
+        return _invitations_to_owner_views(invs, db, get_invitation_expire_cutoff)
     all_invs = db.query(Invitation).filter(Invitation.owner_id == current_user.id).order_by(Invitation.created_at.desc()).all()
     invs = filter_property_lane_invitations_for_owner(db, all_invs, current_user.id)
     return _invitations_to_owner_views(invs, db, get_invitation_expire_cutoff)
@@ -366,10 +517,17 @@ def _invitations_to_owner_views(invs: list, db: Session, get_invitation_expire_c
         )
         has_stay = db.query(Stay).filter(Stay.invitation_id == inv.id).first() is not None
         token_state = (getattr(inv, "token_state", None) or "STAGED").upper()
+        is_tenant_inv = (getattr(inv, "invitation_kind", None) or "").strip().lower() == "tenant"
         if inv.status == "cancelled":
             display_status = "cancelled"
         elif inv.status == "expired" or is_expired:
             display_status = "expired"
+        elif is_tenant_inv:
+            has_assignment = db.query(TenantAssignment).filter(TenantAssignment.unit_id == inv.unit_id).first() is not None
+            if inv.status == "accepted" or has_assignment:
+                display_status = "accepted"
+            else:
+                display_status = "pending"
         elif inv.status == "ongoing" or has_stay or inv.status == "accepted" or (token_state == "BURNED" and inv.status == "pending"):
             display_status = "ongoing"
         else:
@@ -1460,7 +1618,7 @@ def guest_logs(
     search: str | None = None,
     stay_id: int | None = None,
 ):
-    """Activity logs (audit trail) for the guest's stays only. Optional stay_id restricts to one stay. Guests can view their audit trail."""
+    """Guest lane logs only: events for the guest's own stays. No property management or other users' data."""
     from sqlalchemy import desc, cast, String
 
     stays = db.query(Stay).filter(Stay.guest_id == current_user.id).all()
@@ -1470,6 +1628,7 @@ def guest_logs(
     if stay_id is not None and stay_id not in stay_ids:
         return []
     q = db.query(EventLedger).filter(EventLedger.stay_id.in_(stay_ids))
+    q = q.filter(EventLedger.action_type.in_(GUEST_ALLOWED_ACTIONS))
     if stay_id is not None:
         q = q.filter(EventLedger.stay_id == stay_id)
     from_dt = _parse_optional_utc(from_ts)
@@ -1984,46 +2143,62 @@ def guest_cancel_stay(
     return {"status": "success", "message": "Stay cancelled."}
 
 
-@router.get("/tenant/unit")
-def tenant_unit(
+@router.get("/tenant/debug")
+def tenant_debug(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_tenant),
 ):
-    """Return the tenant's assigned unit, plus invitation info and live_slug for the Current stay card (match guest dashboard). Only ongoing assignments (end_date is None or end_date >= today)."""
+    """Diagnostic: counts of TenantAssignments and Stays for the current user. Helps verify data exists after accept-invite."""
     today = date.today()
-    ta = (
-        db.query(TenantAssignment)
-        .join(Unit)
-        .filter(
-            TenantAssignment.user_id == current_user.id,
-            (TenantAssignment.end_date.is_(None)) | (TenantAssignment.end_date >= today),
-        )
-        .order_by(TenantAssignment.start_date.desc())
-        .first()
-    )
-    if not ta:
+    ta_count = db.query(TenantAssignment).filter(
+        TenantAssignment.user_id == current_user.id,
+        (TenantAssignment.end_date.is_(None)) | (TenantAssignment.end_date >= today),
+    ).count()
+    stays_count = db.query(Stay).filter(Stay.guest_id == current_user.id).count()
+    return {"tenant_assignments_count": ta_count, "stays_count": stays_count}
+
+
+def _tenant_unit_item(db: Session, ta: TenantAssignment, current_user: "User") -> dict:
+    """Build one unit item for tenant_unit response. Use invitation accepted by THIS user (match guest_email) to avoid showing another tenant's dates."""
+    unit = db.query(Unit).filter(Unit.id == ta.unit_id).first()
+    if not unit:
         return {
             "unit": None, "property": None, "invite_id": None, "token_state": None,
-            "stay_start_date": None, "stay_end_date": None, "live_slug": None, "region_code": None,
-            "jurisdiction_state_name": None, "jurisdiction_statutes": [], "removal_guest_text": None, "removal_tenant_text": None,
+            "stay_start_date": ta.start_date.isoformat() if ta.start_date else None,
+            "stay_end_date": ta.end_date.isoformat() if ta.end_date else None,
+            "live_slug": None, "region_code": None,
+            "jurisdiction_state_name": None, "jurisdiction_statutes": [],
+            "removal_guest_text": None, "removal_tenant_text": None,
         }
-    unit = db.query(Unit).filter(Unit.id == ta.unit_id).first()
-    prop = db.query(Property).filter(Property.id == unit.property_id).first() if unit else None
+    prop = db.query(Property).filter(Property.id == unit.property_id).first()
     address = ", ".join(filter(None, [prop.street, prop.city, prop.state])) if prop else ""
-    # Tenant invitation for this unit (BURNED tenant invite used to assign)
-    tenant_inv = (
-        db.query(Invitation)
-        .filter(Invitation.unit_id == ta.unit_id, Invitation.invitation_kind == "tenant")
-        .order_by(Invitation.created_at.desc())
-        .first()
-    )
+    user_email = (current_user.email or "").strip().lower()
+    tenant_inv = None
+    if user_email:
+        tenant_inv = (
+            db.query(Invitation)
+            .filter(
+                Invitation.unit_id == ta.unit_id,
+                Invitation.invitation_kind == "tenant",
+                Invitation.status == "accepted",
+                func.lower(func.coalesce(Invitation.guest_email, "")) == user_email,
+            )
+            .order_by(Invitation.created_at.desc())
+            .first()
+        )
+    if not tenant_inv:
+        tenant_inv = (
+            db.query(Invitation)
+            .filter(Invitation.unit_id == ta.unit_id, Invitation.invitation_kind == "tenant")
+            .order_by(Invitation.created_at.desc())
+            .first()
+        )
     invite_id = tenant_inv.invitation_code if tenant_inv else None
     token_state = getattr(tenant_inv, "token_state", None) if tenant_inv else None
     stay_start = (tenant_inv.stay_start_date if tenant_inv else ta.start_date)
     stay_end = (tenant_inv.stay_end_date if tenant_inv else ta.end_date)
     live_slug = getattr(prop, "live_slug", None) if prop else None
     region_code = getattr(prop, "region_code", None) if prop else None
-    # Jurisdiction SOT for APPLICABLE LAW (same as guest dashboard and live property page)
     jurisdiction_state_name = None
     jurisdiction_statutes = []
     removal_guest_text = None
@@ -2051,21 +2226,101 @@ def tenant_unit(
     }
 
 
-@router.post("/tenant/cancel-future-assignment")
-def tenant_cancel_future_assignment(
-    request: Request,
+def _tenant_unit_item_from_invitation(db: Session, inv: Invitation, current_user: "User") -> dict | None:
+    """Build unit item from a tenant invitation (for pending invitations addressed to this tenant)."""
+    if not inv.unit_id:
+        return None
+    unit = db.query(Unit).filter(Unit.id == inv.unit_id).first()
+    if not unit:
+        return None
+    prop = db.query(Property).filter(Property.id == inv.property_id).first()
+    if not prop or getattr(prop, "deleted_at", None):
+        return None
+    address = ", ".join(filter(None, [getattr(prop, "street", None), prop.city, prop.state])) if prop else ""
+    region_code = getattr(prop, "region_code", None) or "US"
+    jinfo = get_jurisdiction_for_property(db, getattr(prop, "zip_code", None), region_code)
+    jurisdiction_statutes = [JurisdictionStatuteInDashboard(citation=st.citation, plain_english=st.plain_english) for st in jinfo.statutes] if jinfo and jinfo.statutes else []
+    return {
+        "unit": {"id": unit.id, "unit_label": unit.unit_label, "occupancy_status": unit.occupancy_status},
+        "property": {"id": prop.id, "name": prop.name, "address": address},
+        "invite_id": inv.invitation_code,
+        "token_state": getattr(inv, "token_state", None) or "BURNED",
+        "stay_start_date": inv.stay_start_date.isoformat() if inv.stay_start_date else None,
+        "stay_end_date": inv.stay_end_date.isoformat() if inv.stay_end_date else None,
+        "live_slug": getattr(prop, "live_slug", None),
+        "region_code": region_code,
+        "jurisdiction_state_name": jinfo.name if jinfo else None,
+        "jurisdiction_statutes": jurisdiction_statutes,
+        "removal_guest_text": jinfo.removal_guest_text if jinfo else None,
+        "removal_tenant_text": jinfo.removal_tenant_text if jinfo else None,
+        "pending_acceptance": True,
+    }
+
+
+@router.get("/tenant/unit")
+def tenant_unit(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_tenant),
 ):
-    """Let the tenant cancel their future unit assignment (effective before start date). Sets assignment end_date to day before start and marks the tenant invitation as cancelled."""
-    today = date.today()
-    ta = (
+    """Return all of the tenant's assigned units plus pending tenant invitations addressed to them. Only filter: user_id (tenant id)."""
+    assignments = (
         db.query(TenantAssignment)
         .join(Unit)
         .filter(TenantAssignment.user_id == current_user.id)
         .order_by(TenantAssignment.start_date.desc())
-        .first()
+        .all()
     )
+    units = [_tenant_unit_item(db, ta, current_user) for ta in assignments]
+    unit_ids_with_assignment = {ta.unit_id for ta in assignments}
+    user_email = (current_user.email or "").strip().lower()
+    if user_email:
+        pending_invs = (
+            db.query(Invitation)
+            .filter(
+                Invitation.invitation_kind == "tenant",
+                Invitation.unit_id.isnot(None),
+                Invitation.status.in_(["pending", "ongoing"]),
+                func.lower(func.coalesce(Invitation.guest_email, "")) == user_email,
+            )
+            .order_by(Invitation.created_at.desc())
+            .all()
+        )
+        for inv in pending_invs:
+            if inv.unit_id in unit_ids_with_assignment:
+                continue
+            token = (getattr(inv, "token_state", None) or "").upper()
+            if token in ("CANCELLED", "REVOKED", "EXPIRED"):
+                continue
+            has_ta = db.query(TenantAssignment).filter(
+                TenantAssignment.unit_id == inv.unit_id,
+                TenantAssignment.user_id == current_user.id,
+            ).first() is not None
+            if has_ta:
+                continue
+            item = _tenant_unit_item_from_invitation(db, inv, current_user)
+            if item:
+                units.append(item)
+                unit_ids_with_assignment.add(inv.unit_id)
+    return {"units": units}
+
+
+@router.post("/tenant/cancel-future-assignment")
+def tenant_cancel_future_assignment(
+    request: Request,
+    unit_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_tenant),
+):
+    """Let the tenant cancel their future unit assignment (effective before start date). Pass unit_id to cancel a specific assignment when tenant has multiple."""
+    today = date.today()
+    q = (
+        db.query(TenantAssignment)
+        .join(Unit)
+        .filter(TenantAssignment.user_id == current_user.id)
+    )
+    if unit_id is not None:
+        q = q.filter(TenantAssignment.unit_id == unit_id)
+    ta = q.order_by(TenantAssignment.start_date.desc()).first()
     if not ta:
         raise HTTPException(status_code=404, detail="No assignment found")
     # Use same "effective" start as tenant unit display: invitation stay_start if present, else assignment start_date
@@ -2145,18 +2400,20 @@ def tenant_cancel_future_assignment(
 @router.post("/tenant/end-assignment")
 def tenant_end_assignment(
     request: Request,
+    unit_id: int | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_tenant),
 ):
-    """Let the tenant end their ongoing assignment (checkout): set end_date to today. Only allowed when today is within [start_date, end_date]."""
+    """Let the tenant end their ongoing assignment (checkout): set end_date to today. Pass unit_id when tenant has multiple assignments."""
     today = date.today()
-    ta = (
+    q = (
         db.query(TenantAssignment)
         .join(Unit)
         .filter(TenantAssignment.user_id == current_user.id)
-        .order_by(TenantAssignment.start_date.desc())
-        .first()
     )
+    if unit_id is not None:
+        q = q.filter(TenantAssignment.unit_id == unit_id)
+    ta = q.order_by(TenantAssignment.start_date.desc()).first()
     if not ta:
         raise HTTPException(status_code=404, detail="No assignment found")
     if ta.start_date > today:
@@ -2244,7 +2501,7 @@ def tenant_create_invitation(
         if end <= start:
             raise HTTPException(status_code=400, detail="End date must be after start date.")
         if start < date.today():
-            raise HTTPException(status_code=400, detail="Check-in date cannot be in the past.")
+            raise HTTPException(status_code=400, detail="Authorization start date cannot be in the past.")
 
         unit_id = data.unit_id
         if not unit_id or unit_id <= 0:
@@ -2281,12 +2538,12 @@ def tenant_create_invitation(
         if start < effective_start:
             raise HTTPException(
                 status_code=400,
-                detail=f"Guest check-in cannot be before your stay starts ({effective_start.isoformat()}).",
+                detail=f"Guest authorization start date cannot be before your stay starts ({effective_start.isoformat()}).",
             )
         if effective_end is not None and end > effective_end:
             raise HTTPException(
                 status_code=400,
-                detail=f"Guest check-out cannot be after your stay ends ({effective_end.isoformat()}).",
+                detail=f"Guest authorization end date cannot be after your stay ends ({effective_end.isoformat()}).",
             )
 
         owner_profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
@@ -2294,6 +2551,9 @@ def tenant_create_invitation(
         if not owner_user_id:
             raise HTTPException(status_code=500, detail="Property configuration error. Please contact support.")
 
+        guest_email = (data.guest_email or "").strip().lower()
+        if not guest_email:
+            raise HTTPException(status_code=400, detail="Guest email is required.")
         code = "INV-" + secrets.token_hex(4).upper()
         inv = Invitation(
             invitation_code=code,
@@ -2302,7 +2562,7 @@ def tenant_create_invitation(
             unit_id=unit_id,
             invited_by_user_id=current_user.id,
             guest_name=guest_name,
-            guest_email=None,
+            guest_email=guest_email,
             stay_start_date=start,
             stay_end_date=end,
             purpose_of_stay=PurposeOfStay.travel,
@@ -2510,6 +2770,118 @@ def tenant_guest_history(
             dead_mans_switch_enabled=bool(getattr(inv, "dead_mans_switch_enabled", 0)), needs_occupancy_confirmation=False, show_occupancy_confirmation_ui=False, confirmation_deadline_at=None, occupancy_confirmation_response=None,
         ))
     return out
+
+
+@router.get("/tenant/signed-documents")
+def tenant_signed_documents(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_tenant),
+):
+    """Return all signed agreements associated with this tenant (by used_by_user_id or email match)."""
+    sigs = (
+        db.query(AgreementSignature)
+        .filter(
+            (AgreementSignature.used_by_user_id == current_user.id)
+            | (AgreementSignature.guest_email == current_user.email)
+        )
+        .order_by(AgreementSignature.signed_at.desc())
+        .all()
+    )
+    out = []
+    for sig in sigs:
+        inv = db.query(Invitation).filter(Invitation.invitation_code == sig.invitation_code).first()
+        prop = db.query(Property).filter(Property.id == inv.property_id).first() if inv else None
+        property_name = None
+        if prop:
+            property_name = (prop.name or "").strip() or ", ".join(filter(None, [prop.street, prop.city, prop.state])) or "Property"
+        out.append({
+            "signature_id": sig.id,
+            "invitation_code": sig.invitation_code,
+            "document_title": sig.document_title or "Agreement",
+            "signed_at": sig.signed_at.isoformat() if sig.signed_at else None,
+            "signed_by": sig.guest_full_name,
+            "has_signed_pdf": sig.signed_pdf_bytes is not None,
+            "property_name": property_name,
+            "stay_start_date": str(inv.stay_start_date) if inv else None,
+            "stay_end_date": str(inv.stay_end_date) if inv else None,
+        })
+    return out
+
+
+@router.get("/tenant/property-verification")
+def tenant_property_verification(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_tenant),
+):
+    """Return verification record for tenant's assigned property: POA status, guest agreements, property status."""
+    today = date.today()
+    ta = (
+        db.query(TenantAssignment)
+        .join(Unit)
+        .filter(
+            TenantAssignment.user_id == current_user.id,
+            (TenantAssignment.end_date.is_(None)) | (TenantAssignment.end_date >= today),
+        )
+        .order_by(TenantAssignment.start_date.desc())
+        .first()
+    )
+    if not ta:
+        return {"poa_signed_at": None, "poa_url": None, "guest_agreements": [], "property_status": None}
+
+    unit = db.query(Unit).filter(Unit.id == ta.unit_id).first()
+    prop = db.query(Property).filter(Property.id == unit.property_id).first() if unit else None
+    if not prop:
+        return {"poa_signed_at": None, "poa_url": None, "guest_agreements": [], "property_status": None}
+
+    owner_profile = db.query(OwnerProfile).filter(OwnerProfile.id == prop.owner_profile_id).first()
+    poa_signed_at = None
+    poa_url = None
+    if owner_profile and owner_profile.user_id:
+        poa_sig = (
+            db.query(OwnerPOASignature)
+            .filter(OwnerPOASignature.used_by_user_id == owner_profile.user_id)
+            .first()
+        )
+        if poa_sig:
+            poa_signed_at = poa_sig.signed_at.isoformat() if poa_sig.signed_at else None
+            if prop.live_slug:
+                poa_url = f"/public/live/{prop.live_slug}/poa"
+
+    guest_agreements = []
+    property_invitations = (
+        db.query(Invitation)
+        .filter(Invitation.property_id == prop.id, Invitation.invitation_kind != "tenant")
+        .all()
+    )
+    inv_codes = [inv.invitation_code for inv in property_invitations]
+    if inv_codes:
+        sigs = (
+            db.query(AgreementSignature)
+            .filter(AgreementSignature.invitation_code.in_(inv_codes))
+            .order_by(AgreementSignature.signed_at.desc())
+            .all()
+        )
+        for sig in sigs:
+            inv = next((i for i in property_invitations if i.invitation_code == sig.invitation_code), None)
+            guest_agreements.append({
+                "signature_id": sig.id,
+                "invitation_code": sig.invitation_code,
+                "document_title": sig.document_title or "Guest Agreement",
+                "guest_name": sig.guest_full_name or "Guest",
+                "signed_at": sig.signed_at.isoformat() if sig.signed_at else None,
+                "stay_start_date": str(inv.stay_start_date) if inv and inv.stay_start_date else None,
+                "stay_end_date": str(inv.stay_end_date) if inv and inv.stay_end_date else None,
+                "token_state": getattr(inv, "token_state", None) if inv else None,
+            })
+
+    property_status = getattr(prop, "occupancy_status", None) or "unknown"
+
+    return {
+        "poa_signed_at": poa_signed_at,
+        "poa_url": poa_url,
+        "guest_agreements": guest_agreements,
+        "property_status": property_status,
+    }
 
 
 @router.get("/presence")
@@ -3088,22 +3460,22 @@ def owner_logs(
     search: str | None = None,
     property_id: int | None = None,
 ):
-    """Activity logs for all owned properties. Filter by time range (ISO UTC), category, search, and optional property_id. When property_id is set, only logs for that property are returned. Tracks tenant invitations, guest invitations, guest authorization changes, presence/away status, and system events."""
-    from sqlalchemy import or_
+    """Property/management lane logs only. No tenant guest activity, no tenant-private data.
+    Shows: property mgmt, billing, shield mode, DMS, tenant invitations/assignments, occupancy confirmations."""
+    from sqlalchemy import or_, desc, cast, String
 
     profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
     if not profile:
         return []
     owner_property_ids = [p.id for p in profile.properties]
     if property_id is not None and property_id not in owner_property_ids:
-        return []  # Owner doesn't own this property
+        return []
 
     from_dt = _parse_optional_utc(from_ts)
     to_dt = _parse_optional_utc(to_ts)
 
     billing_actions = _CATEGORY_TO_ACTION_TYPES.get("billing", [])
 
-    # When property_id is set: only that property's logs
     if property_id is not None:
         q = db.query(EventLedger).filter(EventLedger.property_id == property_id)
     elif owner_property_ids:
@@ -3121,6 +3493,7 @@ def owner_logs(
                 (EventLedger.action_type.in_(billing_actions)) & (EventLedger.actor_user_id == current_user.id),
             )
         )
+    q = q.filter(EventLedger.action_type.in_(OWNER_BUSINESS_ACTIONS))
     if from_dt is not None:
         q = q.filter(EventLedger.created_at >= from_dt)
     if to_dt is not None:
@@ -3128,14 +3501,13 @@ def owner_logs(
     if category and category.strip():
         action_types = _CATEGORY_TO_ACTION_TYPES.get(category.strip(), [])
         if action_types:
-            q = q.filter(EventLedger.action_type.in_(action_types))
+            allowed = [a for a in action_types if a in OWNER_BUSINESS_ACTIONS]
+            q = q.filter(EventLedger.action_type.in_(allowed))
     if search and search.strip():
-        from sqlalchemy import cast, String
         term = f"%{search.strip()}%"
         q = q.filter(
             (EventLedger.action_type.ilike(term)) | (cast(EventLedger.meta, String).ilike(term))
         )
-    from sqlalchemy import desc
     q = q.order_by(desc(EventLedger.created_at))
     rows = q.all()
     rows = filter_tenant_lane_from_ledger_rows(db, rows)
@@ -3183,7 +3555,7 @@ def manager_logs(
     search: str | None = None,
     property_id: int | None = None,
 ):
-    """Event ledger for properties assigned to this manager. Optional property_id restricts to that property (must be one the manager is assigned to)."""
+    """Property/management lane logs for assigned properties. Same restrictions as owner: no tenant guest activity."""
     from sqlalchemy import desc, cast, String
 
     property_ids = _manager_property_ids(db, current_user.id)
@@ -3194,6 +3566,7 @@ def manager_logs(
     from_dt = _parse_optional_utc(from_ts)
     to_dt = _parse_optional_utc(to_ts)
     q = db.query(EventLedger).filter(EventLedger.property_id.in_(property_ids))
+    q = q.filter(EventLedger.action_type.in_(OWNER_BUSINESS_ACTIONS))
     if property_id is not None:
         q = q.filter(EventLedger.property_id == property_id)
     if from_dt is not None:
@@ -3203,7 +3576,8 @@ def manager_logs(
     if category and category.strip():
         action_types = _CATEGORY_TO_ACTION_TYPES.get(category.strip(), [])
         if action_types:
-            q = q.filter(EventLedger.action_type.in_(action_types))
+            allowed = [a for a in action_types if a in OWNER_BUSINESS_ACTIONS]
+            q = q.filter(EventLedger.action_type.in_(allowed))
     if search and search.strip():
         term = f"%{search.strip()}%"
         q = q.filter((EventLedger.action_type.ilike(term)) | (cast(EventLedger.meta, String).ilike(term)))
@@ -3239,7 +3613,8 @@ def tenant_logs(
     search: str | None = None,
     property_id: int | None = None,
 ):
-    """Activity logs for: (1) the tenant's assigned property, (2) events where tenant is the actor, (3) events for invitations the tenant created."""
+    """Tenant lane logs only: tenant's own actions, their guest invitations/stays, their presence.
+    Excludes billing, property management, shield mode, DMS, and other tenants' data."""
     from sqlalchemy import desc, cast, String, or_
 
     tenant_property_id = None
@@ -3256,18 +3631,20 @@ def tenant_logs(
     if property_id is not None and tenant_property_id is not None and property_id != tenant_property_id:
         return []
     invitation_ids = [r[0] for r in db.query(Invitation.id).filter(Invitation.invited_by_user_id == current_user.id).all()]
+    stay_ids = [r[0] for r in db.query(Stay.id).filter(Stay.invitation_id.in_(invitation_ids)).all()] if invitation_ids else []
     conditions = [
         EventLedger.actor_user_id == current_user.id,
     ]
-    if tenant_property_id is not None:
-        conditions.append(EventLedger.property_id == tenant_property_id)
     if invitation_ids:
         conditions.append(EventLedger.invitation_id.in_(invitation_ids))
+    if stay_ids:
+        conditions.append(EventLedger.stay_id.in_(stay_ids))
     if not conditions:
         return []
     from_dt = _parse_optional_utc(from_ts)
     to_dt = _parse_optional_utc(to_ts)
     q = db.query(EventLedger).filter(or_(*conditions))
+    q = q.filter(EventLedger.action_type.in_(TENANT_ALLOWED_ACTIONS))
     if property_id is not None and tenant_property_id is not None:
         q = q.filter(EventLedger.property_id == property_id)
     if from_dt is not None:
@@ -3277,7 +3654,8 @@ def tenant_logs(
     if category and category.strip():
         action_types = _CATEGORY_TO_ACTION_TYPES.get(category.strip(), [])
         if action_types:
-            q = q.filter(EventLedger.action_type.in_(action_types))
+            allowed = [a for a in action_types if a in TENANT_ALLOWED_ACTIONS]
+            q = q.filter(EventLedger.action_type.in_(allowed))
     if search and search.strip():
         term = f"%{search.strip()}%"
         q = q.filter((EventLedger.action_type.ilike(term)) | (cast(EventLedger.meta, String).ilike(term)))

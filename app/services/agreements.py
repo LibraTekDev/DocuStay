@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models.invitation import Invitation
 from app.models.owner import Property
+from app.models.unit import Unit
 from app.models.user import User
 from app.services.jurisdiction_sot import JurisdictionInfo, get_jurisdiction_for_property
 
@@ -18,10 +19,11 @@ from app.services.jurisdiction_sot import JurisdictionInfo, get_jurisdiction_for
 def fill_guest_signature_in_content(
     content: str, guest_name: str, signed_date: str, ip_address: str | None = None
 ) -> str:
-    """Replace the blank guest signature line with the signer's name, date, and optionally IP."""
+    """Replace the blank guest or tenant signature line with the signer's name, date, and optionally IP."""
     result = content
-    # New template (guidance): **Guest Signature:** ___ and **Date:** ___ on same or next line
+    # New template (guidance): **Guest Signature:** ___ or **Tenant Signature:** ___ and **Date:** ___ on same or next line
     result = re.sub(r"\*\*Guest Signature:\*\*\s*_{10,}", f"**Guest Signature:** {guest_name}", result, count=1)
+    result = re.sub(r"\*\*Tenant Signature:\*\*\s*_{10,}", f"**Tenant Signature:** {guest_name}", result, count=1)
     result = re.sub(r"\*\*Date:\*\*\s*_{10,}", f"**Date:** {signed_date}", result, count=1)
     # Legacy patterns (Signed:/Guest:/ etc.)
     legacy = [
@@ -67,15 +69,43 @@ def _format_address(prop: Property | None) -> str | None:
 def _normalize_region(region_code: str) -> str:
     rc = (region_code or "").strip().upper()
     if rc in {"NY", "NYC"}:
-        return "NYC"
-    if rc in {"FL", "CA", "TX", "WA"}:
-        return rc
+        return "NY"
     return rc or "US"
 
 
 # --- Jurisdiction-aware Guest Acknowledgment (guidance: Guest Acknowledgment and Revocable License to Occupy) ---
 
 GUEST_ACK_TITLE = "Guest Acknowledgment and Revocable License to Occupy"
+
+TENANT_ACK_TITLE = "Tenant Invitation Acceptance"
+
+# Tenant invitation: primary resident acceptance. No guest stay language.
+def _build_tenant_invitation_acceptance(
+    property_address: str | None,
+    tenant_name: str,
+    unit_info: str,
+) -> str:
+    return f"""**Tenant Invitation Acceptance**
+
+DocuStay is a documentation platform for property status and guest authorizations. This document confirms your acceptance of an invitation to be the primary resident of a unit.
+
+**1. Acceptance of Invitation**
+You accept this invitation to access and occupy the unit at the property as the assigned tenant/resident. You understand you are the primary resident of this unit.
+
+**2. Platform Use**
+You agree to use the DocuStay platform in accordance with the Terms of Service and Privacy Policy. You may use the platform to manage your own guest authorizations for temporary visitors to your unit.
+
+**3. Documentation Only**
+This acceptance documents your status as the tenant/resident of the unit. DocuStay does not manage leases or tenancy agreements; your lease or rental agreement with the property owner governs your tenancy.
+
+**Property:** {property_address or '[Property Address]'}
+**Unit:** {unit_info or '[Unit]'}
+**Tenant:** {tenant_name}
+
+**Tenant Signature:** __________________________
+**Date:** __________________________
+IP Address: ______________________
+"""
 
 # Shared sections 1, 2, 4, 5 (same for all jurisdictions)
 def _section1_authority() -> str:
@@ -113,7 +143,7 @@ def _disclaimer_phrase(region_code: str, state_name: str) -> str:
         return "California law"
     if rc == "FL":
         return "the Florida Residential Landlord and Tenant Act"
-    if rc == "NYC" or rc == "NY":
+    if rc in ("NY", "NYC"):
         return "New York Real Property Law"
     return "applicable state and local law"
 
@@ -138,7 +168,7 @@ def _build_guest_acknowledgment(
         section3 = _section3_california()
     elif rc == "FL":
         section3 = _section3_florida()
-    elif rc in ("NYC", "NY"):
+    elif rc in ("NY", "NYC"):
         section3 = _section3_new_york()
     else:
         section3 = _section3_generic(statute_citation)
@@ -248,6 +278,40 @@ def build_invitation_agreement(
     ).first()
     if not inv:
         return None
+
+    inv_kind = (getattr(inv, "invitation_kind", None) or "").strip().lower()
+
+    # Tenant invite: primary resident acceptance. No guest stay language.
+    if inv_kind == "tenant":
+        prop = db.query(Property).filter(Property.id == inv.property_id).first()
+        owner = db.query(User).filter(User.id == inv.owner_id).first()
+        property_address = _format_address(prop)
+        host_name = (owner.full_name if owner else None) or (owner.email if owner else None)
+        tenant_name = (guest_full_name or "[Tenant Name]").strip() or "[Tenant Name]"
+        unit_info = ""
+        if inv.unit_id:
+            unit = db.query(Unit).filter(Unit.id == inv.unit_id).first()
+            if unit:
+                unit_info = unit.unit_label or str(inv.unit_id)
+        content = _build_tenant_invitation_acceptance(
+            property_address=property_address,
+            tenant_name=tenant_name,
+            unit_info=unit_info,
+        )
+        region = _normalize_region(inv.region_code or (prop.region_code if prop else ""))
+        document_id = f"DSA-Tenant-{code}"
+        doc_hash = _sha256_hex(content)
+        return AgreementDoc(
+            document_id=document_id,
+            region_code=region,
+            title=TENANT_ACK_TITLE,
+            content=content,
+            document_hash=doc_hash,
+            property_address=property_address,
+            stay_start_date=str(inv.stay_start_date) if inv.stay_start_date else None,
+            stay_end_date=str(inv.stay_end_date) if inv.stay_end_date else None,
+            host_name=host_name,
+        )
 
     prop = db.query(Property).filter(Property.id == inv.property_id).first()
     owner = db.query(User).filter(User.id == inv.owner_id).first()

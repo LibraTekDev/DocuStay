@@ -2,8 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Input, Button, ErrorModal } from '../../components/UI';
 import { HeroBackground } from '../../components/HeroBackground';
 import { AuthCardLayout, AuthBullet } from '../../components/AuthCardLayout';
-import { authApi, authApiGuest, invitationsApi } from '../../services/api';
-import AgreementSignModal, { type GuestInviteFormData } from '../../components/AgreementSignModal';
+import { authApi, invitationsApi } from '../../services/api';
 
 const parseInviteCode = (raw: string): string => {
   const trimmed = raw.trim();
@@ -22,17 +21,16 @@ interface GuestLoginProps {
   navigate: (v: string) => void;
   setPendingVerification?: (data: { userId: string; type: 'email'; generatedAt: string }) => void;
   onGuestLogin?: (user: any) => void;
+  onTenantLogin?: (user: any) => void;
 }
 
 const PENDING_INVITE_STORAGE_KEY = 'docustay_pending_invite_code';
 
-const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, onLogin, setLoading, notify, navigate, setPendingVerification, onGuestLogin }) => {
+const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, onLogin, setLoading, notify, navigate, setPendingVerification, onGuestLogin, onTenantLogin }) => {
   const [formData, setFormData] = useState({ email: '', password: '', invitation_link: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [errorModal, setErrorModal] = useState<{ open: boolean; message: string }>({ open: false, message: '' });
-  const [inviteCheck, setInviteCheck] = useState<{ loading: boolean; valid: boolean; expired?: boolean; used?: boolean } | null>(null);
-  const [inviteAcceptModalOpen, setInviteAcceptModalOpen] = useState(false);
-  const [pendingInviteFormData, setPendingInviteFormData] = useState<GuestInviteFormData | null>(null);
+  const [inviteCheck, setInviteCheck] = useState<{ loading: boolean; valid: boolean; expired?: boolean; used?: boolean; already_accepted?: boolean; revoked?: boolean; cancelled?: boolean; reason?: string; invitation_kind?: string } | null>(null);
 
   const inviteCode = inviteCodeFromUrl || parseInviteCode(formData.invitation_link);
   const showError = (message: string) => setErrorModal({ open: true, message });
@@ -44,9 +42,16 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
     }
     setInviteCheck((prev) => (prev?.valid === true && !prev?.expired ? prev : { loading: true, valid: true }));
     invitationsApi.getDetails(inviteCode)
-      .then((d) => setInviteCheck({ loading: false, valid: d.valid, expired: d.expired, used: d.used }))
+      .then((d) => {
+        const kind = d.invitation_kind || (d.is_tenant_invite ? 'tenant' : 'guest');
+        if (d.valid && kind === 'tenant') {
+          navigate(`register-from-invite/${inviteCode}`);
+          return;
+        }
+        setInviteCheck({ loading: false, valid: d.valid, expired: d.expired, used: d.used, already_accepted: d.already_accepted, revoked: d.revoked, cancelled: d.cancelled, reason: d.reason, invitation_kind: kind });
+      })
       .catch(() => setInviteCheck({ loading: false, valid: false }));
-  }, [inviteCode]);
+  }, [inviteCode, navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,9 +67,12 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
     }
     if (inviteCode && inviteCheck?.valid === false) {
       showError(
-        inviteCheck?.expired ? 'This invitation has expired and cannot be used. Ask your host for a new invitation.'
-        : inviteCheck?.used ? 'This invitation link has already been used.'
-        : 'This invitation link is invalid.'
+        inviteCheck?.expired ? 'This invitation has expired. Please ask your host for a new invitation.'
+        : inviteCheck?.used || inviteCheck?.already_accepted ? 'This invitation has already been accepted. If you already registered, please sign in.'
+        : inviteCheck?.revoked ? 'This invitation has been revoked by the property owner. Please contact your host.'
+        : inviteCheck?.cancelled ? 'This invitation has been cancelled. Please contact your host.'
+        : inviteCheck?.reason === 'not_found' ? 'This invitation code was not found. Please double-check the link or code.'
+        : 'This invitation link is invalid. Please check the link or contact your host.'
       );
       return;
     }
@@ -78,9 +86,16 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
       }
       if (inviteCode && inviteCheck?.valid !== false) {
         sessionStorage.setItem(PENDING_INVITE_STORAGE_KEY, inviteCode.trim().toUpperCase());
-        notify('success', 'Signed in. You can sign the invitation agreement on your dashboard.');
+        const isTenant = inviteCheck?.invitation_kind === 'tenant';
+        notify('success', isTenant ? 'Signed in. Your invitation will be processed on your dashboard.' : 'Signed in. You can sign the invitation agreement on your dashboard.');
       } else if (inviteCode && inviteCheck?.valid === false) {
-        notify('error', inviteCheck?.expired ? 'This invitation has expired and cannot be used.' : inviteCheck?.used ? 'This invitation link has already been used.' : 'This invitation link is invalid.');
+        notify('error',
+          inviteCheck?.expired ? 'This invitation has expired. Please ask your host for a new invitation.'
+          : inviteCheck?.used || inviteCheck?.already_accepted ? 'This invitation has already been accepted.'
+          : inviteCheck?.revoked ? 'This invitation has been revoked by the property owner.'
+          : inviteCheck?.cancelled ? 'This invitation has been cancelled.'
+          : 'This invitation link is invalid.'
+        );
       } else {
         notify('success', 'Signed in successfully.');
       }
@@ -112,7 +127,12 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
           {inviteCode && inviteCheck && !inviteCheck.loading && !inviteCheck.valid && (
             <div className="mt-8 p-4 rounded-lg bg-amber-50 border border-amber-300/80">
               <p className="text-sm text-amber-800 font-medium">
-                {inviteCheck.expired ? 'This invitation has expired and can’t be used. Ask your host for a new invitation.' : inviteCheck.used ? 'This invitation link has already been used and cannot be used again.' : 'This invitation link is invalid.'}
+                {inviteCheck.expired ? 'This invitation has expired. Please ask your host for a new invitation.'
+                  : inviteCheck.used || inviteCheck.already_accepted ? 'This invitation has already been accepted. If you already registered, please sign in instead.'
+                  : inviteCheck.revoked ? 'This invitation has been revoked by the property owner. Please contact your host.'
+                  : inviteCheck.cancelled ? 'This invitation has been cancelled. Please contact your host.'
+                  : inviteCheck.reason === 'not_found' ? 'This invitation code was not found. Please double-check the link.'
+                  : 'This invitation link is invalid. Please check the link or contact your host.'}
               </p>
             </div>
           )}
@@ -132,7 +152,7 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
           <div className="max-w-sm mx-auto w-full">
             <h1 className="text-xl font-semibold text-slate-900 mb-1 lg:hidden">Guest login</h1>
             <p className="text-slate-600 text-sm mb-6">
-              {inviteCode ? 'Sign in to continue. You’ll sign the agreement on your dashboard.' : 'Enter your credentials.'}
+              {inviteCode ? (inviteCheck?.invitation_kind === 'tenant' ? 'Sign in to accept your tenant invitation.' : 'Sign in to continue. You’ll sign the agreement on your dashboard.') : 'Enter your credentials.'}
             </p>
 
             <form onSubmit={handleSubmit} className="space-y-6">
@@ -208,58 +228,6 @@ const GuestLogin: React.FC<GuestLoginProps> = ({ inviteCode: inviteCodeFromUrl, 
             </div>
           </div>
       </AuthCardLayout>
-
-      {inviteCode && (
-        <AgreementSignModal
-          open={inviteAcceptModalOpen}
-          invitationCode={inviteCode}
-          guestEmail=""
-          guestFullName=""
-          onClose={() => {
-            setInviteAcceptModalOpen(false);
-            setPendingInviteFormData(null);
-          }}
-          onSigned={async (signatureId) => {
-            if (!pendingInviteFormData || !inviteCode) return;
-            const code = inviteCode.trim().toUpperCase();
-            setLoading(true);
-            try {
-              const result = await authApiGuest.register({
-                ...pendingInviteFormData,
-                invitation_id: code,
-                invitation_code: code,
-                agreement_signature_id: signatureId,
-                guest_status_acknowledged: true,
-                no_tenancy_acknowledged: true,
-                vacate_acknowledged: true,
-              });
-              setLoading(false);
-              setInviteAcceptModalOpen(false);
-              setPendingInviteFormData(null);
-              if (result.status === 'success' && result.data) {
-                const d = result.data as any;
-                if (d.verificationRequired && d.user_id && setPendingVerification) {
-                  notify('success', result.message || 'Check your email for the verification code.');
-                  setPendingVerification({ userId: d.user_id, type: 'email', generatedAt: new Date().toISOString() });
-                  navigate('verify');
-                  return;
-                }
-                notify('success', 'Registration successful!');
-                if (onGuestLogin) onGuestLogin(result.data);
-                navigate('guest-dashboard');
-              } else {
-                notify('error', result.message || 'Registration failed.');
-              }
-            } catch (err) {
-              setLoading(false);
-              notify('error', (err as Error)?.message || 'Registration failed.');
-            }
-          }}
-          notify={notify}
-          inviteAcceptMode
-          onContinueToSign={(formData) => setPendingInviteFormData(formData)}
-        />
-      )}
 
       <ErrorModal
         open={errorModal.open}

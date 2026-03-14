@@ -21,6 +21,10 @@ export function toUserFriendlyInvitationError(apiMessage: string | undefined | n
     return orig;
   }
 
+  if (raw.includes("overlap")) {
+    return orig.length > 0 && orig.length <= 500 ? orig : "A tenant lease already exists for this property that overlaps with the selected dates. Please choose different dates.";
+  }
+
   // Invitation not found / expired / invalid (agreement 404)
   if (raw.includes("not found") || raw.includes("not pending") || raw.includes("expired")) {
     return "This invitation has expired or is invalid. You can't use this link to sign.";
@@ -45,11 +49,11 @@ export function toUserFriendlyInvitationError(apiMessage: string | undefined | n
   }
 
   // Validation (dates, property, unit)
-  if (raw.includes("check-in") && raw.includes("past")) {
-    return "Check-in date cannot be in the past.";
+  if ((raw.includes("check-in") || raw.includes("authorization start")) && raw.includes("past")) {
+    return "Authorization start date cannot be in the past.";
   }
   if (raw.includes("checkout") && raw.includes("before")) {
-    return "Check-out date must be after check-in.";
+    return "End date must be after start date.";
   }
   if (raw.includes("property") && (raw.includes("not found") || raw.includes("inactive"))) {
     return "This property is no longer available. Please choose another property.";
@@ -67,7 +71,7 @@ export function toUserFriendlyInvitationError(apiMessage: string | undefined | n
     return "End date must be after start date.";
   }
   if (raw.includes("stay starts") || raw.includes("stay ends")) {
-    return orig.length > 0 && orig.length <= 200 ? orig : "Guest dates must fall within your stay.";
+    return orig.length > 0 && orig.length <= 200 ? orig : "Guest authorization dates must fall within your stay.";
   }
 
   // Pydantic/validation (field required, type errors, etc.)

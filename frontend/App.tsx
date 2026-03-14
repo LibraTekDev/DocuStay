@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { AppState, UserType, AccountStatus } from './types';
 import { Card, Button, LoadingOverlay, ErrorModal } from './components/UI';
-import { authApi, setToken, toUserSession, type TokenResponse } from './services/api';
+import { authApi, setToken, toUserSession, getContextMode, type TokenResponse } from './services/api';
 import Login from './pages/Auth/Login';
 import RegisterOwner from './pages/Auth/RegisterOwner';
 import RegisterManager from './pages/Auth/RegisterManager';
@@ -256,7 +256,11 @@ const App: React.FC = () => {
   // Redirect owner to onboarding step if they try to open dashboard/property before completing onboarding
   useEffect(() => {
     if (state.user?.user_type === UserType.PROPERTY_OWNER && (view.startsWith('dashboard') || view.startsWith('add-property') || view.startsWith('property/'))) {
-          if (!state.user.identity_verified) navigate('onboarding/identity');
+      if (view === 'add-property' && getContextMode() === 'personal') {
+        navigate('dashboard');
+        return;
+      }
+      if (!state.user.identity_verified) navigate('onboarding/identity');
       else if (!state.user.poa_linked) navigate('onboarding/poa');
     }
     if (state.user?.user_type === UserType.PROPERTY_MANAGER) {
@@ -410,6 +414,7 @@ const App: React.FC = () => {
             navigate={navigate}
             setPendingVerification={setPendingVerificationPersistent(setState)}
             onGuestLogin={(user) => { setState(prev => ({ ...prev, user })); navigate('guest-dashboard'); }}
+            onTenantLogin={(user) => { setState(prev => ({ ...prev, user })); navigate('tenant-dashboard'); }}
           />
         )}
         {view.startsWith('register-from-invite/') && (

@@ -59,6 +59,11 @@ class PropertyJurisdictionDocumentation(BaseModel):
     """Jurisdiction info for property Documentation tab (from JurisdictionInfo SOT)."""
     name: str
     region_code: str
+    jurisdiction_group: str | None = None
+    legal_threshold_days: int | None = None
+    platform_renewal_cycle_days: int
+    reminder_days_before: int
+    # Backward compat
     max_stay_days: int
     warning_days: int
     tenancy_threshold_days: int | None = None

@@ -590,8 +590,8 @@ def _complete_pending_owner(db: Session, pending: PendingRegistration) -> User:
 
 
 def _complete_pending_tenant(db: Session, pending: PendingRegistration) -> User:
-    """Create User with role=tenant from pending. If user pre-signed during registration (RegisterFromInvite flow),
-    accept the invitation directly. Otherwise create a GuestPendingInvite so the user signs on the dashboard."""
+    """Create User with role=tenant from pending. Tenant does not sign any agreement; when they register with
+    valid tenant invite code, create TenantAssignment directly (accept invite / access to unit)."""
     user = User(
         email=pending.email,
         hashed_password=pending.hashed_password,
@@ -625,62 +625,29 @@ def _complete_pending_tenant(db: Session, pending: PendingRegistration) -> User:
         )
 
     if inv:
-        # Check if the user pre-signed the agreement during registration (RegisterFromInvite flow).
-        # agreement_signature_id=0 or missing means no pre-sign; user must sign on dashboard.
-        sig_id = extra.get("agreement_signature_id")
-        sig = None
-        if sig_id and int(sig_id) > 0:
-            sig = db.query(AgreementSignature).filter(AgreementSignature.id == int(sig_id)).first()
-            if sig and (sig.invitation_code or "").strip().upper() != code:
-                sig = None
-            if sig and (sig.guest_email or "").strip().lower() != (pending.email or "").strip().lower():
-                sig = None
-            if sig and sig.used_by_user_id is not None:
-                sig = None
-            # For in-app signatures, all acks must be set. For Dropbox, signed_pdf_bytes must be present.
-            if sig:
-                if getattr(sig, "dropbox_sign_request_id", None):
-                    if not getattr(sig, "signed_pdf_bytes", None):
-                        sig = None  # Dropbox signing not yet complete; defer to dashboard
-                else:
-                    if not (sig.acks_read and sig.acks_temporary and sig.acks_vacate and sig.acks_electronic):
-                        sig = None
-
-        if sig:
-            # Pre-signed: create TenantAssignment and accept invite directly (no dashboard signing needed)
-            ta = TenantAssignment(
-                unit_id=inv.unit_id,
-                user_id=user.id,
-                start_date=inv.stay_start_date,
-                end_date=inv.stay_end_date,
-                invited_by_user_id=getattr(inv, "invited_by_user_id", None),
-            )
-            db.add(ta)
-            db.flush()
-            inv.status = "accepted"
-            inv.token_state = "BURNED"
-            sig.used_by_user_id = user.id
-            sig.used_at = datetime.now(timezone.utc)
-            create_ledger_event(
-                db,
-                ACTION_TENANT_ACCEPTED,
-                target_object_type="TenantAssignment",
-                target_object_id=ta.id,
-                property_id=inv.property_id,
-                unit_id=inv.unit_id,
-                invitation_id=inv.id,
-                actor_user_id=user.id,
-                meta={"invitation_code": code, "unit_id": inv.unit_id, "tenant_email": user.email, "signature_id": sig.id},
-            )
-        else:
-            # No valid pre-signed agreement: create GuestPendingInvite so the user signs on the dashboard.
-            # The invitation status stays "pending" so the signing modal and acceptInvite can run normally.
-            existing_pi = db.query(GuestPendingInvite).filter(
-                GuestPendingInvite.user_id == user.id,
-                GuestPendingInvite.invitation_id == inv.id,
-            ).first()
-            if not existing_pi:
-                db.add(GuestPendingInvite(user_id=user.id, invitation_id=inv.id))
+        # Tenant does not sign any agreement. Create TenantAssignment directly (accept invite / access to unit).
+        ta = TenantAssignment(
+            unit_id=inv.unit_id,
+            user_id=user.id,
+            start_date=inv.stay_start_date,
+            end_date=inv.stay_end_date,
+            invited_by_user_id=getattr(inv, "invited_by_user_id", None),
+        )
+        db.add(ta)
+        db.flush()
+        inv.status = "accepted"
+        inv.token_state = "BURNED"
+        create_ledger_event(
+            db,
+            ACTION_TENANT_ACCEPTED,
+            target_object_type="TenantAssignment",
+            target_object_id=ta.id,
+            property_id=inv.property_id,
+            unit_id=inv.unit_id,
+            invitation_id=inv.id,
+            actor_user_id=user.id,
+            meta={"invitation_code": code, "unit_id": inv.unit_id, "tenant_email": user.email},
+        )
 
     db.delete(pending)
     db.commit()
@@ -1409,8 +1376,21 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
         )
 
     if _mailgun_configured():
-        # Store pending; user is created only after email verification (same UI flow as owner signup).
-        # Do not require or validate invitation code here; we'll apply it at verify time.
+        # Validate invite kind vs requested role before storing pending.
+        if code:
+            inv_check = db.query(Invitation).filter(Invitation.invitation_code == code).first()
+            if inv_check:
+                inv_kind = (getattr(inv_check, "invitation_kind", None) or "").strip().lower()
+                if target_role == UserRole.guest and inv_kind == "tenant":
+                    raise HTTPException(
+                        status_code=400,
+                        detail="This invitation is for a tenant, not a guest. Please use the tenant signup with this link.",
+                    )
+                if target_role == UserRole.tenant and inv_kind != "tenant":
+                    raise HTTPException(
+                        status_code=400,
+                        detail="This invitation is for a guest stay, not a tenant. Please use the guest signup with this link.",
+                    )
         verification_code = _generate_verification_code()
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=VERIFICATION_CODE_EXPIRE_MINUTES)
         extra = {
@@ -1489,6 +1469,24 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             raise HTTPException(
                 status_code=400,
                 detail="This invitation is for a tenant, not a guest. Please use the tenant signup with this link.",
+            )
+        inv_guest_email = (getattr(inv, "guest_email", None) or "").strip().lower()
+        if inv_guest_email and (data.email or "").strip().lower() != inv_guest_email:
+            create_log(
+                db,
+                CATEGORY_FAILED_ATTEMPT,
+                "Guest register: invitation email mismatch",
+                f"Guest registration with email {data.email} for invitation {code} intended for {inv.guest_email}.",
+                property_id=inv.property_id,
+                actor_email=data.email,
+                ip_address=request.client.host if request.client else None,
+                user_agent=(request.headers.get("user-agent") or "").strip() or None,
+                meta={"invitation_code_attempted": code, "invitation_guest_email": inv.guest_email},
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=400,
+                detail="Please use the email address this invitation was sent to.",
             )
     if code and target_role == UserRole.tenant:
         inv = (
@@ -1584,10 +1582,28 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
         )
         db.add(profile)
     if target_role == UserRole.tenant and code and inv:
-        # Do not create TenantAssignment here. Tenant must sign the agreement on the dashboard
-        # and then accept the invite (accept_invite) to create the assignment.
-        pending = GuestPendingInvite(user_id=user.id, invitation_id=inv.id)
-        db.add(pending)
+        # Tenant does not sign any agreement. Create TenantAssignment directly (accept invite / access to unit).
+        ta = TenantAssignment(
+            unit_id=inv.unit_id,
+            user_id=user.id,
+            start_date=inv.stay_start_date,
+            end_date=inv.stay_end_date,
+            invited_by_user_id=getattr(inv, "invited_by_user_id", None),
+        )
+        db.add(ta)
+        inv.status = "accepted"
+        inv.token_state = "BURNED"
+        create_ledger_event(
+            db,
+            ACTION_TENANT_ACCEPTED,
+            target_object_type="TenantAssignment",
+            target_object_id=ta.id,
+            property_id=inv.property_id,
+            unit_id=inv.unit_id,
+            invitation_id=inv.id,
+            actor_user_id=user.id,
+            meta={"invitation_code": code, "unit_id": inv.unit_id, "tenant_email": user.email},
+        )
     db.commit()
 
     # Full accept path (guests only): code + valid signature -> create stay, mark inv accepted, token BURNED
@@ -1735,83 +1751,71 @@ def accept_invite(
         db.commit()
         raise HTTPException(status_code=400, detail="Invalid or expired invitation code")
 
-    sig = db.query(AgreementSignature).filter(AgreementSignature.id == data.agreement_signature_id).first()
-    if not sig:
+    inv_kind_raw = (getattr(inv, "invitation_kind", None) or "").strip().lower()
+    is_tenant_invite = inv_kind_raw == "tenant"
+
+    # Reject immediately if invite type doesn't match user role
+    if is_tenant_invite and current_user.role == UserRole.guest:
+        raise HTTPException(
+            status_code=400,
+            detail="This invitation is for a tenant. Please sign in as a tenant to accept it.",
+        )
+    if not is_tenant_invite and current_user.role == UserRole.tenant:
+        raise HTTPException(
+            status_code=400,
+            detail="This invitation is for a guest. Please sign in as a guest to accept it.",
+        )
+
+    # Reject if invitation was sent to a different email address
+    inv_guest_email = (getattr(inv, "guest_email", None) or "").strip().lower()
+    if inv_guest_email and (current_user.email or "").strip().lower() != inv_guest_email:
         create_log(
             db,
             CATEGORY_FAILED_ATTEMPT,
-            "Accept invite: missing or invalid signature",
-            f"Accept-invite for {code} with invalid or missing agreement_signature_id.",
+            "Accept invite: email mismatch",
+            f"User {current_user.email} attempted to accept invitation {code} intended for {inv.guest_email}.",
             property_id=inv.property_id,
             invitation_id=inv.id,
             actor_user_id=current_user.id,
             actor_email=current_user.email,
             ip_address=request.client.host if request.client else None,
             user_agent=(request.headers.get("user-agent") or "").strip() or None,
-            meta={"invitation_code": code, "signature_id_attempted": data.agreement_signature_id},
+            meta={"invitation_code": code, "invitation_guest_email": inv.guest_email},
         )
         db.commit()
-        raise HTTPException(status_code=400, detail="Agreement must be signed before accepting invitation")
-    if (sig.invitation_code or "").strip().upper() != code:
-        create_log(
-            db,
-            CATEGORY_FAILED_ATTEMPT,
-            "Accept invite: signature does not match invitation",
-            f"Accept-invite for {code}: signature {sig.id} does not match invitation.",
-            property_id=inv.property_id,
-            invitation_id=inv.id,
-            actor_user_id=current_user.id,
-            actor_email=current_user.email,
-            ip_address=request.client.host if request.client else None,
-            user_agent=(request.headers.get("user-agent") or "").strip() or None,
-            meta={"invitation_code": code, "signature_id": sig.id},
+        raise HTTPException(
+            status_code=403,
+            detail="This invitation was sent to a different email address. You cannot accept an invitation intended for someone else.",
         )
-        db.commit()
-        raise HTTPException(status_code=400, detail="Agreement signature does not match this invitation")
-    if (sig.guest_email or "").strip().lower() != (current_user.email or "").strip().lower():
-        create_log(
-            db,
-            CATEGORY_FAILED_ATTEMPT,
-            "Accept invite: signature email does not match",
-            f"Accept-invite for {code}: signature email does not match current user.",
-            property_id=inv.property_id,
-            invitation_id=inv.id,
-            actor_user_id=current_user.id,
-            actor_email=current_user.email,
-            ip_address=request.client.host if request.client else None,
-            user_agent=(request.headers.get("user-agent") or "").strip() or None,
-            meta={"invitation_code": code},
-        )
-        db.commit()
-        raise HTTPException(status_code=400, detail="Agreement signature email does not match current user")
-    if sig.used_by_user_id is not None and sig.used_by_user_id != current_user.id:
-        create_log(
-            db,
-            CATEGORY_FAILED_ATTEMPT,
-            "Accept invite: signature already used",
-            f"Accept-invite for {code}: signature {sig.id} already used by another user.",
-            property_id=inv.property_id,
-            invitation_id=inv.id,
-            actor_user_id=current_user.id,
-            actor_email=current_user.email,
-            ip_address=request.client.host if request.client else None,
-            user_agent=(request.headers.get("user-agent") or "").strip() or None,
-            meta={"invitation_code": code, "signature_id": sig.id},
-        )
-        db.commit()
-        raise HTTPException(status_code=400, detail="Agreement signature has already been used")
-    # If signature was sent to Dropbox, require the signed PDF before accepting (try fetch once)
-    if getattr(sig, "dropbox_sign_request_id", None) and not getattr(sig, "signed_pdf_bytes", None):
-        pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
-        if pdf_bytes:
-            sig.signed_pdf_bytes = pdf_bytes
-            db.commit()
-        else:
+
+    sig = None
+    if is_tenant_invite:
+        # Tenant invitations don't require an agreement signature
+        pass
+    else:
+        sig = db.query(AgreementSignature).filter(AgreementSignature.id == data.agreement_signature_id).first()
+        if not sig:
             create_log(
                 db,
                 CATEGORY_FAILED_ATTEMPT,
-                "Accept invite: Dropbox signing not complete",
-                f"Accept-invite for {code}: signature {sig.id} sent to Dropbox but not yet signed.",
+                "Accept invite: missing or invalid signature",
+                f"Accept-invite for {code} with invalid or missing agreement_signature_id.",
+                property_id=inv.property_id,
+                invitation_id=inv.id,
+                actor_user_id=current_user.id,
+                actor_email=current_user.email,
+                ip_address=request.client.host if request.client else None,
+                user_agent=(request.headers.get("user-agent") or "").strip() or None,
+                meta={"invitation_code": code, "signature_id_attempted": data.agreement_signature_id},
+            )
+            db.commit()
+            raise HTTPException(status_code=400, detail="Agreement must be signed before accepting invitation")
+        if (sig.invitation_code or "").strip().upper() != code:
+            create_log(
+                db,
+                CATEGORY_FAILED_ATTEMPT,
+                "Accept invite: signature does not match invitation",
+                f"Accept-invite for {code}: signature {sig.id} does not match invitation.",
                 property_id=inv.property_id,
                 invitation_id=inv.id,
                 actor_user_id=current_user.id,
@@ -1821,26 +1825,79 @@ def accept_invite(
                 meta={"invitation_code": code, "signature_id": sig.id},
             )
             db.commit()
-            raise HTTPException(
-                status_code=400,
-                detail="Please complete signing in Dropbox before accepting the invitation.",
+            raise HTTPException(status_code=400, detail="Agreement signature does not match this invitation")
+        if (sig.guest_email or "").strip().lower() != (current_user.email or "").strip().lower():
+            create_log(
+                db,
+                CATEGORY_FAILED_ATTEMPT,
+                "Accept invite: signature email does not match",
+                f"Accept-invite for {code}: signature email does not match current user.",
+                property_id=inv.property_id,
+                invitation_id=inv.id,
+                actor_user_id=current_user.id,
+                actor_email=current_user.email,
+                ip_address=request.client.host if request.client else None,
+                user_agent=(request.headers.get("user-agent") or "").strip() or None,
+                meta={"invitation_code": code},
             )
-    if not (sig.acks_read and sig.acks_temporary and sig.acks_vacate and sig.acks_electronic):
-        create_log(
-            db,
-            CATEGORY_FAILED_ATTEMPT,
-            "Accept invite: not all acknowledgments accepted",
-            f"Accept-invite for {code}: agreement acknowledgments incomplete.",
-            property_id=inv.property_id,
-            invitation_id=inv.id,
-            actor_user_id=current_user.id,
-            actor_email=current_user.email,
-            ip_address=request.client.host if request.client else None,
-            user_agent=(request.headers.get("user-agent") or "").strip() or None,
-            meta={"invitation_code": code},
-        )
-        db.commit()
-        raise HTTPException(status_code=400, detail="All agreement acknowledgments must be accepted")
+            db.commit()
+            raise HTTPException(status_code=400, detail="Agreement signature email does not match current user")
+        if sig.used_by_user_id is not None and sig.used_by_user_id != current_user.id:
+            create_log(
+                db,
+                CATEGORY_FAILED_ATTEMPT,
+                "Accept invite: signature already used",
+                f"Accept-invite for {code}: signature {sig.id} already used by another user.",
+                property_id=inv.property_id,
+                invitation_id=inv.id,
+                actor_user_id=current_user.id,
+                actor_email=current_user.email,
+                ip_address=request.client.host if request.client else None,
+                user_agent=(request.headers.get("user-agent") or "").strip() or None,
+                meta={"invitation_code": code, "signature_id": sig.id},
+            )
+            db.commit()
+            raise HTTPException(status_code=400, detail="Agreement signature has already been used")
+        if getattr(sig, "dropbox_sign_request_id", None) and not getattr(sig, "signed_pdf_bytes", None):
+            pdf_bytes = get_signed_pdf(sig.dropbox_sign_request_id)
+            if pdf_bytes:
+                sig.signed_pdf_bytes = pdf_bytes
+                db.commit()
+            else:
+                create_log(
+                    db,
+                    CATEGORY_FAILED_ATTEMPT,
+                    "Accept invite: Dropbox signing not complete",
+                    f"Accept-invite for {code}: signature {sig.id} sent to Dropbox but not yet signed.",
+                    property_id=inv.property_id,
+                    invitation_id=inv.id,
+                    actor_user_id=current_user.id,
+                    actor_email=current_user.email,
+                    ip_address=request.client.host if request.client else None,
+                    user_agent=(request.headers.get("user-agent") or "").strip() or None,
+                    meta={"invitation_code": code, "signature_id": sig.id},
+                )
+                db.commit()
+                raise HTTPException(
+                    status_code=400,
+                    detail="Please complete signing in Dropbox before accepting the invitation.",
+                )
+        if not (sig.acks_read and sig.acks_temporary and sig.acks_vacate and sig.acks_electronic):
+            create_log(
+                db,
+                CATEGORY_FAILED_ATTEMPT,
+                "Accept invite: not all acknowledgments accepted",
+                f"Accept-invite for {code}: agreement acknowledgments incomplete.",
+                property_id=inv.property_id,
+                invitation_id=inv.id,
+                actor_user_id=current_user.id,
+                actor_email=current_user.email,
+                ip_address=request.client.host if request.client else None,
+                user_agent=(request.headers.get("user-agent") or "").strip() or None,
+                meta={"invitation_code": code},
+            )
+            db.commit()
+            raise HTTPException(status_code=400, detail="All agreement acknowledgments must be accepted")
 
     # Idempotent: if this invite was already accepted by this user (stay exists), return success without creating duplicate.
     # Still clean up any leftover GuestPendingInvite and mark the signature as used so the dashboard
@@ -1851,10 +1908,9 @@ def accept_invite(
         .first()
     )
     if existing_stay:
-        if sig.used_by_user_id is None:
+        if sig and sig.used_by_user_id is None:
             sig.used_by_user_id = current_user.id
             sig.used_at = datetime.now(timezone.utc)
-        # Ensure invitation is fully marked so guestPendingInvites stops returning it
         inv.status = "accepted"
         inv.token_state = "BURNED"
         db.query(GuestPendingInvite).filter(
@@ -1886,10 +1942,9 @@ def accept_invite(
             .first()
         )
         if existing_ta:
-            if sig.used_by_user_id is None:
+            if sig and sig.used_by_user_id is None:
                 sig.used_by_user_id = current_user.id
                 sig.used_at = datetime.now(timezone.utc)
-            # Ensure invitation is fully marked so guestPendingInvites stops returning it
             inv.status = "accepted"
             inv.token_state = "BURNED"
             db.query(GuestPendingInvite).filter(
@@ -1910,7 +1965,7 @@ def accept_invite(
         inv.status = "accepted"
         prev_token_state = getattr(inv, "token_state", None) or "STAGED"
         inv.token_state = "BURNED"
-        if sig.used_by_user_id is None:
+        if sig and sig.used_by_user_id is None:
             sig.used_by_user_id = current_user.id
             sig.used_at = datetime.now(timezone.utc)
         db.query(GuestPendingInvite).filter(
@@ -1933,7 +1988,7 @@ def accept_invite(
             actor_email=current_user.email,
             ip_address=ip,
             user_agent=ua,
-            meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id, "tenant_assignment_id": ta.id},
+            meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id if sig else None, "tenant_assignment_id": ta.id},
         )
         create_ledger_event(
             db,
@@ -1944,7 +1999,7 @@ def accept_invite(
             stay_id=None,
             invitation_id=inv.id,
             actor_user_id=current_user.id,
-            meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id},
+            meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id if sig else None},
             ip_address=ip,
             user_agent=ua,
         )
@@ -1978,8 +2033,7 @@ def accept_invite(
     inv.status = "accepted"
     prev_token_state = getattr(inv, "token_state", None) or "STAGED"
     inv.token_state = "BURNED"
-    # Occupancy is set to OCCUPIED only when guest checks in (guest_check_in endpoint).
-    if sig.used_by_user_id is None:
+    if sig and sig.used_by_user_id is None:
         sig.used_by_user_id = current_user.id
         sig.used_at = datetime.now(timezone.utc)
     db.query(GuestPendingInvite).filter(
@@ -2020,7 +2074,7 @@ def accept_invite(
         actor_email=current_user.email,
         ip_address=ip,
         user_agent=ua,
-        meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id},
+        meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id if sig else None},
     )
     create_ledger_event(
         db,
@@ -2031,7 +2085,7 @@ def accept_invite(
         stay_id=stay.id,
         invitation_id=inv.id,
         actor_user_id=current_user.id,
-        meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id},
+        meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id if sig else None},
         ip_address=ip,
         user_agent=ua,
     )

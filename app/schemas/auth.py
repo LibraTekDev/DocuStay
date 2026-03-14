@@ -1,7 +1,7 @@
 """Module A: Auth schemas."""
 import enum
 import re
-from typing import Literal
+from typing import Literal, Optional
 from pydantic import BaseModel, EmailStr, model_validator, field_validator
 from app.models.user import UserRole, OwnerType
 
@@ -135,7 +135,10 @@ class GuestRegister(BaseModel):
             raise ValueError("Passwords do not match")
         if not self.terms_agreed or not self.privacy_agreed:
             raise ValueError("You must agree to Terms and Privacy Policy")
-        if not self.guest_status_acknowledged or not self.no_tenancy_acknowledged or not self.vacate_acknowledged:
+        # Guest-specific acknowledgments required only for guest role. Tenant is primary resident; no guest stay language.
+        if self.role == "guest" and not (
+            self.guest_status_acknowledged and self.no_tenancy_acknowledged and self.vacate_acknowledged
+        ):
             raise ValueError("You must acknowledge all guest and vacate terms")
         if self.role == "guest" and not (self.permanent_address and self.permanent_city and self.permanent_state and self.permanent_zip):
             raise ValueError("Permanent address is required for guests")
@@ -166,9 +169,11 @@ class ManagerRegister(BaseModel):
 
 
 class AcceptInvite(BaseModel):
-    """Accept an invitation as an existing guest (creates Stay, marks invitation accepted)."""
+    """Accept an invitation as an existing guest (creates Stay, marks invitation accepted).
+    For tenant invitations, agreement_signature_id may be None (tenants don't sign guest agreements).
+    """
     invitation_code: str
-    agreement_signature_id: int
+    agreement_signature_id: Optional[int] = None
 
 
 class VerifyEmailRequest(BaseModel):

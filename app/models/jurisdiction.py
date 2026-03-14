@@ -5,19 +5,34 @@ from app.models.region_rule import StayClassification, RiskLevel
 
 
 class Jurisdiction(Base):
-    """One row per region (NYC, FL, CA, TX, WA). Drives authority wrap, agreements, JLE."""
+    """One row per state. Drives authority wrap, agreements, JLE.
+
+    Key separation:
+      legal_threshold_days    – the real statutory threshold (e.g. 30 for NY, 14 for CA)
+      platform_renewal_cycle_days – how long each authorization period is (operational; usually threshold - 1)
+      reminder_days_before    – days before renewal cycle ends to prompt the user
+      max_stay_days           – kept for backward compat, equals platform_renewal_cycle_days
+      tenancy_threshold_days  – kept for backward compat, equals legal_threshold_days
+    """
     __tablename__ = "jurisdictions"
 
     id = Column(Integer, primary_key=True, index=True)
-    region_code = Column(String(20), nullable=False, unique=True, index=True)  # NYC, FL, CA, TX, WA
-    state_code = Column(String(10), nullable=False)  # NY, FL, CA, TX, WA
-    name = Column(String(100), nullable=False)  # New York, Florida, California, ...
+    region_code = Column(String(20), nullable=False, unique=True, index=True)
+    state_code = Column(String(10), nullable=False)
+    name = Column(String(100), nullable=False)
 
+    jurisdiction_group = Column(String(2), nullable=True)  # A, B, C, D, E
+
+    legal_threshold_days = Column(Integer, nullable=True)
+    platform_renewal_cycle_days = Column(Integer, nullable=False)
+    reminder_days_before = Column(Integer, nullable=False, default=3)
+
+    # Backward-compat aliases (synced with new fields in seed)
     max_stay_days = Column(Integer, nullable=False)
     tenancy_threshold_days = Column(Integer, nullable=True)
     warning_days = Column(Integer, nullable=True)
 
-    agreement_type = Column(String(64), nullable=True)  # REVOCABLE_LICENSE, HB621_DECLARATION, ...
+    agreement_type = Column(String(64), nullable=True)
     removal_guest_text = Column(Text, nullable=True)
     removal_tenant_text = Column(Text, nullable=True)
 

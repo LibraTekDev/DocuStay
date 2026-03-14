@@ -8,16 +8,8 @@ import { JURISDICTION_RULES } from '../../services/jleService';
 import { propertiesApi, dashboardApi, APP_ORIGIN, emitPropertiesChanged, getContextMode, setContextMode, type Property, type OwnerStayView, type OwnerAuditLogEntry, type BillingResponse } from '../../services/api';
 import { ModeSwitcher } from '../../components/ModeSwitcher';
 import { copyToClipboard } from '../../utils/clipboard';
-import { getTodayLocal } from '../../utils/dateUtils';
+import { getTodayLocal, formatStayDuration } from '../../utils/dateUtils';
 import { toUserFriendlyInvitationError } from '../../utils/invitationErrors';
-
-function formatStayDuration(startStr: string, endStr: string): string {
-  const start = new Date(startStr);
-  const end = new Date(endStr);
-  const days = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
-  const fmt = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  return `${fmt(start)} – ${fmt(end)} (${days} day${days !== 1 ? 's' : ''})`;
-}
 
 const PROPERTY_TYPES = [
   { id: 'house', name: 'House' },
@@ -109,14 +101,15 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
 
   const canInvite = billing?.can_invite !== false;
   const stateKey = property?.state ?? 'FL';
-  // Prefer jurisdiction from API (JurisdictionInfo SOT); fallback to frontend rules for legacy/offline
-  const jurisdictionInfo = property?.jurisdiction_documentation
-    ? {
-        name: property.jurisdiction_documentation.name,
-        maxSafeStayDays: property.jurisdiction_documentation.max_stay_days,
-        warningDays: property.jurisdiction_documentation.warning_days,
-      }
-    : (JURISDICTION_RULES[stateKey as keyof typeof JURISDICTION_RULES] ?? JURISDICTION_RULES.FL);
+  const jDoc = property?.jurisdiction_documentation;
+  const jFallback = JURISDICTION_RULES[stateKey as keyof typeof JURISDICTION_RULES] ?? JURISDICTION_RULES.FL;
+  const jurisdictionInfo = {
+    name: jDoc?.name ?? jFallback.name,
+    legalThresholdDays: jDoc?.legal_threshold_days ?? jFallback.legalThresholdDays,
+    platformRenewalCycleDays: jDoc?.platform_renewal_cycle_days ?? jFallback.platformRenewalCycleDays,
+    reminderDaysBefore: jDoc?.reminder_days_before ?? jFallback.reminderDaysBefore,
+    jurisdictionGroup: jDoc?.jurisdiction_group ?? jFallback.group,
+  };
   const propertyStays = stays.filter((s) => s.property_id === id);
   // Only checked-in stays (guest clicked Check in) count as active for occupancy and DMS
   const activeStaysForProperty = propertyStays.filter((s) => s.checked_in_at && !s.checked_out_at && !s.cancelled_at);
@@ -493,15 +486,29 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
               </span>
             )}
             {!isInactive && contextMode !== 'personal' && (
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setInviteManagerEmail('');
-                  setShowInviteManagerModal(true);
-                }}
-              >
-                Invite Manager
-              </Button>
+              <>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    const units = property?.is_multi_unit && propertyUnits.length > 0 ? propertyUnits : (property ? [{ id: 0, unit_label: '1', occupancy_status: property.occupancy_status ?? 'unknown' }] : []);
+                    const firstUnitId = units[0]?.id ?? 0;
+                    setInviteTenantUnitId(firstUnitId || null);
+                    setInviteTenantForm({ tenant_name: '', tenant_email: '', lease_start_date: '', lease_end_date: '' });
+                    setShowInviteTenantModal(true);
+                  }}
+                >
+                  Invite Tenant
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setInviteManagerEmail('');
+                    setShowInviteManagerModal(true);
+                  }}
+                >
+                  Invite Manager
+                </Button>
+              </>
             )}
             {isInactive ? (
               <Button
@@ -1181,24 +1188,29 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
             <h3 className="text-3xl font-black text-slate-800 tracking-tighter">Region documentation: {jurisdictionInfo.name}</h3>
 
             <section>
-              <h4 className="text-lg font-bold text-slate-700 mb-4 uppercase tracking-wider">Documented stay limits</h4>
-              <p className="text-slate-600 leading-relaxed mb-4">DocuStay uses region-based stay limits for documentation and audit purposes. For {jurisdictionInfo.name}, the documented max stay is {jurisdictionInfo.maxSafeStayDays} days. All stays are recorded in the audit trail.</p>
+              <h4 className="text-lg font-bold text-slate-700 mb-4 uppercase tracking-wider">Jurisdiction threshold</h4>
+              <p className="text-slate-600 leading-relaxed mb-4">
+                {jurisdictionInfo.legalThresholdDays != null
+                  ? <>The legal tenancy threshold for {jurisdictionInfo.name} is <strong>{jurisdictionInfo.legalThresholdDays} days</strong>. The platform creates renewed authorization records every <strong>{jurisdictionInfo.platformRenewalCycleDays} days</strong> to interrupt continuity and maintain a defensible audit trail.</>
+                  : <>Tenancy in {jurisdictionInfo.name} is {jurisdictionInfo.jurisdictionGroup === 'D' ? 'behavior-based' : 'lease-defined'} (no fixed day threshold). The platform uses a <strong>{jurisdictionInfo.platformRenewalCycleDays}-day</strong> renewal cycle as the default authorization period.</>
+                }
+              </p>
             </section>
 
             <section className="p-6 rounded-xl border border-slate-200 bg-slate-50/50">
-              <h4 className="text-lg font-bold text-slate-800 mb-4 uppercase tracking-wider">Stay status categories</h4>
+              <h4 className="text-lg font-bold text-slate-800 mb-4 uppercase tracking-wider">Authorization status categories</h4>
               <div className="grid gap-4 text-sm">
                 <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                  <span className="font-semibold text-slate-700 mr-2">Within limit:</span>
-                  <span className="text-slate-600">Stay duration under {jurisdictionInfo.maxSafeStayDays - jurisdictionInfo.warningDays} days. Full documentation active.</span>
+                  <span className="font-semibold text-slate-700 mr-2">Within cycle:</span>
+                  <span className="text-slate-600">Authorization period under {jurisdictionInfo.platformRenewalCycleDays - jurisdictionInfo.reminderDaysBefore} days. Full documentation active.</span>
                 </div>
                 <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                  <span className="font-semibold text-slate-700 mr-2">Approaching limit:</span>
-                  <span className="text-slate-600">Within {jurisdictionInfo.warningDays} days of documented max. Verification logs recorded.</span>
+                  <span className="font-semibold text-slate-700 mr-2">Approaching renewal:</span>
+                  <span className="text-slate-600">Within {jurisdictionInfo.reminderDaysBefore} days of cycle end. Renewal prompts are sent.</span>
                 </div>
                 <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-                  <span className="font-semibold text-slate-700 mr-2">Past limit:</span>
-                  <span className="text-slate-600">Stay exceeds documented max for {jurisdictionInfo.name}. Status and actions are recorded in the audit trail.</span>
+                  <span className="font-semibold text-slate-700 mr-2">Past cycle:</span>
+                  <span className="text-slate-600">Authorization exceeds the {jurisdictionInfo.platformRenewalCycleDays}-day renewal cycle for {jurisdictionInfo.name}. Status and actions are recorded in the audit trail.</span>
                 </div>
               </div>
             </section>

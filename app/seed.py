@@ -1,182 +1,250 @@
-"""Module D: Seed region rules (NYC, FL, CA, TX), jurisdiction SOT, and optional admin user."""
+"""Seed jurisdiction rules (all 50 US states), region rules (legacy), and optional admin user.
+
+Jurisdiction groupings — legal threshold is the REAL statutory number;
+platform_renewal_cycle_days is the operational authorization period.
+
+  Group A  (14-day common-law): CA, CO, CT, FL, ME, MO, NC
+  Group B  (30-day):            AL, IN, KS, KY, NY, OH, PA
+  Group C  (lease-defined, 14d default): AK, AR, DE, HI, ID, IA, LA, MA, MI, NE,
+           NV, NH, NJ, NM, ND, OK, OR, RI, SC, SD, UT, VT, VA, WA, WV, WI, WY
+  Group D  (behavior-based):    GA, IL, MD, MN, MS, TN, TX
+  Group E  (unique):            AZ (29-day / 28-day), MT (7-day / 7-day)
+"""
 import os
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from app.models.region_rule import RegionRule, StayClassification, RiskLevel
 from app.models.jurisdiction import Jurisdiction, JurisdictionStatute, JurisdictionZipMapping
 
+# ---------------------------------------------------------------------------
+# Grouped jurisdiction definitions
+# ---------------------------------------------------------------------------
+
+_GROUP_A = {
+    "group": "A",
+    "legal_threshold_days": 14,
+    "platform_renewal_cycle_days": 13,
+    "reminder_days_before": 3,
+    "risk_level": RiskLevel.medium,
+    "states": {
+        "CA": ("California",  True,  "TRANSIENT_LODGER"),
+        "CO": ("Colorado",    False, "REVOCABLE_LICENSE"),
+        "CT": ("Connecticut", False, "REVOCABLE_LICENSE"),
+        "FL": ("Florida",     False, "HB621_DECLARATION"),
+        "ME": ("Maine",       False, "REVOCABLE_LICENSE"),
+        "MO": ("Missouri",    False, "REVOCABLE_LICENSE"),
+        "NC": ("North Carolina", False, "REVOCABLE_LICENSE"),
+    },
+}
+
+_GROUP_B = {
+    "group": "B",
+    "legal_threshold_days": 30,
+    "platform_renewal_cycle_days": 29,
+    "reminder_days_before": 5,
+    "risk_level": RiskLevel.high,
+    "states": {
+        "AL": ("Alabama",      False, "REVOCABLE_LICENSE"),
+        "IN": ("Indiana",      False, "REVOCABLE_LICENSE"),
+        "KS": ("Kansas",       False, "REVOCABLE_LICENSE"),
+        "KY": ("Kentucky",     False, "REVOCABLE_LICENSE"),
+        "NY": ("New York",     False, "REVOCABLE_LICENSE"),
+        "OH": ("Ohio",         False, "REVOCABLE_LICENSE"),
+        "PA": ("Pennsylvania", False, "REVOCABLE_LICENSE"),
+    },
+}
+
+_GROUP_C = {
+    "group": "C",
+    "legal_threshold_days": None,  # lease-defined — no statutory day count
+    "platform_renewal_cycle_days": 14,
+    "reminder_days_before": 3,
+    "risk_level": RiskLevel.medium,
+    "states": {
+        "AK": ("Alaska",         False, "REVOCABLE_LICENSE"),
+        "AR": ("Arkansas",       False, "REVOCABLE_LICENSE"),
+        "DE": ("Delaware",       False, "REVOCABLE_LICENSE"),
+        "HI": ("Hawaii",         False, "REVOCABLE_LICENSE"),
+        "ID": ("Idaho",          False, "REVOCABLE_LICENSE"),
+        "IA": ("Iowa",           False, "REVOCABLE_LICENSE"),
+        "LA": ("Louisiana",      False, "REVOCABLE_LICENSE"),
+        "MA": ("Massachusetts",  False, "REVOCABLE_LICENSE"),
+        "MI": ("Michigan",       False, "REVOCABLE_LICENSE"),
+        "NE": ("Nebraska",       False, "REVOCABLE_LICENSE"),
+        "NV": ("Nevada",         False, "REVOCABLE_LICENSE"),
+        "NH": ("New Hampshire",  False, "REVOCABLE_LICENSE"),
+        "NJ": ("New Jersey",     False, "REVOCABLE_LICENSE"),
+        "NM": ("New Mexico",     False, "REVOCABLE_LICENSE"),
+        "ND": ("North Dakota",   False, "REVOCABLE_LICENSE"),
+        "OK": ("Oklahoma",       False, "REVOCABLE_LICENSE"),
+        "OR": ("Oregon",         False, "REVOCABLE_LICENSE"),
+        "RI": ("Rhode Island",   False, "REVOCABLE_LICENSE"),
+        "SC": ("South Carolina", False, "REVOCABLE_LICENSE"),
+        "SD": ("South Dakota",   False, "REVOCABLE_LICENSE"),
+        "UT": ("Utah",           False, "REVOCABLE_LICENSE"),
+        "VT": ("Vermont",        False, "REVOCABLE_LICENSE"),
+        "VA": ("Virginia",       False, "REVOCABLE_LICENSE"),
+        "WA": ("Washington",     False, "ANTI_SQUATTER_DECLARATION"),
+        "WV": ("West Virginia",  False, "REVOCABLE_LICENSE"),
+        "WI": ("Wisconsin",      False, "REVOCABLE_LICENSE"),
+        "WY": ("Wyoming",        False, "REVOCABLE_LICENSE"),
+    },
+}
+
+_GROUP_D = {
+    "group": "D",
+    "legal_threshold_days": None,  # behavior-based — no fixed day count
+    "platform_renewal_cycle_days": 14,
+    "reminder_days_before": 3,
+    "risk_level": RiskLevel.medium,
+    "states": {
+        "GA": ("Georgia",    False, "REVOCABLE_LICENSE"),
+        "IL": ("Illinois",   False, "REVOCABLE_LICENSE"),
+        "MD": ("Maryland",   False, "REVOCABLE_LICENSE"),
+        "MN": ("Minnesota",  False, "REVOCABLE_LICENSE"),
+        "MS": ("Mississippi", False, "REVOCABLE_LICENSE"),
+        "TN": ("Tennessee",  False, "REVOCABLE_LICENSE"),
+        "TX": ("Texas",      False, "TRANSIENT_GUEST"),
+    },
+}
+
+_GROUP_E_STATES = [
+    {
+        "group": "E",
+        "state_code": "AZ",
+        "name": "Arizona",
+        "legal_threshold_days": 29,
+        "platform_renewal_cycle_days": 28,
+        "reminder_days_before": 5,
+        "risk_level": RiskLevel.medium,
+        "allow_extended": False,
+        "agreement_type": "REVOCABLE_LICENSE",
+    },
+    {
+        "group": "E",
+        "state_code": "MT",
+        "name": "Montana",
+        "legal_threshold_days": 7,
+        "platform_renewal_cycle_days": 7,
+        "reminder_days_before": 2,
+        "risk_level": RiskLevel.high,
+        "allow_extended": False,
+        "agreement_type": "REVOCABLE_LICENSE",
+    },
+]
+
+ALL_GROUPS = [_GROUP_A, _GROUP_B, _GROUP_C, _GROUP_D]
+
 
 def seed_region_rules(db: Session) -> None:
     if db.query(RegionRule).count() > 0:
         return
-    rules = [
-        RegionRule(
-            region_code="NYC",
-            max_stay_days=29,
+    for grp in ALL_GROUPS:
+        for sc, (name, ext, _) in grp["states"].items():
+            db.add(RegionRule(
+                region_code=sc,
+                max_stay_days=grp["platform_renewal_cycle_days"],
+                stay_classification_label=StayClassification.guest,
+                risk_level=grp["risk_level"],
+                allow_extended_if_owner_occupied=ext,
+            ))
+    for e in _GROUP_E_STATES:
+        db.add(RegionRule(
+            region_code=e["state_code"],
+            max_stay_days=e["platform_renewal_cycle_days"],
             stay_classification_label=StayClassification.guest,
-            risk_level=RiskLevel.high,
-            statute_reference="NYC Admin Code § 26-521",
-            plain_english_explanation="Occupying a dwelling for 30 consecutive days creates tenancy rights. Max 29 days.",
-            allow_extended_if_owner_occupied=False,
-        ),
-        RegionRule(
-            region_code="FL",
-            max_stay_days=30,
-            stay_classification_label=StayClassification.guest,
-            risk_level=RiskLevel.medium,
-            statute_reference="FL Statute § 82.036 (HB 621)",
-            plain_english_explanation="Sheriff may remove unauthorized person with signed affidavit; no lease.",
-            allow_extended_if_owner_occupied=False,
-        ),
-        RegionRule(
-            region_code="CA",
-            max_stay_days=29,
-            stay_classification_label=StayClassification.guest,
-            risk_level=RiskLevel.medium,
-            statute_reference="CA Civil Code § 1940.1, AB 1482",
-            plain_english_explanation="Transient occupancy; 30+ days creates tenancy. Lodger if owner lives in.",
-            allow_extended_if_owner_occupied=True,
-        ),
-        RegionRule(
-            region_code="TX",
-            max_stay_days=29,
-            stay_classification_label=StayClassification.guest,
-            risk_level=RiskLevel.medium,
-            statute_reference="Texas Property Code § 92.001, Penal Code § 30.05",
-            plain_english_explanation="Transient housing exempt from landlord-tenant; criminal trespass after notice.",
-            allow_extended_if_owner_occupied=False,
-        ),
-        RegionRule(
-            region_code="WA",
-            max_stay_days=29,
-            stay_classification_label=StayClassification.guest,
-            risk_level=RiskLevel.medium,
-            statute_reference="RCW 9A.52.105",
-            plain_english_explanation="Tenancy is fact-specific; owner declaration can assist police removal in defined cases.",
-            allow_extended_if_owner_occupied=False,
-        ),
-    ]
-    for r in rules:
-        db.add(r)
+            risk_level=e["risk_level"],
+            allow_extended_if_owner_occupied=e["allow_extended"],
+        ))
     db.commit()
 
 
+def _build_jurisdiction(state_code, name, grp, legal_threshold, renewal, reminder, risk, allow_ext, agreement_type):
+    return Jurisdiction(
+        region_code=state_code,
+        state_code=state_code,
+        name=name,
+        jurisdiction_group=grp,
+        legal_threshold_days=legal_threshold,
+        platform_renewal_cycle_days=renewal,
+        reminder_days_before=reminder,
+        max_stay_days=renewal,                   # backward compat
+        tenancy_threshold_days=legal_threshold,   # backward compat
+        warning_days=reminder,                    # backward compat
+        agreement_type=agreement_type,
+        stay_classification_label=StayClassification.guest,
+        risk_level=risk,
+        allow_extended_if_owner_occupied=allow_ext,
+    )
+
+
 def seed_jurisdiction_sot(db: Session) -> None:
-    """Seed jurisdiction SOT tables: jurisdictions, statutes, zip mapping. Idempotent."""
+    """Seed all 50 US states using grouped jurisdiction buckets. Idempotent."""
     if db.query(Jurisdiction).count() > 0:
         return
 
-    jurisdictions = [
-        Jurisdiction(
-            region_code="NYC",
-            state_code="NY",
-            name="New York",
-            max_stay_days=29,
-            tenancy_threshold_days=30,
-            warning_days=5,
-            agreement_type="REVOCABLE_LICENSE",
-            removal_guest_text="Immediate with license termination",
-            removal_tenant_text="30-60 day court process",
-            stay_classification_label=StayClassification.guest,
-            risk_level=RiskLevel.high,
-            allow_extended_if_owner_occupied=False,
-        ),
-        Jurisdiction(
-            region_code="FL",
-            state_code="FL",
-            name="Florida",
-            max_stay_days=29,
-            tenancy_threshold_days=30,
-            warning_days=5,
-            agreement_type="HB621_DECLARATION",
-            removal_guest_text="Immediate Sheriff removal with HB621 declaration",
-            removal_tenant_text="Standard eviction process",
-            stay_classification_label=StayClassification.guest,
-            risk_level=RiskLevel.medium,
-            allow_extended_if_owner_occupied=False,
-        ),
-        Jurisdiction(
-            region_code="CA",
-            state_code="CA",
-            name="California",
-            max_stay_days=29,
-            tenancy_threshold_days=30,
-            warning_days=5,
-            agreement_type="TRANSIENT_LODGER",
-            removal_guest_text="Police removal as trespasser (if single lodger)",
-            removal_tenant_text="30-60 day process",
-            stay_classification_label=StayClassification.guest,
-            risk_level=RiskLevel.medium,
-            allow_extended_if_owner_occupied=True,
-        ),
-        Jurisdiction(
-            region_code="TX",
-            state_code="TX",
-            name="Texas",
-            max_stay_days=29,
-            tenancy_threshold_days=7,
-            warning_days=3,
-            agreement_type="TRANSIENT_GUEST",
-            removal_guest_text="24-hour notice",
-            removal_tenant_text="3-day notice + JP Court",
-            stay_classification_label=StayClassification.guest,
-            risk_level=RiskLevel.medium,
-            allow_extended_if_owner_occupied=False,
-        ),
-        Jurisdiction(
-            region_code="WA",
-            state_code="WA",
-            name="Washington",
-            max_stay_days=29,
-            tenancy_threshold_days=30,
-            warning_days=5,
-            agreement_type="ANTI_SQUATTER_DECLARATION",
-            removal_guest_text="Police removal with RCW declaration",
-            removal_tenant_text="20-day notice + court",
-            stay_classification_label=StayClassification.guest,
-            risk_level=RiskLevel.medium,
-            allow_extended_if_owner_occupied=False,
-        ),
-    ]
-    for j in jurisdictions:
-        db.add(j)
+    for grp in ALL_GROUPS:
+        for sc, (name, ext, agr) in grp["states"].items():
+            db.add(_build_jurisdiction(
+                sc, name, grp["group"],
+                grp["legal_threshold_days"], grp["platform_renewal_cycle_days"],
+                grp["reminder_days_before"], grp["risk_level"], ext, agr,
+            ))
+    for e in _GROUP_E_STATES:
+        db.add(_build_jurisdiction(
+            e["state_code"], e["name"], e["group"],
+            e["legal_threshold_days"], e["platform_renewal_cycle_days"],
+            e["reminder_days_before"], e["risk_level"], e["allow_extended"], e["agreement_type"],
+        ))
     db.flush()
 
     statutes = [
-        ("NYC", "NYC Admin Code § 26-521", "Occupying a dwelling for 30 consecutive days creates tenancy rights. Max 29 days.", 0),
-        ("NYC", "RPAPL § 711", "License vs tenancy; no landlord-tenant relationship under this section.", 1),
+        ("NY", "RPAPL § 711", "Occupying a dwelling for 30+ consecutive days creates tenancy rights.", 0),
         ("FL", "FL Statute § 82.036 (HB 621)", "Sheriff may remove unauthorized person with signed affidavit; no lease.", 0),
-        ("FL", "F.S. § 82.036", "Verified complaint and guest authorization.", 1),
-        ("CA", "CA Civil Code § 1940.1, AB 1482", "Transient occupancy; 30+ days creates tenancy.", 0),
+        ("CA", "CA Civil Code § 1940.1, AB 1482", "Transient occupancy; common-law tenancy may form around 14 days.", 0),
         ("CA", "CA Civil Code § 1946.5", "Single lodger; owner-occupied; removal as trespasser after notice.", 1),
         ("TX", "Texas Property Code § 92.001, Penal Code § 30.05", "Transient housing exempt from landlord-tenant; criminal trespass after notice.", 0),
-        ("TX", "Property Code Chapter 92", "Transient guest; no tenancy.", 1),
-        ("WA", "RCW 9A.52.105", "Tenancy is fact-specific; owner declaration can assist police removal in defined cases.", 0),
+        ("WA", "RCW 9A.52.105", "Tenancy is fact-specific; owner declaration can assist police removal.", 0),
+        ("AZ", "A.R.S. § 33-1413", "Guest occupancy for 29+ days may create tenant rights.", 0),
+        ("MT", "Montana Code § 70-24-103", "Tenant at will after 7 days of occupancy.", 0),
+        ("CO", "C.R.S. § 38-12-101", "Common-law tenancy principles; no fixed statutory threshold.", 0),
+        ("CT", "C.G.S. § 47a-1", "Tenancy implied from occupancy; common-law 14-day doctrine.", 0),
+        ("AL", "Code of Alabama § 35-9A-141", "Tenancy after 30 days of continuous occupancy.", 0),
+        ("IN", "IC 32-31-1-1", "30-day threshold for tenant protections.", 0),
+        ("KS", "K.S.A. § 58-2540", "30-day continuous occupancy creates tenancy.", 0),
+        ("KY", "KRS § 383.010", "30-day tenancy threshold.", 0),
+        ("OH", "ORC § 5321.01", "Tenant rights attach after 30 days.", 0),
+        ("PA", "68 P.S. § 250.102", "Occupant becomes tenant after 30 continuous days.", 0),
+        ("GA", "O.C.G.A. § 44-7-1", "Tenancy determined by behavior and intent, not duration alone.", 0),
+        ("IL", "765 ILCS 705/0.01", "Behavior-based; intent and conduct determine tenancy.", 0),
+        ("MD", "MD Real Prop. § 8-101", "Behavior-based tenancy determination.", 0),
+        ("MN", "Minn. Stat. § 504B.001", "Tenancy from conduct and circumstances.", 0),
+        ("MS", "Miss. Code § 89-7-1", "Behavior-based tenancy.", 0),
+        ("TN", "Tenn. Code § 66-28-102", "Tenancy determined by behavior.", 0),
     ]
     for region_code, citation, plain_english, sort_order in statutes:
-        db.add(
-            JurisdictionStatute(
-                region_code=region_code,
-                citation=citation,
-                plain_english=plain_english,
-                use_in_authority_package=True,
-                sort_order=sort_order,
-            )
-        )
+        db.add(JurisdictionStatute(
+            region_code=region_code,
+            citation=citation,
+            plain_english=plain_english,
+            use_in_authority_package=True,
+            sort_order=sort_order,
+        ))
     db.flush()
 
-    # Zip -> region_code. Representative 5-digit zips per region (NYC, FL, CA, TX, WA).
-    zip_mappings = []
-    for zip_code in ("10001", "10002", "10003", "11201", "11238", "10451"):  # NYC
-        zip_mappings.append((zip_code, "NYC"))
-    for zip_code in ("33101", "33139", "32034", "33001", "33401", "32801"):  # FL
-        zip_mappings.append((zip_code, "FL"))
-    for zip_code in ("90210", "94102", "90001", "92101", "95814", "95110"):  # CA
-        zip_mappings.append((zip_code, "CA"))
-    for zip_code in ("77001", "75201", "78701", "78205", "76102", "79901"):  # TX
-        zip_mappings.append((zip_code, "TX"))
-    for zip_code in ("98101", "98102", "98104", "98122", "99201", "98402"):  # WA
-        zip_mappings.append((zip_code, "WA"))
+    zip_mappings = [
+        ("10001", "NY"), ("10002", "NY"), ("10003", "NY"), ("11201", "NY"), ("11238", "NY"),
+        ("33101", "FL"), ("33139", "FL"), ("32034", "FL"), ("33001", "FL"), ("33401", "FL"),
+        ("90210", "CA"), ("94102", "CA"), ("90001", "CA"), ("92101", "CA"), ("95814", "CA"),
+        ("77001", "TX"), ("75201", "TX"), ("78701", "TX"), ("78205", "TX"), ("76102", "TX"),
+        ("98101", "WA"), ("98102", "WA"), ("98104", "WA"), ("98122", "WA"), ("99201", "WA"),
+        ("85001", "AZ"), ("85281", "AZ"), ("59601", "MT"), ("59101", "MT"),
+        ("80202", "CO"), ("06101", "CT"), ("04101", "ME"), ("63101", "MO"), ("27601", "NC"),
+        ("35203", "AL"), ("46204", "IN"), ("66101", "KS"), ("40202", "KY"),
+        ("43215", "OH"), ("19101", "PA"),
+        ("30301", "GA"), ("60601", "IL"), ("21201", "MD"), ("55401", "MN"),
+        ("39201", "MS"), ("37201", "TN"),
+    ]
     for zip_code, region_code in zip_mappings:
         db.add(JurisdictionZipMapping(zip_code=zip_code, region_code=region_code))
 

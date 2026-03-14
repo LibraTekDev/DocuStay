@@ -302,13 +302,13 @@ export const authApi = {
     });
     return { status: (res as any)?.status || "ok", message: (res as any)?.message };
   },
-  /** Accept an invitation as an existing guest (requires guest token). */
-  async acceptInvite(invitationCode: string, agreementSignatureId: number): Promise<{ status: string; message?: string }> {
+  /** Accept an invitation as an existing guest/tenant (requires guest or tenant token). */
+  async acceptInvite(invitationCode: string, agreementSignatureId?: number | null): Promise<{ status: string; message?: string }> {
     const res = await request<{ status?: string; message?: string }>("/auth/accept-invite", {
       method: "POST",
       body: JSON.stringify({
         invitation_code: invitationCode.trim().toUpperCase(),
-        agreement_signature_id: agreementSignatureId,
+        agreement_signature_id: agreementSignatureId ?? null,
       }),
     });
     return { status: (res as any)?.status || "success", message: (res as any)?.message };
@@ -503,6 +503,34 @@ export interface OwnerInvitationView {
   token_state?: string;
   created_at: string | null;
   is_expired?: boolean;
+}
+
+export interface OwnerTenantView {
+  id: number;
+  tenant_name: string;
+  tenant_email: string | null;
+  property_name: string;
+  property_id: number | null;
+  unit_label: string | null;
+  unit_id: number;
+  start_date: string | null;
+  end_date: string | null;
+  active: boolean;
+  status: 'active' | 'ended' | 'pending_signup';
+  invitation_code: string | null;
+  created_at: string | null;
+}
+
+export interface TenantSignedDocument {
+  signature_id: number;
+  invitation_code: string;
+  document_title: string;
+  signed_at: string | null;
+  signed_by: string;
+  has_signed_pdf: boolean;
+  property_name: string | null;
+  stay_start_date: string | null;
+  stay_end_date: string | null;
 }
 
 export interface GuestStayView {
@@ -707,6 +735,23 @@ export interface VerifyRequest {
 }
 
 /** Response from POST /public/verify. Read-only, live state. Full record when invitation/stay exists. */
+export interface VerifyAssignedTenant {
+  name: string;
+  status: string; // present | away
+}
+
+export interface VerifyGuestAuthorization {
+  authorization_number: number;
+  guest_name: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  status: string; // ACTIVE | REVOKED | EXPIRED | CANCELLED | COMPLETED | PENDING
+  revoked_at?: string | null;
+  expired_at?: string | null;
+  cancelled_at?: string | null;
+  checked_out_at?: string | null;
+}
+
 export interface VerifyResponse {
   valid: boolean;
   reason?: string | null;
@@ -728,6 +773,13 @@ export interface VerifyResponse {
   cancelled_at?: string | null;
   signed_agreement_available?: boolean;
   signed_agreement_url?: string | null;
+  assigned_tenants?: VerifyAssignedTenant[];
+  resident_status?: string | null;
+  poa_url?: string | null;
+  ledger_url?: string | null;
+  verified_at?: string | null;
+  verification_source?: string;
+  authorization_history?: VerifyGuestAuthorization[];
 }
 
 export interface BillingResponse {
@@ -747,6 +799,7 @@ export const dashboardApi = {
     request<{ unit_id: number | null }>(`/dashboard/owner/properties/${propertyId}/personal-mode-unit`),
   ownerStays: () => request<OwnerStayView[]>("/dashboard/owner/stays"),
   ownerInvitations: () => request<OwnerInvitationView[]>("/dashboard/owner/invitations"),
+  ownerTenants: () => request<OwnerTenantView[]>("/dashboard/owner/tenants"),
   managerPersonalModeUnits: () => request<{ unit_ids: number[] }>("/dashboard/manager/personal-mode-units"),
   managerStays: () => request<OwnerStayView[]>("/dashboard/manager/stays"),
   managerInvitations: () => request<OwnerInvitationView[]>("/dashboard/manager/invitations"),
@@ -792,29 +845,40 @@ export const dashboardApi = {
     const q = sp.toString();
     return request<OwnerAuditLogEntry[]>(`/dashboard/owner/logs${q ? `?${q}` : ""}`);
   },
+  tenantDebug: () =>
+    request<{ tenant_assignments_count: number; stays_count: number }>("/dashboard/tenant/debug"),
   tenantUnit: () => request<{
-    unit: { id: number; unit_label: string; occupancy_status: string } | null;
-    property: { id: number; name: string; address: string } | null;
-    invite_id: string | null;
-    token_state: string | null;
-    stay_start_date: string | null;
-    stay_end_date: string | null;
-    live_slug: string | null;
-    region_code: string | null;
-    jurisdiction_state_name: string | null;
-    jurisdiction_statutes: Array<{ citation: string; plain_english?: string | null }>;
-    removal_guest_text: string | null;
-    removal_tenant_text: string | null;
+    units: Array<{
+      unit: { id: number; unit_label: string; occupancy_status: string } | null;
+      property: { id: number; name: string; address: string } | null;
+      invite_id: string | null;
+      token_state: string | null;
+      stay_start_date: string | null;
+      stay_end_date: string | null;
+      live_slug: string | null;
+      region_code: string | null;
+      jurisdiction_state_name: string | null;
+      jurisdiction_statutes: Array<{ citation: string; plain_english?: string | null }>;
+      removal_guest_text: string | null;
+      removal_tenant_text: string | null;
+    }>;
   }>("/dashboard/tenant/unit"),
-  /** Cancel the tenant's future unit assignment (before start date). */
-  tenantCancelFutureAssignment: () =>
-    request<{ status: string; message?: string }>("/dashboard/tenant/cancel-future-assignment", { method: "POST" }),
-  /** End the tenant's ongoing assignment (checkout): set end_date to today. */
-  tenantEndAssignment: () =>
-    request<{ status: string; message?: string }>("/dashboard/tenant/end-assignment", { method: "POST" }),
+  /** Cancel the tenant's future unit assignment (before start date). Pass unit_id when tenant has multiple assignments. */
+  tenantCancelFutureAssignment: (unitId?: number) =>
+    request<{ status: string; message?: string }>(
+      `/dashboard/tenant/cancel-future-assignment${unitId != null ? `?unit_id=${unitId}` : ""}`,
+      { method: "POST" }
+    ),
+  /** End the tenant's ongoing assignment (checkout): set end_date to today. Pass unitId when tenant has multiple. */
+  tenantEndAssignment: (unitId?: number) =>
+    request<{ status: string; message?: string }>(
+      `/dashboard/tenant/end-assignment${unitId != null ? `?unit_id=${unitId}` : ""}`,
+      { method: "POST" }
+    ),
   tenantCreateInvitation: async (data: {
     unit_id: number;
     guest_name: string;
+    guest_email: string;
     checkin_date: string;
     checkout_date: string;
   }): Promise<{ status: string; data?: { invitation_code: string }; message?: string }> => {
@@ -840,6 +904,23 @@ export const dashboardApi = {
   },
   tenantInvitations: () => request<OwnerInvitationView[]>("/dashboard/tenant/invitations"),
   tenantGuestHistory: () => request<OwnerStayView[]>("/dashboard/tenant/guest-history"),
+  tenantSignedDocuments: () => request<TenantSignedDocument[]>("/dashboard/tenant/signed-documents"),
+  tenantPropertyVerification: () =>
+    request<{
+      poa_signed_at: string | null;
+      poa_url: string | null;
+      guest_agreements: Array<{
+        signature_id: number;
+        invitation_code: string;
+        document_title: string;
+        guest_name: string;
+        signed_at: string | null;
+        stay_start_date: string | null;
+        stay_end_date: string | null;
+        token_state: string | null;
+      }>;
+      property_status: string | null;
+    }>("/dashboard/tenant/property-verification"),
   /** Event ledger for tenant: assigned property, tenant's actions, invitations tenant created. */
   tenantLogs: (params?: { from_ts?: string; to_ts?: string; category?: string; search?: string; property_id?: number }) => {
     const sp = new URLSearchParams();
@@ -1430,6 +1511,12 @@ export interface InvitationDetails {
   used?: boolean;
   /** True when the invitation was already accepted (e.g. auto-accepted at email verification for a pre-signed tenant invite). Stay may already be on dashboard. */
   already_accepted?: boolean;
+  /** True when the invitation was revoked by the property owner. */
+  revoked?: boolean;
+  /** True when the invitation was cancelled. */
+  cancelled?: boolean;
+  /** Machine-readable reason: not_found | already_accepted | revoked | cancelled | expired | invalid_status */
+  reason?: string;
   /** From DB: 'guest' | 'tenant'. Enforced so guest links cannot be used for tenant signup and vice versa. */
   invitation_kind?: 'guest' | 'tenant';
   property_name?: string | null;
@@ -1452,6 +1539,7 @@ export const invitationsApi = {
     property_id?: number;
     unit_id?: number;
     guest_name: string;
+    guest_email: string;
     checkin_date: string;
     checkout_date: string;
     dead_mans_switch_enabled?: boolean;
@@ -1529,6 +1617,7 @@ export const agreementsApi = {
     acks: { read: boolean; temporary: boolean; vacate: boolean; electronic: boolean };
     document_hash: string;
     ip_address?: string | null;
+    is_tenant_invite?: boolean;
   }) =>
     request<{ signature_id: number; sign_url?: string | null }>("/agreements/sign-with-dropbox", {
       method: "POST",

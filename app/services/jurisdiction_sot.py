@@ -21,6 +21,11 @@ class JurisdictionInfo:
     region_code: str
     state_code: str
     name: str
+    jurisdiction_group: str | None
+    legal_threshold_days: int | None
+    platform_renewal_cycle_days: int
+    reminder_days_before: int
+    # Backward-compat aliases
     max_stay_days: int
     tenancy_threshold_days: int | None
     warning_days: int | None
@@ -81,6 +86,10 @@ def get_jurisdiction_for_region(db: Session, region_code: str | None) -> Jurisdi
         region_code=jur.region_code,
         state_code=jur.state_code,
         name=jur.name,
+        jurisdiction_group=getattr(jur, "jurisdiction_group", None),
+        legal_threshold_days=getattr(jur, "legal_threshold_days", None),
+        platform_renewal_cycle_days=getattr(jur, "platform_renewal_cycle_days", None) or jur.max_stay_days,
+        reminder_days_before=getattr(jur, "reminder_days_before", None) or jur.warning_days or 3,
         max_stay_days=jur.max_stay_days,
         tenancy_threshold_days=jur.tenancy_threshold_days,
         warning_days=jur.warning_days,

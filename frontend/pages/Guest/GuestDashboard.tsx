@@ -1027,6 +1027,73 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
         );
       })()}
 
+      {/* Authorization status */}
+      <section className={`rounded-2xl border p-6 shadow-sm ${
+        stay.token_state === 'BURNED' ? 'border-emerald-200 bg-emerald-50/50' :
+        stay.token_state === 'REVOKED' ? 'border-red-200 bg-red-50/50' :
+        stay.token_state === 'EXPIRED' ? 'border-slate-200 bg-slate-50/50' :
+        stay.token_state === 'CANCELLED' ? 'border-amber-200 bg-amber-50/50' :
+        'border-slate-200 bg-white'
+      }`}>
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-700 mb-3">AUTHORIZATION STATUS</h3>
+        <div className="flex items-center gap-4">
+          <span className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold ${
+            stay.token_state === 'BURNED' ? 'bg-emerald-100 text-emerald-800' :
+            stay.token_state === 'REVOKED' ? 'bg-red-100 text-red-800' :
+            stay.token_state === 'EXPIRED' ? 'bg-slate-200 text-slate-700' :
+            stay.token_state === 'CANCELLED' ? 'bg-amber-100 text-amber-800' :
+            stay.token_state === 'STAGED' ? 'bg-blue-100 text-blue-800' :
+            'bg-slate-200 text-slate-700'
+          }`}>
+            <span className={`w-2.5 h-2.5 rounded-full ${
+              stay.token_state === 'BURNED' ? 'bg-emerald-500' :
+              stay.token_state === 'REVOKED' ? 'bg-red-500' :
+              stay.token_state === 'EXPIRED' ? 'bg-slate-400' :
+              stay.token_state === 'CANCELLED' ? 'bg-amber-500' :
+              stay.token_state === 'STAGED' ? 'bg-blue-500' :
+              'bg-slate-400'
+            }`} />
+            {stay.token_state === 'BURNED' ? 'Active' :
+             stay.token_state === 'REVOKED' ? 'Revoked' :
+             stay.token_state === 'EXPIRED' ? 'Expired' :
+             stay.token_state === 'CANCELLED' ? 'Cancelled' :
+             stay.token_state === 'STAGED' ? 'Pending' :
+             stay.token_state ?? 'Unknown'}
+          </span>
+          {stay.invite_id && (
+            <span className="text-sm text-slate-500 font-mono">Token: {stay.invite_id}</span>
+          )}
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4">
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Authorization start</p>
+            <p className="text-sm font-medium text-slate-800 mt-0.5">{formatDate(stay.approved_stay_start_date)}</p>
+          </div>
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Authorization end</p>
+            <p className="text-sm font-medium text-slate-800 mt-0.5">{formatDate(stay.approved_stay_end_date)}</p>
+          </div>
+          {stay.checked_in_at && (
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Became active</p>
+              <p className="text-sm font-medium text-slate-800 mt-0.5">{new Date(stay.checked_in_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</p>
+            </div>
+          )}
+          {stay.revoked_at && (
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Revoked at</p>
+              <p className="text-sm font-medium text-red-700 mt-0.5">{new Date(stay.revoked_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</p>
+            </div>
+          )}
+          {stay.checked_out_at && (
+            <div>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Checked out</p>
+              <p className="text-sm font-medium text-slate-800 mt-0.5">{new Date(stay.checked_out_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</p>
+            </div>
+          )}
+        </div>
+      </section>
+
       <div className="grid lg:grid-cols-3 gap-6">
         {/* Left: Authorization & documentation */}
         <div className="lg:col-span-2 space-y-6">
@@ -1053,6 +1120,71 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
             >
               {agreementDownloading ? 'Loading…' : 'Download signed agreement'}
             </Button>
+          </div>
+
+          {/* Verification record */}
+          <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h3 className="text-base font-semibold text-slate-900 mb-2">Verification record</h3>
+            <p className="text-sm text-slate-500 mb-4">Documents associated with your authorization at this property.</p>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-100">
+                <div>
+                  <p className="text-sm font-medium text-slate-800">Your signed agreement</p>
+                  <p className="text-xs text-slate-500">Temporary stay acknowledgment for this authorization</p>
+                </div>
+                <Button
+                  variant="outline"
+                  className="text-xs h-8 px-3 rounded-lg shrink-0"
+                  disabled={agreementDownloading}
+                  onClick={async () => {
+                    if (!selectedStay) return;
+                    setAgreementDownloading(true);
+                    try {
+                      const blob = await dashboardApi.guestStaySignedAgreementBlob(selectedStay.stay_id);
+                      const url = URL.createObjectURL(blob);
+                      window.open(url, '_blank');
+                      setTimeout(() => URL.revokeObjectURL(url), 60000);
+                    } catch (e) {
+                      notify('error', (e as Error)?.message ?? 'No signed agreement found.');
+                    } finally {
+                      setAgreementDownloading(false);
+                    }
+                  }}
+                >
+                  View
+                </Button>
+              </div>
+              {stay.property_live_slug && (
+                <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-100">
+                  <div>
+                    <p className="text-sm font-medium text-slate-800">Power of Attorney (POA)</p>
+                    <p className="text-xs text-slate-500">Property owner authorization document</p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    className="text-xs h-8 px-3 rounded-lg shrink-0"
+                    onClick={() => window.open(`/public/live/${stay.property_live_slug}/poa`, '_blank', 'noopener,noreferrer')}
+                  >
+                    View POA
+                  </Button>
+                </div>
+              )}
+              {stay.invite_id && (
+                <div className="flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-100">
+                  <div>
+                    <p className="text-sm font-medium text-slate-800">Verify authorization</p>
+                    <p className="text-xs text-slate-500">Open the public verification page for this stay</p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    className="text-xs h-8 px-3 rounded-lg shrink-0"
+                    onClick={() => { setVerifyQRInviteId(stay.invite_id ?? null); setShowVerifyQRModal(true); }}
+                  >
+                    Verify
+                  </Button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Applicable law from Jurisdiction SOT (same as live property page) */}
@@ -1082,10 +1214,10 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
 
           {/* Audit trail: guest can view their audit trail for this stay */}
           <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <h3 className="text-base font-semibold text-slate-900 mb-2">Audit trail</h3>
+            <h3 className="text-base font-semibold text-slate-900 mb-2">Activity for this stay</h3>
             <p className="text-sm text-slate-500 mb-4">Status changes, signatures, and related events for your stay. View-only.</p>
             <Button variant="outline" onClick={() => loadGuestLogs(stay?.stay_id)} disabled={guestLogsLoading} className="mb-4">
-              {guestLogsLoading ? 'Loading…' : 'View audit trail'}
+              {guestLogsLoading ? 'Loading…' : 'View activity'}
             </Button>
             {guestLogsLoading && guestLogs.length === 0 ? (
               <p className="text-slate-500 text-sm">Loading…</p>

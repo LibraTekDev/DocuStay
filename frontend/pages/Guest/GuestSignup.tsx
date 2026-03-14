@@ -18,6 +18,20 @@ interface GuestSignupProps {
   onTenantLogin?: (user: any) => void;
 }
 
+function inviteVerificationMessage(details: { expired?: boolean; used?: boolean; already_accepted?: boolean; revoked?: boolean; cancelled?: boolean; reason?: string }): string {
+  if (details.expired)
+    return 'This invitation has expired. Please ask your host for a new invitation.';
+  if (details.used || details.already_accepted)
+    return 'This invitation has already been accepted and cannot be used again. If you already registered, please sign in instead.';
+  if ((details as any).revoked)
+    return 'This invitation has been revoked by the property owner. Please contact your host for a new invitation.';
+  if ((details as any).cancelled)
+    return 'This invitation has been cancelled. Please contact your host for a new invitation.';
+  if (details.reason === 'not_found')
+    return 'This invitation code was not found. Please double-check the link or code and try again.';
+  return 'This invitation link is invalid. Please check the link or contact your host.';
+}
+
 const parseInviteCode = (raw: string): string => {
   const trimmed = raw.trim();
   if (!trimmed) return '';
@@ -29,6 +43,7 @@ const parseInviteCode = (raw: string): string => {
 
 const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCode, setPendingVerification, navigate, setLoading, notify, onGuestLogin, onTenantLogin }) => {
   const [role, setRole] = useState<'guest' | 'tenant'>(initialRole ?? 'guest');
+  const [roleLocked, setRoleLocked] = useState(false);
   useEffect(() => {
     if (initialRole) setRole(initialRole);
   }, [initialRole]);
@@ -54,32 +69,58 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
   });
   const [errorModal, setErrorModal] = useState<{ open: boolean; message: string }>({ open: false, message: '' });
 
+  useEffect(() => {
+    const code = initialInviteCode || parseInviteCode(formData.invitation_link);
+    if (!code || code.length < 5) {
+      setRoleLocked(false);
+      return;
+    }
+    invitationsApi.getDetails(code).then((d) => {
+      if (!d.valid) return;
+      const kind = d.invitation_kind || (d.is_tenant_invite ? 'tenant' : 'guest');
+      if (kind === 'tenant') {
+        setRole('tenant');
+        setRoleLocked(true);
+      } else {
+        setRole('guest');
+        setRoleLocked(true);
+      }
+    }).catch(() => {});
+  }, [initialInviteCode, formData.invitation_link]);
+
   const showError = (message: string) => setErrorModal({ open: true, message });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const inviteCode = parseInviteCode(formData.invitation_link);
-    const requiredFields = {
+    const baseRequired = {
       full_name: formData.full_name.trim(),
       email: formData.email.trim(),
       phone: formData.phone.trim(),
       password: formData.password,
       confirm_password: formData.confirm_password,
-      permanent_address: formData.permanent_address.trim(),
-      permanent_city: formData.permanent_city.trim(),
-      permanent_state: formData.permanent_state.trim(),
-      permanent_zip: formData.permanent_zip.trim(),
     };
-    const allFieldsFilled = Object.values(requiredFields).every(Boolean);
-    const allCheckboxesChecked =
-      formData.terms_agreed &&
-      formData.privacy_agreed &&
+    const addressRequired =
+      formData.permanent_address.trim() &&
+      formData.permanent_city.trim() &&
+      formData.permanent_state.trim() &&
+      formData.permanent_zip.trim();
+    const allFieldsFilled =
+      Object.values(baseRequired).every(Boolean) &&
+      (role === 'tenant' ? true : !!addressRequired);
+    const guestAcksChecked =
       formData.guest_status_acknowledged &&
       formData.no_tenancy_acknowledged &&
       formData.vacate_acknowledged;
+    const allCheckboxesChecked =
+      formData.terms_agreed &&
+      formData.privacy_agreed &&
+      (role === 'tenant' ? true : guestAcksChecked);
 
     if (!allFieldsFilled || !allCheckboxesChecked) {
-      showError('Please fill in all required fields and accept all acknowledgments and agreements before continuing.');
+      showError(role === 'tenant'
+        ? 'Please fill in all required fields and accept the Terms of Service and Privacy Policy.'
+        : 'Please fill in all required fields and accept all acknowledgments and agreements before continuing.');
       return;
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email.trim())) {
@@ -103,17 +144,12 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
       try {
         const inviteDetails = await invitationsApi.getDetails(inviteCode);
         if (!inviteDetails.valid) {
-          showError(
-            inviteDetails.expired
-              ? 'This invitation has expired. Ask your host for a new invitation.'
-              : inviteDetails.used
-                ? 'This invitation link has already been used.'
-                : 'This invitation link is invalid.'
-          );
+          showError(inviteVerificationMessage(inviteDetails));
           return;
         }
-      } catch {
-        showError('This invitation link could not be verified. Please check the link or sign up without it.');
+      } catch (err) {
+        const msg = (err as Error)?.message ?? '';
+        showError(msg || 'This invitation link could not be verified. Please check the link or sign up without it.');
         return;
       }
     }
@@ -129,15 +165,15 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
         phone: formData.phone,
         password: formData.password,
         confirm_password: formData.confirm_password,
-        permanent_address: formData.permanent_address,
-        permanent_city: formData.permanent_city,
-        permanent_state: formData.permanent_state,
-        permanent_zip: formData.permanent_zip,
+        permanent_address: formData.permanent_address || '',
+        permanent_city: formData.permanent_city || '',
+        permanent_state: formData.permanent_state || '',
+        permanent_zip: formData.permanent_zip || '',
         terms_agreed: formData.terms_agreed,
         privacy_agreed: formData.privacy_agreed,
-        guest_status_acknowledged: formData.guest_status_acknowledged,
-        no_tenancy_acknowledged: formData.no_tenancy_acknowledged,
-        vacate_acknowledged: formData.vacate_acknowledged,
+        guest_status_acknowledged: role === 'guest' ? formData.guest_status_acknowledged : false,
+        no_tenancy_acknowledged: role === 'guest' ? formData.no_tenancy_acknowledged : false,
+        vacate_acknowledged: role === 'guest' ? formData.vacate_acknowledged : false,
         agreement_signature_id: inviteCode ? 0 : null,
       });
       setLoading(false);
@@ -177,8 +213,8 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
           <p className="text-slate-600 text-sm mb-8">Create your account to access stays and invitations.</p>
           <ul className="space-y-3">
             <AuthBullet>Sign up as Guest or Tenant</AuthBullet>
-            <AuthBullet>Add permanent residence details</AuthBullet>
-            <AuthBullet>Accept stay acknowledgments</AuthBullet>
+            <AuthBullet>{role === 'tenant' ? 'Accept Terms of Service and Privacy Policy' : 'Add permanent residence details'}</AuthBullet>
+            <AuthBullet>{role === 'tenant' ? 'Use platform to manage guest authorizations' : 'Accept guest stay acknowledgments (guests only)'}</AuthBullet>
           </ul>
         </>
       }>
@@ -189,18 +225,19 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
               <span className="block text-sm font-medium text-slate-700 mb-3">Sign up as</span>
               <div className="grid grid-cols-2 gap-4">
                 <label
-                  className={`relative flex cursor-pointer flex-col items-center rounded-2xl border p-5 text-center transition-all duration-300 focus-within:ring-2 focus-within:ring-[#6B90F2]/40 focus-within:ring-offset-2 ${
+                  className={`relative flex ${roleLocked ? 'cursor-default' : 'cursor-pointer'} flex-col items-center rounded-2xl border p-5 text-center transition-all duration-300 focus-within:ring-2 focus-within:ring-[#6B90F2]/40 focus-within:ring-offset-2 ${
                     role === 'tenant'
                       ? 'border-[#6B90F2]/40 bg-gradient-to-b from-[#6B90F2]/10 to-[#6B90F2]/5 shadow-[0_0_0_1px_rgba(107,144,242,0.12)]'
                       : 'border-slate-200/90 bg-slate-50/50 hover:border-slate-300 hover:bg-slate-50'
-                  }`}
+                  } ${roleLocked && role !== 'tenant' ? 'opacity-40 pointer-events-none' : ''}`}
                 >
                   <input
                     type="radio"
                     name="role"
                     value="tenant"
                     checked={role === 'tenant'}
-                    onChange={() => setRole('tenant')}
+                    onChange={() => !roleLocked && setRole('tenant')}
+                    disabled={roleLocked}
                     className="sr-only"
                   />
                   {role === 'tenant' && (
@@ -214,18 +251,19 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
                   <span className={`mt-1 text-xs ${role === 'tenant' ? 'text-slate-600' : 'text-slate-500'}`}>Renting a property</span>
                 </label>
                 <label
-                  className={`relative flex cursor-pointer flex-col items-center rounded-2xl border p-5 text-center transition-all duration-300 focus-within:ring-2 focus-within:ring-[#6B90F2]/40 focus-within:ring-offset-2 ${
+                  className={`relative flex ${roleLocked ? 'cursor-default' : 'cursor-pointer'} flex-col items-center rounded-2xl border p-5 text-center transition-all duration-300 focus-within:ring-2 focus-within:ring-[#6B90F2]/40 focus-within:ring-offset-2 ${
                     role === 'guest'
                       ? 'border-[#6B90F2]/40 bg-gradient-to-b from-[#6B90F2]/10 to-[#6B90F2]/5 shadow-[0_0_0_1px_rgba(107,144,242,0.12)]'
                       : 'border-slate-200/90 bg-slate-50/50 hover:border-slate-300 hover:bg-slate-50'
-                  }`}
+                  } ${roleLocked && role !== 'guest' ? 'opacity-40 pointer-events-none' : ''}`}
                 >
                   <input
                     type="radio"
                     name="role"
                     value="guest"
                     checked={role === 'guest'}
-                    onChange={() => setRole('guest')}
+                    onChange={() => !roleLocked && setRole('guest')}
+                    disabled={roleLocked}
                     className="sr-only"
                   />
                   {role === 'guest' && (
@@ -239,6 +277,11 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
                   <span className={`mt-1 text-xs ${role === 'guest' ? 'text-slate-600' : 'text-slate-500'}`}>Short-term stay</span>
                 </label>
               </div>
+              {roleLocked && (
+                <p className="mt-3 text-xs text-slate-500 italic">
+                  Role is determined by your invitation and cannot be changed.
+                </p>
+              )}
             </div>
           </div>
           <div className="p-0">
@@ -251,7 +294,7 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
                   onChange={e => setFormData({ ...formData, invitation_link: e.target.value })}
                   placeholder="Paste invitation link or code if you have one"
                 />
-                {(initialInviteCode || parseInviteCode(formData.invitation_link).length >= 5) && (
+                {role === 'guest' && (initialInviteCode || parseInviteCode(formData.invitation_link).length >= 5) && (
                   <div className="mt-3">
                     <Button
                       type="button"
@@ -286,6 +329,7 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
                 </div>
               </div>
 
+              {role === 'guest' && (
               <div>
                 <h3 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
                   <span className="w-6 h-6 rounded-full bg-[#6B90F2]/20 text-[#6B90F2] flex items-center justify-center text-xs font-medium">2</span>
@@ -301,12 +345,14 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
                   <Input label="ZIP Code" name="permanent_zip" value={formData.permanent_zip} onChange={e => setFormData({ ...formData, permanent_zip: e.target.value })} required />
                 </div>
               </div>
+              )}
 
-              <div className="md:col-span-2 mt-8">
+              <div className={`md:col-span-2 mt-8 ${role === 'tenant' ? '' : ''}`}>
                 <h3 className="text-sm font-semibold text-slate-900 mb-4 flex items-center gap-2">
-                  <span className="w-6 h-6 rounded-full bg-[#6B90F2]/20 text-[#6B90F2] flex items-center justify-center text-xs font-medium">3</span>
-                  Stay acknowledgments
+                  <span className="w-6 h-6 rounded-full bg-[#6B90F2]/20 text-[#6B90F2] flex items-center justify-center text-xs font-medium">{role === 'tenant' ? 2 : 3}</span>
+                  {role === 'tenant' ? 'Agreements' : 'Stay acknowledgments'}
                 </h3>
+                {role === 'guest' && (
                 <div className="grid md:grid-cols-3 gap-4 mb-6">
                   {[
                     { name: 'guest_status_acknowledged', label: 'Temporary Guest Status', desc: 'I acknowledge I am a guest only, not a tenant or resident.' },
@@ -324,8 +370,9 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
                     </div>
                   ))}
                 </div>
+                )}
 
-                <div className="pt-6 border-t border-slate-200 space-y-3">
+                <div className={`pt-6 ${role === 'guest' ? 'border-t border-slate-200' : ''} space-y-3`}>
                   <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Agreements</p>
                   <label className="flex items-start gap-4 cursor-pointer p-4 rounded-xl border border-slate-200 bg-white/80 hover:border-slate-300 hover:bg-white transition-colors focus-within:ring-2 focus-within:ring-blue-500 focus-within:ring-offset-2 focus-within:border-blue-400">
                     <input type="checkbox" name="terms_agreed" checked={formData.terms_agreed} onChange={handleCheckboxChange} className="w-5 h-5 rounded border-slate-300 text-blue-600 focus:ring-2 focus:ring-blue-500 focus:ring-offset-0 shrink-0 mt-0.5 accent-blue-600" required />
@@ -343,7 +390,7 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
 
                 <div className="mt-8 flex flex-col items-center gap-1">
                   <Button type="submit" className="w-full md:min-w-[200px] py-3">
-                    Create Guest Account
+                    {role === 'tenant' ? 'Create Tenant Account' : 'Create Guest Account'}
                   </Button>
                   <p className="mt-4 text-center text-slate-500 text-sm">
                     Already have an account?{' '}
@@ -373,16 +420,18 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
           onSigned={async (signatureId) => {
             if (!pendingInviteFormData || !inviteAcceptCode) return;
             const code = inviteAcceptCode.trim().toUpperCase();
+            const isTenant = pendingInviteFormData.isTenantInvite;
             setLoading(true);
             try {
               const result = await authApiGuest.register({
                 ...pendingInviteFormData,
+                role: isTenant ? 'tenant' : 'guest',
                 invitation_id: code,
                 invitation_code: code,
                 agreement_signature_id: signatureId,
-                guest_status_acknowledged: true,
-                no_tenancy_acknowledged: true,
-                vacate_acknowledged: true,
+                guest_status_acknowledged: isTenant ? false : true,
+                no_tenancy_acknowledged: isTenant ? false : true,
+                vacate_acknowledged: isTenant ? false : true,
               });
               setLoading(false);
               setInviteAcceptModalOpen(false);
@@ -397,8 +446,9 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
                   return;
                 }
                 notify('success', 'Registration successful!');
-                if (onGuestLogin) onGuestLogin(result.data);
-                navigate('guest-dashboard');
+                if (isTenant && onTenantLogin) onTenantLogin(result.data);
+                else if (onGuestLogin) onGuestLogin(result.data);
+                navigate(isTenant ? 'tenant-dashboard' : 'guest-dashboard');
               } else {
                 notify('error', result.message || 'Registration failed.');
               }
@@ -409,7 +459,47 @@ const GuestSignup: React.FC<GuestSignupProps> = ({ initialRole, initialInviteCod
           }}
           notify={notify}
           inviteAcceptMode
-          onContinueToSign={(formData) => setPendingInviteFormData(formData)}
+          onContinueToSign={async (formData) => {
+            if (formData.isTenantInvite) {
+              const code = inviteAcceptCode.trim().toUpperCase();
+              setLoading(true);
+              try {
+                const result = await authApiGuest.register({
+                  ...formData,
+                  role: 'tenant',
+                  invitation_id: code,
+                  invitation_code: code,
+                  agreement_signature_id: null,
+                  guest_status_acknowledged: false,
+                  no_tenancy_acknowledged: false,
+                  vacate_acknowledged: false,
+                });
+                setLoading(false);
+                setInviteAcceptModalOpen(false);
+                setInviteAcceptCode('');
+                setPendingInviteFormData(null);
+                if (result.status === 'success' && result.data) {
+                  const d = result.data as any;
+                  if (d.verificationRequired && d.user_id && setPendingVerification) {
+                    notify('success', result.message || 'Check your email for the verification code.');
+                    setPendingVerification({ userId: d.user_id, type: 'email', generatedAt: new Date().toISOString() });
+                    navigate('verify');
+                    return;
+                  }
+                  notify('success', 'Registration successful!');
+                  if (onTenantLogin) onTenantLogin(result.data);
+                  navigate('tenant-dashboard');
+                } else {
+                  notify('error', result.message || 'Registration failed.');
+                }
+              } catch (err) {
+                setLoading(false);
+                notify('error', (err as Error)?.message || 'Registration failed.');
+              }
+            } else {
+              setPendingInviteFormData(formData);
+            }
+          }}
         />
       )}
 

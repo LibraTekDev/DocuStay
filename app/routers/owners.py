@@ -6,7 +6,7 @@ import secrets
 from datetime import date, datetime, timezone, timedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.user import User, UserRole
@@ -89,7 +89,7 @@ class InvitationCreate(BaseModel):
     unit_id: int | None = None  # Required for tenant/manager; optional for owner (inferred for single-unit)
     invited_by_user_id: int | None = None  # Set by backend from current_user
     guest_name: str = ""
-    guest_email: str = ""
+    guest_email: str = Field(..., min_length=1, description="Guest email (required)")
     guest_phone: str = ""
     relationship: str = "friend"
     purpose: str = "visit"
@@ -107,7 +107,7 @@ class InvitationCreate(BaseModel):
 
 class InviteTenantRequest(BaseModel):
     tenant_name: str
-    tenant_email: str = ""
+    tenant_email: str = Field(..., min_length=1, description="Tenant email (required)")
     lease_start_date: str
     lease_end_date: str
 
@@ -156,9 +156,10 @@ def get_owner_config(
 def list_my_properties(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
+    context_mode: str = Depends(get_context_mode),
     inactive: bool = False,
 ):
-    """List properties. Default: active only (for dashboard main list and invite dropdown). inactive=1: inactive only (soft-deleted)."""
+    """List properties. Business mode: all owned. Personal mode: only owner-occupied (residence). inactive=1: inactive only."""
     profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
     if not profile:
         return []
@@ -172,6 +173,8 @@ def list_my_properties(
             Property.owner_profile_id == profile.id,
             Property.deleted_at.is_(None),
         ).all()
+    if context_mode == "personal":
+        props = [p for p in props if p.owner_occupied]
     for p in props:
         if not p.usat_token:
             _ensure_property_usat_token(p, db)
@@ -245,7 +248,10 @@ def add_property(
     data: PropertyCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_owner_onboarding_complete),
+    context_mode: str = Depends(get_context_mode),
 ):
+    if context_mode == "personal":
+        raise HTTPException(status_code=403, detail="Adding properties is only available in Business Mode. Switch to Business Mode to add a property.")
     print(f"[PropertyFlow] add_property: street={getattr(data, 'street_address', None) or getattr(data, 'street', None)!r}, ...")
     street = data.street_address or data.street
     if not street:
@@ -953,6 +959,10 @@ def get_property(
         payload["jurisdiction_documentation"] = PropertyJurisdictionDocumentation(
             name=jinfo.name,
             region_code=jinfo.region_code,
+            jurisdiction_group=jinfo.jurisdiction_group,
+            legal_threshold_days=jinfo.legal_threshold_days,
+            platform_renewal_cycle_days=jinfo.platform_renewal_cycle_days,
+            reminder_days_before=jinfo.reminder_days_before,
             max_stay_days=jinfo.max_stay_days,
             warning_days=jinfo.warning_days or 0,
             tenancy_threshold_days=jinfo.tenancy_threshold_days,
@@ -2179,7 +2189,7 @@ def create_invitation(
     if end <= start:
         raise HTTPException(status_code=400, detail="checkout_date must be after checkin_date")
     if start < date.today():
-        raise HTTPException(status_code=400, detail="check-in date cannot be in the past")
+        raise HTTPException(status_code=400, detail="Authorization start date cannot be in the past.")
 
     prop = None
     unit_id = data.unit_id
@@ -2250,12 +2260,12 @@ def create_invitation(
         if start < ta.start_date:
             raise HTTPException(
                 status_code=400,
-                detail=f"Guest check-in cannot be before your stay starts ({ta.start_date.isoformat()}). You can only invite guests for the duration of your own stay.",
+                detail=f"Guest authorization start date cannot be before your stay starts ({ta.start_date.isoformat()}). You can only invite guests for the duration of your own stay.",
             )
         if ta.end_date is not None and end > ta.end_date:
             raise HTTPException(
                 status_code=400,
-                detail=f"Guest check-out cannot be after your stay ends ({ta.end_date.isoformat()}). You can only invite guests for the duration of your own stay.",
+                detail=f"Guest authorization end date cannot be after your stay ends ({ta.end_date.isoformat()}). You can only invite guests for the duration of your own stay.",
             )
 
     elif current_user.role == UserRole.property_manager:
@@ -2391,12 +2401,14 @@ def owner_invite_tenant_by_property(
     if not prop:
         raise HTTPException(status_code=404, detail="Property not found")
     units = db.query(Unit).filter(Unit.property_id == property_id).all()
-    if units:
+    if len(units) > 1:
         raise HTTPException(status_code=400, detail="Use unit-specific invite for multi-unit properties")
-    # Create an implicit unit for single-unit so TenantAssignment has a unit_id when tenant signs up
-    unit = Unit(property_id=property_id, unit_label="1", occupancy_status=OccupancyStatus.occupied.value)
-    db.add(unit)
-    db.flush()
+    if units:
+        unit = units[0]
+    else:
+        unit = Unit(property_id=property_id, unit_label="1", occupancy_status=OccupancyStatus.occupied.value)
+        db.add(unit)
+        db.flush()
     tenant_name = (data.tenant_name or "").strip()
     tenant_email = (data.tenant_email or "").strip()
     if not tenant_name:
@@ -2410,6 +2422,24 @@ def owner_invite_tenant_by_property(
         raise HTTPException(status_code=400, detail="lease_end_date must be after lease_start_date")
     if start < date.today():
         raise HTTPException(status_code=400, detail="Lease start date cannot be in the past")
+    overlapping = (
+        db.query(Invitation)
+        .filter(
+            Invitation.property_id == prop.id,
+            Invitation.invitation_kind == "tenant",
+            Invitation.status.in_(("pending", "ongoing")),
+            Invitation.token_state.notin_(("CANCELLED", "REVOKED", "EXPIRED")),
+            Invitation.stay_start_date <= end,
+            Invitation.stay_end_date >= start,
+        )
+        .first()
+    )
+    if overlapping:
+        existing_name = overlapping.guest_name or "another tenant"
+        raise HTTPException(
+            status_code=409,
+            detail=f"A tenant lease already exists for this property that overlaps with the selected dates ({overlapping.stay_start_date.isoformat()} – {overlapping.stay_end_date.isoformat()}, {existing_name}). Please choose dates that do not overlap with an existing tenant lease.",
+        )
     code = "INV-" + secrets.token_hex(4).upper()
     inv = Invitation(
         invitation_code=code,
@@ -2508,6 +2538,24 @@ def owner_invite_tenant(
         raise HTTPException(status_code=400, detail="lease_end_date must be after lease_start_date")
     if start < date.today():
         raise HTTPException(status_code=400, detail="Lease start date cannot be in the past")
+    overlapping = (
+        db.query(Invitation)
+        .filter(
+            Invitation.unit_id == unit_id,
+            Invitation.invitation_kind == "tenant",
+            Invitation.status.in_(("pending", "ongoing")),
+            Invitation.token_state.notin_(("CANCELLED", "REVOKED", "EXPIRED")),
+            Invitation.stay_start_date <= end,
+            Invitation.stay_end_date >= start,
+        )
+        .first()
+    )
+    if overlapping:
+        existing_name = overlapping.guest_name or "another tenant"
+        raise HTTPException(
+            status_code=409,
+            detail=f"A tenant lease already exists for this unit that overlaps with the selected dates ({overlapping.stay_start_date.isoformat()} – {overlapping.stay_end_date.isoformat()}, {existing_name}). Please choose dates that do not overlap with an existing tenant lease.",
+        )
     code = "INV-" + secrets.token_hex(4).upper()
     inv = Invitation(
         invitation_code=code,
@@ -2585,20 +2633,30 @@ def get_invitation_details(
     code = code.strip().upper()
     inv = db.query(Invitation).filter(Invitation.invitation_code == code).first()
     if not inv:
-        return {"valid": False}
+        return {"valid": False, "reason": "not_found"}
+    token = (inv.token_state or "").upper()
+    invitation_kind = (getattr(inv, "invitation_kind", None) or "guest").strip().lower()
+    is_tenant = invitation_kind == "tenant"
     if inv.status == "accepted":
-        return {"valid": False, "already_accepted": True}
+        return {"valid": False, "used": True, "already_accepted": True, "reason": "already_accepted"}
+    if token == "BURNED" and not is_tenant:
+        return {"valid": False, "used": True, "already_accepted": True, "reason": "already_accepted"}
+    if token == "REVOKED":
+        return {"valid": False, "revoked": True, "reason": "revoked"}
+    if token == "CANCELLED" or inv.status == "cancelled":
+        return {"valid": False, "cancelled": True, "reason": "cancelled"}
+    if token == "EXPIRED" or (inv.stay_end_date and inv.stay_end_date < date.today()):
+        return {"valid": False, "expired": True, "reason": "expired"}
     if inv.status not in ("pending", "ongoing"):
-        return {"valid": False}
+        return {"valid": False, "reason": "invalid_status"}
     prop = db.query(Property).filter(Property.id == inv.property_id).first()
     owner = db.query(User).filter(User.id == inv.owner_id).first()
-    invitation_kind = (getattr(inv, "invitation_kind", None) or "guest").strip().lower()
     if invitation_kind not in ("guest", "tenant"):
         invitation_kind = "guest"
     return {
         "valid": True,
         "invitation_kind": invitation_kind,
-        "is_tenant_invite": invitation_kind == "tenant",
+        "is_tenant_invite": is_tenant,
         "property_name": prop.name if prop else None,
         "property_address": f"{prop.street}, {prop.city}, {prop.state}{(' ' + prop.zip_code) if (prop and prop.zip_code) else ''}" if prop else None,
         "stay_start_date": str(inv.stay_start_date),

@@ -834,6 +834,40 @@ def run_dms_24h_unconfirmed_to_unknown_job(db: Session) -> None:
         logger.info("DMS 24h job: property %s status set to Unknown (stay %s, no response)", prop.id, stay.id)
 
 
+def mark_expired_guest_authorizations(db: Session) -> None:
+    """Find stays that have ended (stay_end_date < today) without check-out, revocation, or cancellation,
+    and create a GuestAuthorizationExpired ledger event for each. Idempotent: only fires once per stay."""
+    from app.services.event_ledger import ACTION_GUEST_AUTHORIZATION_EXPIRED, create_ledger_event
+    today = date.today()
+    expired_stays = db.query(Stay).filter(
+        Stay.stay_end_date < today,
+        Stay.checked_out_at.is_(None),
+        Stay.revoked_at.is_(None),
+        Stay.cancelled_at.is_(None),
+        Stay.checked_in_at.isnot(None),
+    ).all()
+    from app.models.event_ledger import EventLedger
+    for s in expired_stays:
+        already = db.query(EventLedger).filter(
+            EventLedger.action_type == ACTION_GUEST_AUTHORIZATION_EXPIRED,
+            EventLedger.stay_id == s.id,
+        ).first()
+        if already:
+            continue
+        create_ledger_event(
+            db,
+            ACTION_GUEST_AUTHORIZATION_EXPIRED,
+            target_object_type="Stay",
+            target_object_id=s.id,
+            property_id=s.property_id,
+            unit_id=s.unit_id,
+            stay_id=s.id,
+            invitation_id=s.invitation_id,
+            meta={"message": "Guest authorization expired", "stay_end_date": str(s.stay_end_date)},
+        )
+    db.commit()
+
+
 def run_stay_notification_job() -> None:
     """Run once per day (or on demand): find stays approaching limit, send emails; then detect overstays, email owner+guest and log; then Dead Man's Switch; then 24h DMS follow-up."""
     if not settings.notification_cron_enabled:
@@ -846,6 +880,7 @@ def run_stay_notification_job() -> None:
             statute_ref = rule.statute_reference if rule else stay.region_code
             send_legal_warnings_for_stay(stay, db, statute_ref or stay.region_code)
         send_overstay_alerts_and_log(db)
+        mark_expired_guest_authorizations(db)
         run_dead_mans_switch_job(db)
         run_vacant_monitoring_job(db)
         run_dms_24h_unconfirmed_to_unknown_job(db)

@@ -5,7 +5,7 @@ import { STATE_OPTIONS } from "../services/jleService";
 import { validatePhone, sanitizePhoneInput } from "../utils/validatePhone";
 import { toUserFriendlyInvitationError } from "../utils/invitationErrors";
 
-/** Form data for guest invite accept (step 1). Exported for parent to call register after sign. Password not collected in modal. */
+/** Form data for guest or tenant invite accept (step 1). Exported for parent to call register after sign. Password not collected in modal. */
 export interface GuestInviteFormData {
   full_name: string;
   email: string;
@@ -21,6 +21,8 @@ export interface GuestInviteFormData {
   guest_status_acknowledged: boolean;
   no_tenancy_acknowledged: boolean;
   vacate_acknowledged: boolean;
+  /** True when invitation is for tenant (primary resident). Parent uses this for role when calling register. */
+  isTenantInvite?: boolean;
 }
 
 /** Prefilled guest info (from DB) for read-only display in step 1. No password. */
@@ -49,6 +51,7 @@ function contentForDisplay(
   ipAddress: string
 ): string {
   let out = content.replace(/\[Guest Name\]/g, guestName || "[Guest Name]");
+  out = out.replace(/\[Tenant Name\]/g, guestName || "[Tenant Name]");
   // Fill Date line ( **Date:** ___________________ )
   out = out.replace(
     /\*\*Date:\*\*\s*_+\s*/g,
@@ -109,7 +112,7 @@ export default function AgreementSignModal(props: {
   onRedirectToDropbox?: (invitationCode: string, signatureId: number, signUrl: string) => void;
   /** Invite-accept flow: show step 1 (property address + guest form + acknowledgments) before agreement/sign. */
   inviteAcceptMode?: boolean;
-  /** Called when user completes step 1 so parent can store form data and call register after onSigned. */
+  /** Called when user completes step 1. For guest: parent stores form data and user proceeds to sign. For tenant: parent registers immediately (no signing). */
   onContinueToSign?: (formData: GuestInviteFormData) => void;
   /** When set (e.g. dashboard): show this info read-only from DB; no form, no password. */
   prefilledGuestInfo?: PrefilledGuestInfo | null;
@@ -150,7 +153,14 @@ export default function AgreementSignModal(props: {
   /** Once user has gone to step "sign", don't reset to "details" until modal closes (avoids reverting to Accept invitation after Sign with Dropbox error). */
   const hasReachedSignStepRef = useRef(false);
 
-  const allAcks = useMemo(() => Object.values(acks).every(Boolean), [acks]);
+  const isTenantInvite = inviteDetails?.invitation_kind === "tenant" || Boolean(inviteDetails?.is_tenant_invite) || doc?.title === "Tenant Invitation Acceptance";
+  const allAcks = useMemo(
+    () =>
+      isTenantInvite
+        ? acks.read && acks.electronic
+        : Object.values(acks).every(Boolean),
+    [acks, isTenantInvite]
+  );
 
   /** Effective guest email/name: from step 1 form or prefilled when in invite mode step 2, else from props */
   const effectiveGuestEmail =
@@ -279,14 +289,17 @@ export default function AgreementSignModal(props: {
       return;
     }
     const d = step1FormData;
-    const requiredFilled =
-      d.full_name.trim() &&
-      d.email.trim() &&
-      d.phone.trim() &&
+    const isTenant = inviteDetails?.invitation_kind === "tenant" || inviteDetails?.is_tenant_invite;
+    const addressFilled =
       d.permanent_address.trim() &&
       d.permanent_city.trim() &&
       d.permanent_state.trim() &&
       d.permanent_zip.trim();
+    const requiredFilled =
+      d.full_name.trim() &&
+      d.email.trim() &&
+      d.phone.trim() &&
+      (isTenant ? true : addressFilled);
     if (!requiredFilled || !d.terms_agreed || !d.privacy_agreed) {
       const msg = "Please fill in all required fields and agree to the Terms of Service and Privacy Policy.";
       setStep1Error(msg);
@@ -299,7 +312,12 @@ export default function AgreementSignModal(props: {
       notify("error", phoneCheck.error ?? "Invalid phone number.");
       return;
     }
-    onContinueToSign?.(step1FormData);
+    const formDataWithRole = { ...step1FormData, isTenantInvite: isTenant };
+    onContinueToSign?.(formDataWithRole);
+    if (isTenant) {
+      // Tenant does not sign. Parent registers immediately and closes modal.
+      return;
+    }
     hasReachedSignStepRef.current = true;
     setInviteStep("sign");
   };
@@ -325,7 +343,9 @@ export default function AgreementSignModal(props: {
       return;
     }
     if (!allAcks) {
-      const msg = "Please check all four acknowledgments above before signing.";
+      const msg = isTenantInvite
+        ? "Please check all required acknowledgments above before signing."
+        : "Please check all four acknowledgments above before signing.";
       setSignError(msg);
       notify("error", msg);
       return;
@@ -333,14 +353,18 @@ export default function AgreementSignModal(props: {
 
     setSigning(true);
     try {
+      const signAcks = isTenantInvite
+        ? { ...acks, temporary: true, vacate: true }
+        : acks;
       const res = await agreementsApi.signInvitationAgreementWithDropbox({
         invitation_code: normalizedCode,
         guest_email: email,
         guest_full_name: name || typedSignature.trim(),
         typed_signature: typedSignature.trim(),
-        acks,
+        acks: signAcks,
         document_hash: doc.document_hash,
         ip_address: ipAddress.trim() || undefined,
+        is_tenant_invite: isTenantInvite,
       });
       if (res.sign_url && onRedirectToDropbox) {
         onRedirectToDropbox(normalizedCode, res.signature_id, res.sign_url);
@@ -425,6 +449,7 @@ export default function AgreementSignModal(props: {
               <Input label="Email" type="email" value={d.email} onChange={(e) => setStep1FormData({ ...d, email: e.target.value })} required />
               <Input label="Phone" value={d.phone} onChange={(e) => setStep1FormData({ ...d, phone: sanitizePhoneInput(e.target.value) })} placeholder="+15551234567 or 5551234567" required />
             </div>
+            {!(inviteDetails?.invitation_kind === "tenant" || inviteDetails?.is_tenant_invite) && (
             <div className="space-y-4">
               <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Permanent residence</p>
               <Input label="Street address" value={d.permanent_address} onChange={(e) => setStep1FormData({ ...d, permanent_address: e.target.value })} required />
@@ -434,6 +459,7 @@ export default function AgreementSignModal(props: {
               </div>
               <Input label="ZIP" value={d.permanent_zip} onChange={(e) => setStep1FormData({ ...d, permanent_zip: e.target.value })} required />
             </div>
+            )}
           </div>
         )}
 
@@ -462,7 +488,11 @@ export default function AgreementSignModal(props: {
         {step1Error && <p className="text-sm text-red-600 font-medium" role="alert">{step1Error}</p>}
         <div className="flex gap-3">
           <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-          <Button type="button" onClick={(e) => handleStep1Continue(e)}>Continue to review & sign</Button>
+          <Button type="button" onClick={(e) => handleStep1Continue(e)}>
+            {inviteDetails?.invitation_kind === "tenant" || inviteDetails?.is_tenant_invite
+              ? "Accept invitation & Create account"
+              : "Continue to review & sign"}
+          </Button>
         </div>
       </form>
     );
@@ -574,12 +604,17 @@ export default function AgreementSignModal(props: {
             <div className="border border-slate-200 rounded-xl bg-white p-5 space-y-4 shadow-sm">
               <p className="text-xs font-bold uppercase tracking-wider text-slate-500">Acknowledgments</p>
               {(
-                [
-                  ["read", "I have read the entire agreement"],
-                  ["temporary", "I acknowledge my stay is temporary"],
-                  ["vacate", "I agree to vacate by the checkout date"],
-                  ["electronic", "I consent to electronic signature"],
-                ] as Array<[AckKey, string]>
+                isTenantInvite
+                  ? [
+                      ["read", "I have read the entire agreement"],
+                      ["electronic", "I consent to electronic signature"],
+                    ]
+                  : [
+                      ["read", "I have read the entire agreement"],
+                      ["temporary", "I acknowledge my stay is temporary"],
+                      ["vacate", "I agree to vacate by the checkout date"],
+                      ["electronic", "I consent to electronic signature"],
+                    ]
               ).map(([key, label]) => (
                 <label key={key} className="flex items-start gap-3 cursor-pointer">
                   <input

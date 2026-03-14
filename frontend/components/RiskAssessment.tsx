@@ -10,8 +10,10 @@ interface RiskAssessmentProps {
       stayType: string;
     };
     limits: {
-      maxSafeStayDays: number;
+      platformRenewalCycleDays?: number;
+      legalThresholdDays?: number | null;
       daysUntilRisk: number;
+      maxSafeStayDays?: number;
     };
     riskFactors: Array<{
       factor: string;
@@ -53,16 +55,29 @@ export const RiskAssessment: React.FC<RiskAssessmentProps> = ({ data, compact })
 
       <div className="space-y-6">
         <div>
-          <div className="flex justify-between text-xs font-bold mb-2">
-            <span className="text-gray-400 uppercase">Limit Progress</span>
-            <span className="text-white">{data.limits.maxSafeStayDays - data.limits.daysUntilRisk} / {data.limits.maxSafeStayDays} Days</span>
-          </div>
-          <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
-            <div 
-              className={`h-full transition-all duration-1000 ${data.limits.daysUntilRisk < 5 ? 'bg-red-500' : 'bg-blue-500'}`} 
-              style={{ width: `${((data.limits.maxSafeStayDays - data.limits.daysUntilRisk) / data.limits.maxSafeStayDays) * 100}%` }}
-            ></div>
-          </div>
+          {(() => {
+            const cycle = data.limits.platformRenewalCycleDays ?? data.limits.maxSafeStayDays ?? 14;
+            const elapsed = cycle - data.limits.daysUntilRisk;
+            return (
+              <>
+                <div className="flex justify-between text-xs font-bold mb-2">
+                  <span className="text-gray-400 uppercase">Renewal Cycle Progress</span>
+                  <span className="text-white">{elapsed} / {cycle} Days</span>
+                </div>
+                <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-1000 ${data.limits.daysUntilRisk < 5 ? 'bg-red-500' : 'bg-blue-500'}`}
+                    style={{ width: `${(elapsed / cycle) * 100}%` }}
+                  ></div>
+                </div>
+                {data.limits.legalThresholdDays != null && (
+                  <p className="text-[10px] text-gray-500 mt-1">
+                    Legal threshold: {data.limits.legalThresholdDays} days &middot; Platform renewal cycle: {cycle} days
+                  </p>
+                )}
+              </>
+            );
+          })()}
         </div>
 
         <div className="space-y-3">

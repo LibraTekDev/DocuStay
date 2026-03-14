@@ -5,9 +5,9 @@ import { InviteGuestModal } from '../../components/InviteGuestModal';
 import { InviteRoleChoiceModal } from '../../components/InviteRoleChoiceModal';
 import { InviteTenantModal } from '../../components/InviteTenantModal';
 import { UserSession } from '../../types';
-import { dashboardApi, propertiesApi, getContextMode, setContextMode, onPropertiesChanged, type OwnerStayView, type OwnerInvitationView, type OwnerAuditLogEntry, type Property, type BulkUploadResult, type BillingResponse, type BillingInvoiceView, type BillingPaymentView } from '../../services/api';
+import { dashboardApi, propertiesApi, getContextMode, setContextMode, onPropertiesChanged, type OwnerStayView, type OwnerInvitationView, type OwnerAuditLogEntry, type Property, type BulkUploadResult, type BillingResponse, type BillingInvoiceView, type BillingPaymentView, type OwnerTenantView } from '../../services/api';
 import { copyToClipboard } from '../../utils/clipboard';
-import { getTodayLocal } from '../../utils/dateUtils';
+import { getTodayLocal, formatStayDuration } from '../../utils/dateUtils';
 import { toUserFriendlyInvitationError } from '../../utils/invitationErrors';
 import Settings from '../Settings/Settings';
 import HelpCenter from '../Support/HelpCenter';
@@ -29,14 +29,6 @@ function isOverstayed(endDateStr: string): boolean {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   return end.getTime() < today.getTime();
-}
-
-function formatStayDuration(startStr: string, endStr: string): string {
-  const start = new Date(startStr);
-  const end = new Date(endStr);
-  const days = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
-  const fmt = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  return `${fmt(start)} – ${fmt(end)} (${days} day${days !== 1 ? 's' : ''})`;
 }
 
 /** Invite ID token state badge: displays Pending | Active | Expired | Revoked (maps from STAGED | BURNED | EXPIRED | REVOKED) */
@@ -98,7 +90,9 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
   const [showVoidInvoiceDialog, setShowVoidInvoiceDialog] = useState(false);
   const [showVerifyQRModal, setShowVerifyQRModal] = useState(false);
   const [verifyQRInviteId, setVerifyQRInviteId] = useState<string | null>(null);
+  const [detailStay, setDetailStay] = useState<OwnerStayView | null>(null);
   const [verifyQRCopyToast, setVerifyQRCopyToast] = useState<string | null>(null);
+  const [tenants, setTenants] = useState<OwnerTenantView[]>([]);
   const [personalModeUnits, setPersonalModeUnits] = useState<number[]>([]);
   const [contextMode, setContextModeState] = useState<'business' | 'personal'>(() => getContextMode());
   type AssignedManagerItem = { user_id: number; email: string; full_name: string | null; has_resident_mode: boolean; resident_unit_id: number | null; resident_unit_label: string | null };
@@ -131,13 +125,15 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
       propertiesApi.list(),
       propertiesApi.listInactive(),
       dashboardApi.ownerPersonalModeUnits().catch(() => ({ unit_ids: [] })),
+      dashboardApi.ownerTenants().catch(() => [] as OwnerTenantView[]),
     ])
-      .then(([staysData, invitationsData, propertiesList, inactiveList, pmUnits]) => {
+      .then(([staysData, invitationsData, propertiesList, inactiveList, pmUnits, tenantsData]) => {
         setStays(staysData);
         setInvitations(invitationsData);
         setProperties(propertiesList);
         setInactiveProperties(inactiveList);
         setPersonalModeUnits((pmUnits as { unit_ids: number[] }).unit_ids || []);
+        setTenants(tenantsData as OwnerTenantView[]);
       })
       .catch((e) => {
         const msg = (e as Error)?.message ?? 'Failed to load dashboard.';
@@ -161,8 +157,8 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
   }, [initialTab]);
 
   useEffect(() => {
-    if (contextMode === 'personal' && ['billing', 'logs'].includes(activeTab)) setActiveTab('dashboard');
-    if (contextMode === 'business' && ['guests', 'invitations'].includes(activeTab)) setActiveTab('dashboard');
+    if (contextMode === 'personal' && ['billing', 'logs', 'tenants'].includes(activeTab)) setActiveTab('dashboard');
+    if (contextMode === 'business' && ['guests'].includes(activeTab)) setActiveTab('dashboard');
   }, [contextMode]);
 
   useEffect(() => {
@@ -309,7 +305,8 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             { id: 'dashboard', label: 'Dashboard', icon: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6' },
             { id: 'properties', label: 'My Properties', icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' },
             ...(contextMode === 'personal' ? [{ id: 'guests', label: 'Guests', icon: 'M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z' }] : []),
-            ...(contextMode === 'personal' ? [{ id: 'invitations', label: 'Invitations', icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' }] : []),
+            ...(contextMode !== 'personal' ? [{ id: 'tenants', label: 'Tenants', icon: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z' }] : []),
+            { id: 'invitations', label: 'Invitations', icon: 'M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z' },
             ...(contextMode !== 'personal' ? [{ id: 'billing', label: 'Billing', icon: 'M17 9V7a2 2 0 00-2-2H5a2 2 0 00-2 2v2H9v2h2v6a2 2 0 002 2h2a2 2 0 002-2v-6h2V9zm-6 0V7a2 2 0 00-2-2H5a2 2 0 00-2 2v2h4z' }] : []),
             ...(contextMode !== 'personal' ? [{ id: 'logs', label: 'Event ledger', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' }] : []),
             { id: 'settings', label: 'Settings', icon: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z' },
@@ -352,7 +349,8 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             <option value="dashboard">Dashboard</option>
             <option value="properties">My Properties</option>
             {contextMode === 'personal' && <option value="guests">Guests</option>}
-            {contextMode === 'personal' && <option value="invitations">Invitations</option>}
+            {contextMode !== 'personal' && <option value="tenants">Tenants</option>}
+            <option value="invitations">Invitations</option>
             {contextMode !== 'personal' && <option value="billing">Billing</option>}
             {contextMode !== 'personal' && <option value="logs">Event ledger</option>}
             <option value="settings">Settings</option>
@@ -364,10 +362,10 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
           <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-10 gap-6">
             <div>
               <h1 className="text-4xl font-extrabold text-slate-800 tracking-tight">
-                {activeTab === 'properties' ? 'My Properties' : activeTab === 'guests' ? 'Guests' : activeTab === 'invitations' ? 'Invitations' : activeTab === 'billing' ? 'Billing' : activeTab === 'logs' ? 'Event ledger' : 'Overview'}
+                {activeTab === 'properties' ? 'My Properties' : activeTab === 'guests' ? 'Guests' : activeTab === 'tenants' ? 'Tenants' : activeTab === 'invitations' ? 'Invitations' : activeTab === 'billing' ? 'Billing' : activeTab === 'logs' ? 'Event ledger' : 'Overview'}
               </h1>
               <p className="text-slate-600 mt-1">
-                {activeTab === 'properties' ? 'View, edit, or remove your registered properties.' : activeTab === 'guests' ? 'Guests currently staying at your properties and their stay details.' : activeTab === 'invitations' ? 'Pending invitations waiting for guests to accept.' : activeTab === 'billing' ? 'Invoices and payment history. Onboarding and subscription charges appear here.' : activeTab === 'logs' ? 'Immutable event ledger: status changes, guest signatures, payment and billing activity, and failed attempts. Filter by time, category, or search.' : 'Documentation and authorization for your properties.'}
+                {activeTab === 'properties' ? 'View, edit, or remove your registered properties.' : activeTab === 'guests' ? 'Guests currently staying at your properties and their stay details.' : activeTab === 'tenants' ? 'Tenants assigned to your properties and their lease details.' : activeTab === 'invitations' ? (contextMode === 'business' ? 'Tenant invitations you have sent.' : 'Pending invitations waiting for guests to accept.') : activeTab === 'billing' ? 'Invoices and payment history. Onboarding and subscription charges appear here.' : activeTab === 'logs' ? 'Immutable event ledger: status changes, guest signatures, payment and billing activity, and failed attempts. Filter by time, category, or search.' : 'Documentation and authorization for your properties.'}
               </p>
             </div>
             <div className="flex gap-4 flex-wrap items-center">
@@ -387,8 +385,18 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                   </Button>
                 </span>
               )}
+              {(activeTab === 'tenants' || activeTab === 'invitations') && contextMode !== 'personal' && (
+                <Button variant="outline" onClick={() => setShowInviteTenantModal(true)} className="px-6 flex items-center gap-2">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                  Invite Tenant
+                </Button>
+              )}
               {activeTab === 'properties' && contextMode !== 'personal' && (
                 <div className="flex items-center gap-1.5">
+                  <Button variant="outline" onClick={() => setShowInviteTenantModal(true)} className="px-6 flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                    Invite Tenant
+                  </Button>
                   <Button variant="outline" onClick={() => setShowBulkUploadModal(true)} className="px-6 flex items-center gap-2">
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
                     Upload in bulk
@@ -405,9 +413,11 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                   </button>
                 </div>
               )}
-              <Button variant="primary" onClick={() => navigate('add-property')} className="px-6">
-                Register Property
-              </Button>
+              {contextMode !== 'personal' && (
+                <Button variant="primary" onClick={() => navigate('add-property')} className="px-6">
+                  Register Property
+                </Button>
+              )}
             </div>
           </header>
         )}
@@ -570,6 +580,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                               ) : (
                                 <Button variant="ghost" onClick={() => handleRevokeClick(stay)} className="text-xs py-2 text-red-600 hover:text-red-700">Revoke</Button>
                               )}
+                              <Button variant="outline" onClick={() => setDetailStay(stay)} className="text-xs py-2">Details</Button>
                             </td>
                           </tr>
                         );
@@ -597,7 +608,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
               </Card>
             )}
           </div>
-        ) : activeTab === 'invitations' && contextMode === 'personal' ? (
+        ) : activeTab === 'invitations' ? (
           <InvitationsTabContent
             invitations={invitations}
             stays={stays}
@@ -606,8 +617,75 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
             showVerifyQR={true}
             onVerifyQR={(code) => { setVerifyQRInviteId(code); setShowVerifyQRModal(true); }}
             onCancelInvitation={async (id) => { await dashboardApi.cancelInvitation(id); notify('success', 'Invitation cancelled.'); loadData(); }}
-            introText="Invitations you've sent. Pending invitations are labeled as expired after 12 hours if not accepted."
+            introText={contextMode === 'business' ? 'Tenant invitations you have sent. Pending invitations expire after 12 hours if not accepted.' : "Invitations you've sent. Pending invitations are labeled as expired after 12 hours if not accepted."}
           />
+        ) : activeTab === 'tenants' && contextMode !== 'personal' ? (
+          <div className="space-y-8">
+            {tenants.length === 0 ? (
+              <Card className="p-12 text-center">
+                <p className="text-slate-600 mb-6">No tenants or tenant invitations for your properties yet.</p>
+                <Button variant="outline" onClick={() => setShowInviteTenantModal(true)}>Invite Tenant</Button>
+              </Card>
+            ) : (
+              <Card className="overflow-hidden">
+                <div className="p-6 border-b border-slate-200 bg-white/60 backdrop-blur-md">
+                  <h3 className="text-xl font-bold text-slate-800">Tenants</h3>
+                  <p className="text-xs text-slate-500 mt-1">Active tenants and pending invitations for your properties</p>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead className="bg-slate-100 text-slate-500 uppercase text-[10px] tracking-widest font-extrabold border-b border-slate-200">
+                      <tr>
+                        <th className="px-6 py-4">Tenant</th>
+                        <th className="px-6 py-4">Property</th>
+                        <th className="px-6 py-4">Unit</th>
+                        <th className="px-6 py-4">Lease period</th>
+                        <th className="px-6 py-4">Status</th>
+                        <th className="px-6 py-4">Invite code</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {tenants.map((t) => (
+                        <tr key={t.id} className="hover:bg-slate-50 transition-colors">
+                          <td className="px-6 py-5">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm ${t.status === 'pending_signup' ? 'bg-amber-100 text-amber-700' : 'bg-slate-200 text-slate-700'}`}>
+                                {t.tenant_name.charAt(0).toUpperCase()}
+                              </div>
+                              <div>
+                                <p className="text-sm font-bold text-slate-800">{t.tenant_name}</p>
+                                {t.tenant_email && <p className="text-xs text-slate-500">{t.tenant_email}</p>}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-6 py-5">
+                            <p className="text-sm font-medium text-slate-800">{t.property_name}</p>
+                          </td>
+                          <td className="px-6 py-5 text-sm text-slate-600">{t.unit_label || '—'}</td>
+                          <td className="px-6 py-5 text-sm text-slate-600 whitespace-nowrap">
+                            {t.start_date && t.end_date ? formatStayDuration(t.start_date, t.end_date) : t.start_date ? `From ${new Date(t.start_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}` : '—'}
+                            {t.status === 'active' && !t.end_date && <span className="ml-1 text-xs text-slate-400">(ongoing)</span>}
+                          </td>
+                          <td className="px-6 py-5">
+                            <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest ${
+                              t.status === 'active' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                              t.status === 'pending_signup' ? 'bg-amber-50 text-amber-700 border border-amber-200' :
+                              'bg-slate-100 text-slate-500 border border-slate-200'
+                            }`}>
+                              {t.status === 'active' ? 'Active' : t.status === 'pending_signup' ? 'Pending signup' : 'Ended'}
+                            </span>
+                          </td>
+                          <td className="px-6 py-5 text-xs font-mono text-slate-500">
+                            {t.invitation_code || '—'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            )}
+          </div>
         ) : activeTab === 'properties' ? (
           /* Properties tab: Active list + Inactive section */
           <div className="space-y-8">
@@ -1399,7 +1477,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
                               ) : (
                                 <Button variant="ghost" onClick={() => handleRevokeClick(stay)} className="text-xs py-2 text-red-600 hover:text-red-700">Revoke</Button>
                               )}
-                              <Button variant="outline" className="text-xs py-2">Details</Button>
+                              <Button variant="outline" className="text-xs py-2" onClick={() => setDetailStay(stay)}>Details</Button>
                             </td>
                           </tr>
                         );
@@ -1620,6 +1698,89 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
           </div>
         </>
       )}
+
+      {/* Guest details modal */}
+      {detailStay && (() => {
+        const ds = detailStay;
+        const revoked = !!ds.revoked_at;
+        const overstay = isOverstayed(ds.stay_end_date);
+        const completed = !!ds.checked_out_at;
+        const cancelled = !!ds.cancelled_at;
+        const statusLabel = completed ? 'Completed' : cancelled ? 'Cancelled' : revoked ? 'Revoked' : overstay ? 'Overstayed' : 'Active';
+        const statusClass = completed ? 'bg-slate-100 text-slate-600' : cancelled ? 'bg-slate-100 text-slate-500' : revoked ? 'bg-amber-50 text-amber-700' : overstay ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-700';
+        const tokenLabel = ds.token_state === 'BURNED' ? 'Active' : ds.token_state === 'STAGED' ? 'Pending' : ds.token_state === 'REVOKED' ? 'Revoked' : ds.token_state === 'EXPIRED' ? 'Expired' : ds.token_state ?? '—';
+        return (
+          <Modal open onClose={() => setDetailStay(null)} title="Guest Authorization Details" className="max-w-lg">
+            <div className="p-6 space-y-5">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-full bg-slate-200 text-slate-700 flex items-center justify-center font-bold text-lg">{ds.guest_name.charAt(0)}</div>
+                <div>
+                  <p className="text-lg font-bold text-slate-800">{ds.guest_name}</p>
+                  <p className="text-sm text-slate-500">Stay #{ds.stay_id}</p>
+                </div>
+                <span className={`ml-auto px-3 py-1 rounded-full text-xs font-bold uppercase tracking-widest ${statusClass}`}>{statusLabel}</span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-1">Property</p>
+                  <p className="text-slate-800 font-medium">{ds.property_name}</p>
+                </div>
+                <div>
+                  <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-1">Region</p>
+                  <p className="text-slate-800 font-medium">{ds.region_code}</p>
+                </div>
+                <div>
+                  <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-1">Authorization Start</p>
+                  <p className="text-slate-800 font-medium">{ds.stay_start_date}</p>
+                </div>
+                <div>
+                  <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-1">Authorization End</p>
+                  <p className="text-slate-800 font-medium">{ds.stay_end_date}</p>
+                </div>
+                <div>
+                  <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-1">Days Remaining</p>
+                  <p className="text-slate-800 font-medium">{completed || cancelled ? '—' : revoked ? '—' : overstay ? 'Expired' : `${daysLeft(ds.stay_end_date)} day(s)`}</p>
+                </div>
+                <div>
+                  <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-1">Token Status</p>
+                  <p className="text-slate-800 font-medium">{tokenLabel}</p>
+                </div>
+                {ds.invite_id && (
+                  <div className="col-span-2">
+                    <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-1">Invite ID</p>
+                    <p className="text-slate-800 font-mono text-xs">{ds.invite_id}</p>
+                  </div>
+                )}
+                <div>
+                  <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-1">Risk Level</p>
+                  <p className={`font-medium ${ds.risk_indicator === 'high' ? 'text-red-600' : ds.risk_indicator === 'medium' ? 'text-amber-600' : 'text-green-600'}`}>{ds.risk_indicator.charAt(0).toUpperCase() + ds.risk_indicator.slice(1)}</p>
+                </div>
+                <div>
+                  <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-1">Classification</p>
+                  <p className="text-slate-800 font-medium">{ds.legal_classification === 'tenant_risk' ? 'Tenant risk' : ds.legal_classification.charAt(0).toUpperCase() + ds.legal_classification.slice(1)}</p>
+                </div>
+                {ds.revoked_at && (
+                  <div className="col-span-2">
+                    <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-1">Revoked At</p>
+                    <p className="text-amber-700 font-medium">{new Date(ds.revoked_at).toLocaleString()}</p>
+                  </div>
+                )}
+                {ds.applicable_laws.length > 0 && (
+                  <div className="col-span-2">
+                    <p className="text-slate-500 text-xs font-semibold uppercase tracking-wider mb-1">Applicable Laws</p>
+                    <p className="text-slate-700 text-xs">{ds.applicable_laws.join(', ')}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <Button variant="outline" onClick={() => setDetailStay(null)}>Close</Button>
+              </div>
+            </div>
+          </Modal>
+        );
+      })()}
 
       {/* Revoke confirmation modal */}
       {revokeConfirmStay && (

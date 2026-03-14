@@ -67,17 +67,21 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
       formData.permanent_state.trim() &&
       formData.permanent_zip.trim();
     const requiredFilled = isTenantInvite ? baseRequired : baseRequired && addressRequired;
-    const allCheckboxesChecked =
-      formData.terms_agreed &&
-      formData.privacy_agreed &&
+    const guestAcksChecked =
       formData.guest_status_acknowledged &&
       formData.no_tenancy_acknowledged &&
       formData.vacate_acknowledged;
+    const allCheckboxesChecked =
+      formData.terms_agreed &&
+      formData.privacy_agreed &&
+      (isTenantInvite ? true : guestAcksChecked);
     if (!requiredFilled || !allCheckboxesChecked) {
-      notify('error', 'Please fill in all required fields and accept all acknowledgments and agreements before continuing.');
+      notify('error', isTenantInvite
+        ? 'Please fill in all required fields and accept the Terms of Service and Privacy Policy.'
+        : 'Please fill in all required fields and accept all acknowledgments and agreements before continuing.');
       return;
     }
-    if (!agreementSignatureId) {
+    if (!isTenantInvite && !agreementSignatureId) {
       notify('error', 'You must review and sign the agreement to continue.');
       setAgreementOpen(true);
       return;
@@ -116,10 +120,10 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
         permanent_zip: formData.permanent_zip || '',
         terms_agreed: formData.terms_agreed,
         privacy_agreed: formData.privacy_agreed,
-        guest_status_acknowledged: formData.guest_status_acknowledged,
-        no_tenancy_acknowledged: formData.no_tenancy_acknowledged,
-        vacate_acknowledged: formData.vacate_acknowledged,
-        agreement_signature_id: agreementSignatureId,
+        guest_status_acknowledged: isTenantInvite ? false : formData.guest_status_acknowledged,
+        no_tenancy_acknowledged: isTenantInvite ? false : formData.no_tenancy_acknowledged,
+        vacate_acknowledged: isTenantInvite ? false : formData.vacate_acknowledged,
+        agreement_signature_id: isTenantInvite ? null : agreementSignatureId,
       });
       setLoading(false);
       if (result.status === 'success' && result.data) {
@@ -166,13 +170,19 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
     invitationsApi.getDetails(normalizedCode)
       .then((d) => {
         setInviteDetails(d);
-        if (!d.valid && d.expired) notify('error', 'This invitation has expired and can’t be used.');
-        else if (!d.valid && d.used) notify('error', 'This invitation link has already been used.');
-        else if (!d.valid) notify('error', 'Invalid invitation code.');
+        if (!d.valid) {
+          if (d.expired) notify('error', 'This invitation has expired. Please ask your host for a new invitation.');
+          else if (d.used || d.already_accepted) notify('error', 'This invitation has already been accepted. If you already registered, please sign in instead.');
+          else if (d.revoked) notify('error', 'This invitation has been revoked by the property owner. Please contact your host.');
+          else if (d.cancelled) notify('error', 'This invitation has been cancelled. Please contact your host.');
+          else if (d.reason === 'not_found') notify('error', 'This invitation code was not found. Please double-check the link or code.');
+          else notify('error', 'This invitation link is invalid. Please check the link or contact your host.');
+        }
       })
-      .catch(() => {
+      .catch((err) => {
         setInviteDetails({ valid: false });
-        notify('error', 'Invalid or expired invitation code.');
+        const msg = (err as Error)?.message ?? '';
+        notify('error', msg || 'Could not verify invitation. Please check the link and try again.');
       })
       .finally(() => setInviteLoading(false));
   }, [normalizedCode, notify]);
@@ -193,9 +203,15 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
           <p className="text-slate-600 mb-4">
             {inviteDetails.expired
               ? 'This invitation has expired (it was not accepted in time). Please ask your host for a new invitation.'
-              : inviteDetails.used
-                ? 'This invitation link has already been used and cannot be used again.'
-                : 'This invitation could not be loaded.'}
+              : inviteDetails.used || inviteDetails.already_accepted
+                ? 'This invitation has already been accepted and cannot be used again. If you already registered, please sign in instead.'
+                : inviteDetails.revoked
+                  ? 'This invitation has been revoked by the property owner. Please contact your host for a new invitation.'
+                  : inviteDetails.cancelled
+                    ? 'This invitation has been cancelled. Please contact your host for a new invitation.'
+                    : inviteDetails.reason === 'not_found'
+                      ? 'This invitation code was not found. Please double-check the link or code.'
+                      : 'This invitation link is invalid. Please check the link or contact your host.'}
           </p>
           <button onClick={() => navigate(isTenantInvite ? 'guest-signup/tenant' : 'guest-signup')} className="text-[#6B90F2] hover:text-[#5a7ed9] font-medium underline underline-offset-2">Enter a different code</button>
         </div>
@@ -222,11 +238,11 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
                  </div>
                  <div className="grid grid-cols-2 gap-4 text-xs font-medium text-slate-300">
                     <div>
-                       <p className="uppercase tracking-widest mb-1 opacity-60">Check-in</p>
+                       <p className="uppercase tracking-widest mb-1 opacity-60">{isTenantInvite ? 'Start date' : 'Check-in'}</p>
                        <p className="text-white text-sm">{formatDate(inviteDetails?.stay_start_date)}</p>
                     </div>
                     <div>
-                       <p className="uppercase tracking-widest mb-1 opacity-60">Check-out</p>
+                       <p className="uppercase tracking-widest mb-1 opacity-60">{isTenantInvite ? 'End date' : 'Check-out'}</p>
                        <p className="text-white text-sm">{formatDate(inviteDetails?.stay_end_date)}</p>
                     </div>
                  </div>
@@ -273,9 +289,10 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
             <div className={isTenantInvite ? 'mt-12' : 'md:col-span-2 mt-12'}>
               <h3 className="text-2xl font-bold text-slate-800 mb-8 flex items-center gap-2">
                  <div className="w-8 h-8 rounded-full bg-[#6B90F2]/20 flex items-center justify-center text-[#6B90F2] text-sm font-bold">{isTenantInvite ? 2 : 3}</div>
-                 {isTenantInvite ? 'Agreement & acknowledgments' : 'Stay acknowledgments'}
+                 {isTenantInvite ? 'Agreements' : 'Stay acknowledgments'}
               </h3>
               
+              {!isTenantInvite && (
               <div className="grid md:grid-cols-3 gap-6 mb-12">
                 {[
                   { name: 'guest_status_acknowledged', label: 'Temporary Guest Status', desc: 'I acknowledge I am a guest only, not a tenant or resident.' },
@@ -300,6 +317,7 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
                   </div>
                 ))}
               </div>
+              )}
 
               <div className="pt-8 border-t border-slate-200 space-y-4">
                 <label className="flex items-start gap-3 cursor-pointer group w-full max-w-2xl">
@@ -311,6 +329,7 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
                   <span className="text-sm text-slate-600 group-hover:text-slate-800 pt-0.5">I agree to the <a href="#privacy" target="_blank" rel="noopener noreferrer" className="text-[#6B90F2] font-semibold hover:underline">Privacy Policy</a>.</span>
                 </label>
 
+                {!isTenantInvite && (
                 <div className="flex flex-col items-center gap-3 mt-6 text-center">
                   <Button
                     type="button"
@@ -324,8 +343,9 @@ const RegisterFromInvite: React.FC<Props> = ({ invitationId, navigate, setLoadin
                     <p className="text-xs text-slate-500">Your signup cannot be completed until the agreement is signed.</p>
                   ) : null}
                 </div>
+                )}
                 <div className="flex flex-col items-center mt-6">
-                  <Button type="submit" disabled={!agreementSignatureId} className="w-full md:w-auto px-20 py-5 text-xl">{isTenantInvite ? 'Create Account & Accept Tenant Invitation' : 'Create Account & Accept Invitation'}</Button>
+                  <Button type="submit" disabled={!isTenantInvite && !agreementSignatureId} className="w-full md:w-auto px-20 py-5 text-xl">{isTenantInvite ? 'Create Account & Accept Tenant Invitation' : 'Create Account & Accept Invitation'}</Button>
                   <p className="text-sm text-slate-600 mt-6">
                     Already have an account?{' '}
                     <button type="button" onClick={() => {

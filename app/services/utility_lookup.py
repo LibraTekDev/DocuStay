@@ -55,7 +55,7 @@ def _territory_paragraph(region_code: str | None) -> str:
     if not region_code or not (region_code := region_code.strip().upper()):
         return "This authorization is issued for the property's jurisdiction."
     _territory_text: dict[str, str] = {
-        "NYC": "This authorization is issued for the territory of New York City. DocuStay operates in accordance with applicable New York short-term stay and utility authorization requirements.",
+        "NY": "This authorization is issued for the territory of New York. DocuStay operates in accordance with applicable New York short-term stay and utility authorization requirements.",
         "FL": "This authorization is issued for the territory of Florida. DocuStay operates in accordance with applicable Florida short-term stay and utility authorization requirements.",
         "CA": "This authorization is issued for the territory of California. DocuStay operates in accordance with applicable California short-term stay and utility authorization requirements.",
         "TX": "This authorization is issued for the territory of Texas. DocuStay operates in accordance with applicable Texas short-term stay and utility authorization requirements.",

@@ -1,15 +1,8 @@
 import React from 'react';
 import { Card, Button } from './UI';
 import { copyToClipboard } from '../utils/clipboard';
+import { formatStayDuration } from '../utils/dateUtils';
 import type { OwnerInvitationView, OwnerStayView } from '../services/api';
-
-function formatStayDuration(startStr: string, endStr: string): string {
-  const start = new Date(startStr);
-  const end = new Date(endStr);
-  const days = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
-  const fmt = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  return `${fmt(start)} – ${fmt(end)} (${days} day${days !== 1 ? 's' : ''})`;
-}
 
 function TokenStateBadge({ tokenState }: { tokenState?: string | null }) {
   const state = (tokenState || 'STAGED').toUpperCase();

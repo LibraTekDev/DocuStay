@@ -10,6 +10,7 @@ import { ModeSwitcher } from '../../components/ModeSwitcher';
 import Settings from '../Settings/Settings';
 import HelpCenter from '../Support/HelpCenter';
 import { JURISDICTION_RULES } from '../../services/jleService';
+import { formatStayDuration } from '../../utils/dateUtils';
 import type { OwnerStayView, OwnerAuditLogEntry, BillingResponse } from '../../services/api';
 
 type ManagerPropertySummary = {
@@ -19,14 +20,6 @@ type ManagerPropertySummary = {
   property_type_label?: string | null; is_multi_unit?: boolean; shield_mode_enabled?: boolean;
 };
 type UnitSummary = { id: number; unit_label: string; occupancy_status: string; occupied_by?: string | null; invite_id?: string | null };
-
-function formatStayDuration(startStr: string, endStr: string): string {
-  const start = new Date(startStr);
-  const end = new Date(endStr);
-  const days = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
-  const fmt = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  return `${fmt(start)} – ${fmt(end)} (${days} day${days !== 1 ? 's' : ''})`;
-}
 
 const ManagerPropertyDetail: React.FC<{
   propertyId: string;
@@ -190,7 +183,14 @@ const ManagerPropertyDetail: React.FC<{
     ? ['overview', 'guests', 'invitations', 'documentation']
     : ['overview', 'documentation', 'logs'];
   const regionKey = property?.region_code === 'NYC' ? 'NY' : (property?.region_code || 'FL');
-  const jurisdictionInfo = JURISDICTION_RULES[regionKey as keyof typeof JURISDICTION_RULES] ?? JURISDICTION_RULES.FL;
+  const jFallback = JURISDICTION_RULES[regionKey as keyof typeof JURISDICTION_RULES] ?? JURISDICTION_RULES.FL;
+  const jurisdictionInfo = {
+    name: jFallback.name,
+    legalThresholdDays: jFallback.legalThresholdDays,
+    platformRenewalCycleDays: jFallback.platformRenewalCycleDays,
+    reminderDaysBefore: jFallback.reminderDaysBefore,
+    jurisdictionGroup: jFallback.group,
+  };
 
   // In personal mode use the same sidebar as ManagerDashboard: Properties, Guests, Invitations, Settings, Help Center, Mode (no Overview/Documentation/Event ledger)
   const sidebarNavPersonal: { id: Section | 'properties' | 'guests' | 'invitations'; label: string; icon: string }[] = [
@@ -571,7 +571,7 @@ const ManagerPropertyDetail: React.FC<{
                   {statusBadge(u.occupancy_status)}
                   {contextMode === 'personal' && u.occupied_by && <p className="text-xs text-slate-600">Occupied by {u.occupied_by}</p>}
                   {contextMode === 'personal' && u.invite_id && <p className="text-xs text-slate-500">Invite ID {u.invite_id}</p>}
-                  {(u.occupancy_status || '').toLowerCase() === 'vacant' && u.id > 0 && contextMode === 'personal' && (
+                  {(u.occupancy_status || '').toLowerCase() === 'vacant' && u.id > 0 && (
                     <Button variant="outline" onClick={() => { setInviteRoleChoiceUnit({ unitId: u.id, unitLabel: u.unit_label }); }}>Invite</Button>
                   )}
                 </div>
@@ -677,20 +677,25 @@ const ManagerPropertyDetail: React.FC<{
         <div className="space-y-8">
           <h3 className="text-3xl font-black text-slate-800 tracking-tighter">Region documentation: {jurisdictionInfo.name}</h3>
           <section>
-            <p className="text-slate-600 leading-relaxed mb-4">DocuStay uses region-based stay limits for documentation and audit purposes. For {jurisdictionInfo.name}, the documented max stay is {jurisdictionInfo.maxSafeStayDays} days. All stays are recorded in the audit trail.</p>
+            <p className="text-slate-600 leading-relaxed mb-4">
+              {jurisdictionInfo.legalThresholdDays != null
+                ? <>The legal tenancy threshold for {jurisdictionInfo.name} is <strong>{jurisdictionInfo.legalThresholdDays} days</strong>. The platform renews authorizations every <strong>{jurisdictionInfo.platformRenewalCycleDays} days</strong> to maintain a defensible audit trail.</>
+                : <>Tenancy in {jurisdictionInfo.name} is {jurisdictionInfo.jurisdictionGroup === 'D' ? 'behavior-based' : 'lease-defined'}. The platform uses a <strong>{jurisdictionInfo.platformRenewalCycleDays}-day</strong> renewal cycle.</>
+              }
+            </p>
           </section>
           <div className="grid gap-4 md:grid-cols-3">
             <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200">
-              <p className="font-semibold text-emerald-800">Within limit</p>
-              <span className="text-slate-600">Stay duration under {jurisdictionInfo.maxSafeStayDays - jurisdictionInfo.warningDays} days. Full documentation active.</span>
+              <p className="font-semibold text-emerald-800">Within cycle</p>
+              <span className="text-slate-600">Authorization under {jurisdictionInfo.platformRenewalCycleDays - jurisdictionInfo.reminderDaysBefore} days. Full documentation active.</span>
             </div>
             <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-              <p className="font-semibold text-slate-800">Warning zone</p>
-              <span className="text-slate-600">Within {jurisdictionInfo.warningDays} days of documented max. Verification logs recorded.</span>
+              <p className="font-semibold text-slate-800">Approaching renewal</p>
+              <span className="text-slate-600">Within {jurisdictionInfo.reminderDaysBefore} days of cycle end. Renewal prompts sent.</span>
             </div>
             <div className="p-4 rounded-xl bg-slate-50 border border-slate-200">
-              <p className="font-semibold text-slate-800">Overstay</p>
-              <span className="text-slate-600">Stay exceeds documented max for {jurisdictionInfo.name}. Status and actions are recorded in the audit trail.</span>
+              <p className="font-semibold text-slate-800">Past cycle</p>
+              <span className="text-slate-600">Authorization exceeds the {jurisdictionInfo.platformRenewalCycleDays}-day cycle for {jurisdictionInfo.name}. Recorded in audit trail.</span>
             </div>
           </div>
         </div>
