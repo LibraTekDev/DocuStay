@@ -6,6 +6,7 @@ import { copyToClipboard } from '../../utils/clipboard';
 import AgreementSignModal, { type PrefilledGuestInfo } from '../../components/AgreementSignModal';
 import PendingSignatureModal from '../../components/PendingSignatureModal';
 import HelpCenter from '../Support/HelpCenter';
+import { DashboardAlertsPanel } from '../../components/DashboardAlertsPanel';
 import { PENDING_INVITE_STORAGE_KEY } from './GuestLogin';
 
 type GuestTab = 'stays' | 'invitations' | 'help';
@@ -570,6 +571,8 @@ export const GuestDashboard: React.FC<{ user: UserSession; navigate: (v: string)
             <option value="help">Help Center</option>
           </select>
         </div>
+
+        {activeTab !== 'help' && <DashboardAlertsPanel role="guest" className="mb-6" limit={50} />}
 
         {/* Invitations tab */}
         {activeTab === 'invitations' && (

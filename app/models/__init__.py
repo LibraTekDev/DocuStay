@@ -24,6 +24,8 @@ from app.models.resident_mode import ResidentMode
 from app.models.resident_presence import ResidentPresence
 from app.models.stay_presence import StayPresence, PresenceAwayPeriod
 from app.models.manager_invitation import ManagerInvitation
+from app.models.dashboard_alert import DashboardAlert
+from app.models.notification_attempt import NotificationAttempt
 
 __all__ = [
     "User",
@@ -53,4 +55,6 @@ __all__ = [
     "StayPresence",
     "PresenceAwayPeriod",
     "ManagerInvitation",
+    "DashboardAlert",
+    "NotificationAttempt",
 ]

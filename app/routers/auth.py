@@ -1,4 +1,5 @@
 """Module A: Authentication & role selection."""
+import logging
 import random
 import secrets
 import string
@@ -77,6 +78,7 @@ from app.services.notifications import (
     send_tenant_guest_accepted_invite,
     send_shield_mode_turned_off_notification,
 )
+from app.services.dashboard_alerts import create_alert_for_owner_and_managers, create_alert_for_user
 from app.dependencies import get_current_user, require_owner, require_guest, require_guest_or_tenant, get_pending_owner
 from app.models.guest import GuestProfile
 from app.models.manager_invitation import ManagerInvitation
@@ -1595,6 +1597,7 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             invited_by_user_id=getattr(inv, "invited_by_user_id", None),
         )
         db.add(ta)
+        db.flush()
         inv.status = "accepted"
         inv.token_state = "BURNED"
         create_ledger_event(
@@ -1608,6 +1611,19 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
             actor_user_id=user.id,
             meta={"invitation_code": code, "unit_id": inv.unit_id, "tenant_email": user.email},
         )
+        try:
+            create_alert_for_owner_and_managers(
+                db,
+                inv.property_id,
+                "tenant_accepted",
+                "Tenant accepted invitation",
+                "A tenant accepted the invitation and is now assigned to the unit.",
+                severity="info",
+                invitation_id=inv.id,
+            )
+        except Exception as e:
+            logging.getLogger(__name__).warning("Failed to create tenant_accepted dashboard alert (register): %s", e)
+    db.flush()
     db.commit()
 
     # Full accept path (guests only): code + valid signature -> create stay, mark inv accepted, token BURNED
@@ -1706,6 +1722,34 @@ def register_guest(request: Request, data: GuestRegister, db: Session = Depends(
                     send_tenant_guest_accepted_invite(invited_by_user.email.strip(), guest_name, property_name)
                 except Exception:
                     pass
+        try:
+            create_alert_for_owner_and_managers(
+                db,
+                inv.property_id,
+                "invitation_accepted",
+                "Guest accepted invitation",
+                f"A guest accepted the invitation and a stay was created for {property_name}.",
+                severity="info",
+                stay_id=stay.id,
+                invitation_id=inv.id,
+            )
+            if getattr(inv, "invited_by_user_id", None):
+                invited_by = db.query(User).filter(User.id == inv.invited_by_user_id).first()
+                if invited_by and invited_by.role == UserRole.tenant:
+                    create_alert_for_user(
+                        db,
+                        inv.invited_by_user_id,
+                        "invitation_accepted",
+                        "Guest accepted your invitation",
+                        f"A guest accepted your invitation for {property_name}.",
+                        severity="info",
+                        property_id=inv.property_id,
+                        stay_id=stay.id,
+                        invitation_id=inv.id,
+                    )
+        except Exception as e:
+            logging.getLogger(__name__).warning("Failed to create invitation_accepted dashboard alerts (register): %s", e)
+        db.commit()
     elif target_role == UserRole.guest and code and inv:
         # Invite provided but not signed: add to pending so dashboard shows agreement modal
         pending = GuestPendingInvite(user_id=user.id, invitation_id=inv.id)
@@ -1969,6 +2013,7 @@ def accept_invite(
         inv.status = "accepted"
         prev_token_state = getattr(inv, "token_state", None) or "STAGED"
         inv.token_state = "BURNED"
+        db.add(inv)
         if sig and sig.used_by_user_id is None:
             sig.used_by_user_id = current_user.id
             sig.used_at = datetime.now(timezone.utc)
@@ -1976,8 +2021,18 @@ def accept_invite(
             GuestPendingInvite.user_id == current_user.id,
             GuestPendingInvite.invitation_id == inv.id,
         ).delete(synchronize_session="fetch")
-        db.commit()
-        db.refresh(ta)
+        try:
+            create_alert_for_owner_and_managers(
+                db,
+                inv.property_id,
+                "tenant_accepted",
+                "Tenant accepted invitation",
+                "A tenant accepted the invitation and is now assigned to the unit.",
+                severity="info",
+                invitation_id=inv.id,
+            )
+        except Exception as e:
+            logging.getLogger(__name__).warning("Failed to create tenant_accepted dashboard alert: %s", e)
         ip = request.client.host if request.client else None
         ua = (request.headers.get("user-agent") or "").strip() or None
         create_log(
@@ -2000,13 +2055,15 @@ def accept_invite(
             target_object_type="TenantAssignment",
             target_object_id=ta.id,
             property_id=inv.property_id,
+            unit_id=inv.unit_id,
             stay_id=None,
             invitation_id=inv.id,
             actor_user_id=current_user.id,
-            meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id if sig else None},
+            meta={"invitation_code": code, "token_state_previous": prev_token_state, "token_state_new": "BURNED", "signature_id": sig.id if sig else None, "tenant_email": current_user.email},
             ip_address=ip,
             user_agent=ua,
         )
+        db.flush()
         db.commit()
         return {"status": "success", "message": "Invitation accepted"}
 
@@ -2093,6 +2150,37 @@ def accept_invite(
         ip_address=ip,
         user_agent=ua,
     )
+    _prop_for_alert = db.query(Property).filter(Property.id == inv.property_id).first()
+    _property_name = "Property"
+    if _prop_for_alert:
+        _property_name = (_prop_for_alert.name or "").strip() or (f"{getattr(_prop_for_alert, 'city', '')}, {getattr(_prop_for_alert, 'state', '')}".strip(", ") if (getattr(_prop_for_alert, "city", None) or getattr(_prop_for_alert, "state", None)) else "") or "Property"
+    try:
+        create_alert_for_owner_and_managers(
+            db,
+            inv.property_id,
+            "invitation_accepted",
+            "Guest accepted invitation",
+            f"A guest accepted the invitation and a stay was created for {_property_name}.",
+            severity="info",
+            stay_id=stay.id,
+            invitation_id=inv.id,
+        )
+        if getattr(inv, "invited_by_user_id", None):
+            invited_by = db.query(User).filter(User.id == inv.invited_by_user_id).first()
+            if invited_by and invited_by.role == UserRole.tenant:
+                create_alert_for_user(
+                    db,
+                    inv.invited_by_user_id,
+                    "invitation_accepted",
+                    "Guest accepted your invitation",
+                    f"A guest accepted your invitation for {_property_name}.",
+                    severity="info",
+                    property_id=inv.property_id,
+                    stay_id=stay.id,
+                    invitation_id=inv.id,
+                )
+    except Exception as e:
+        logging.getLogger(__name__).warning("Failed to create invitation_accepted dashboard alerts (accept-invite): %s", e)
     db.commit()
     _prop = db.query(Property).filter(Property.id == inv.property_id).first()
     if _prop:

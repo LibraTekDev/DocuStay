@@ -30,6 +30,7 @@ from app.services.notifications import (
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_SHIELD_MODE, CATEGORY_DEAD_MANS_SWITCH
 from app.services.event_ledger import create_ledger_event, ACTION_OVERSTAY_OCCURRED, ACTION_DMS_48H_ALERT, ACTION_DMS_AUTO_EXECUTED, ACTION_SHIELD_MODE_ON, ACTION_VACANT_MONITORING_NO_RESPONSE
 from app.services.billing import sync_subscription_quantities
+from app.services.dashboard_alerts import create_alert_for_owner_and_managers, create_alert_for_user
 from app.config import get_settings
 
 settings = get_settings()
@@ -124,6 +125,18 @@ def send_overstay_alerts_and_log(db: Session) -> None:
             stay_id=stay.id,
             meta={"guest_id": stay.guest_id, "owner_id": stay.owner_id, "stay_end_date": end_str},
         )
+        create_alert_for_owner_and_managers(
+            db, stay.property_id, "overstay",
+            "Overstay occurred",
+            f"Stay end date ({end_str}) has passed. Guest {guest_name} has not checked out. Emails sent to owner and guest.",
+            severity="urgent", stay_id=stay.id, meta={"stay_end_date": end_str, "guest_name": guest_name},
+        )
+        create_alert_for_user(
+            db, stay.guest_id, "overstay",
+            "Overstay at " + property_name,
+            f"Your stay end date ({end_str}) has passed. Please coordinate with the property owner to check out or extend.",
+            severity="urgent", property_id=stay.property_id, stay_id=stay.id, meta={"stay_end_date": end_str},
+        )
         db.commit()
 
 
@@ -138,7 +151,7 @@ def get_stays_approaching_limit(db: Session, days_before: int | None = None) -> 
 
 
 def send_legal_warnings_for_stay(stay: Stay, db: Session, statute_ref: str) -> None:
-    """Send email to owner and guest with legal warning (Module G)."""
+    """Send email to owner and guest with legal warning (Module G). Also create dashboard alerts."""
     from app.models.guest import GuestProfile
 
     owner = db.query(User).filter(User.id == stay.owner_id).first()
@@ -165,6 +178,21 @@ def send_legal_warnings_for_stay(stay: Stay, db: Session, statute_ref: str) -> N
         statute_ref=statute_ref,
         is_owner=False,
     )
+    prop = db.query(Property).filter(Property.id == stay.property_id).first()
+    property_name = _get_property_name(db, prop)
+    create_alert_for_owner_and_managers(
+        db, stay.property_id, "nearing_expiration",
+        "Stay nearing end date – legal notice",
+        f"Stay for {guest_name} at {property_name} ends {end_str}. Regional limits apply ({statute_ref}). Email sent to you and guest.",
+        severity="warning", stay_id=stay.id, meta={"stay_end_date": end_str, "statute_ref": statute_ref},
+    )
+    create_alert_for_user(
+        db, stay.guest_id, "nearing_expiration",
+        "Stay nearing end date",
+        f"Your stay at {property_name} ends {end_str}. Regional limits apply. Please coordinate with the property owner.",
+        severity="warning", property_id=stay.property_id, stay_id=stay.id, meta={"stay_end_date": end_str},
+    )
+    db.commit()
 
 
 def _dms_already_logged(
@@ -511,6 +539,12 @@ def run_dead_mans_switch_job(db: Session) -> None:
             stay_id=stay.id,
             meta={"guest_id": stay.guest_id, "owner_id": stay.owner_id},
         )
+        create_alert_for_owner_and_managers(
+            db, stay.property_id, "dms_48h",
+            "Dead Man's Switch: 48h before lease end",
+            f"Stay for {_get_guest_name(db, stay)} at {_get_property_name(db, prop)} ends {stay.stay_end_date.isoformat()}. Please confirm checkout or renewal in DocuStay within 48 hours.",
+            severity="warning", stay_id=stay.id, meta={"stay_end_date": stay.stay_end_date.isoformat()},
+        )
         db.commit()
 
     # 1.5) Last day of guest's stay: activate Shield Mode for the property (any checked-in stay ending today)
@@ -564,6 +598,13 @@ def run_dead_mans_switch_job(db: Session) -> None:
                 )
             except Exception:
                 pass
+        create_alert_for_owner_and_managers(
+            db, prop_id, "shield_on",
+            "Shield Mode activated (last day of stay)",
+            f"Shield Mode was turned on for {_get_property_name(db, prop)} (last day of stay).",
+            severity="info", stay_id=stay_for_prop.id, meta={},
+        )
+        db.commit()
 
     # 2) Lease end date = today (urgent; only for checked-in stays)
     for stay in (
@@ -601,6 +642,12 @@ def run_dead_mans_switch_job(db: Session) -> None:
             property_id=stay.property_id,
             stay_id=stay.id,
             meta={"guest_id": stay.guest_id, "owner_id": stay.owner_id},
+        )
+        create_alert_for_owner_and_managers(
+            db, stay.property_id, "dms_urgent",
+            "Dead Man's Switch: lease ends today",
+            f"Stay for {_get_guest_name(db, stay)} at {_get_property_name(db, prop)} ends today ({stay.stay_end_date.isoformat()}). Please confirm checkout or renewal in DocuStay.",
+            severity="urgent", stay_id=stay.id, meta={"stay_end_date": stay.stay_end_date.isoformat()},
         )
         db.commit()
 
@@ -696,9 +743,15 @@ def run_dead_mans_switch_job(db: Session) -> None:
                 )
             except Exception:
                 pass
+        create_alert_for_owner_and_managers(
+            db, stay.property_id, "dms_executed",
+            "Dead Man's Switch executed – action required",
+            f"No response within 48h after stay end. Property set to Unconfirmed; Shield Mode on. Guest: {guest_name}. Please set status (Vacated / Renewed / Holdover) in DocuStay within 24h.",
+            severity="urgent", stay_id=stay.id, meta={"stay_end_date": stay.stay_end_date.isoformat(), "guest_name": guest_name},
+        )
+        db.commit()
 
-
-# Vacant monitoring audit title (idempotency)
+    # Vacant monitoring audit title (idempotency)
 VACANT_MONITORING_FLIPPED = "Vacant monitoring: no response – status UNCONFIRMED"
 
 
@@ -791,6 +844,13 @@ def run_vacant_monitoring_job(db: Session) -> None:
                 )
             except Exception:
                 pass
+        create_alert_for_owner_and_managers(
+            db, prop.id, "vacant_monitoring",
+            "Vacant monitoring: no response – status set to Unconfirmed",
+            f"No response by deadline. Property status set to Unconfirmed; Shield Mode turned on.",
+            severity="warning", meta={"occupancy_status_previous": prev_status},
+        )
+        db.commit()
 
 
 DMS_24H_UNCONFIRMED_TO_UNKNOWN = "DMS: 24h no response – status set to Unknown"
@@ -864,6 +924,20 @@ def mark_expired_guest_authorizations(db: Session) -> None:
             stay_id=s.id,
             invitation_id=s.invitation_id,
             meta={"message": "Guest authorization expired", "stay_end_date": str(s.stay_end_date)},
+        )
+        prop = db.query(Property).filter(Property.id == s.property_id).first()
+        property_name = _get_property_name(db, prop)
+        create_alert_for_owner_and_managers(
+            db, s.property_id, "expired",
+            "Guest authorization expired",
+            f"Stay end date ({s.stay_end_date}) has passed; guest has not checked out. Authorization is now expired.",
+            severity="info", stay_id=s.id, meta={"stay_end_date": str(s.stay_end_date)},
+        )
+        create_alert_for_user(
+            db, s.guest_id, "expired",
+            "Stay authorization expired",
+            f"Your stay at {property_name} ended on {s.stay_end_date}. Your authorization is now expired. Please coordinate with the property owner if you need to extend.",
+            severity="info", property_id=s.property_id, stay_id=s.id, meta={"stay_end_date": str(s.stay_end_date)},
         )
     db.commit()
 

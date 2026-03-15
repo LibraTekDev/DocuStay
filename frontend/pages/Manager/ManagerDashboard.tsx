@@ -10,6 +10,7 @@ import { ModeSwitcher } from '../../components/ModeSwitcher';
 import Settings from '../Settings/Settings';
 import HelpCenter from '../Support/HelpCenter';
 import { InvitationsTabContent } from '../../components/InvitationsTabContent';
+import { DashboardAlertsPanel } from '../../components/DashboardAlertsPanel';
 
 interface PropertySummary {
   id: number;
@@ -289,6 +290,10 @@ const ManagerDashboard: React.FC<{
               )}
             </header>
 
+      {activeTab !== 'settings' && activeTab !== 'help' && (
+        <DashboardAlertsPanel role="property_manager" className="mb-6" limit={50} />
+      )}
+
       {activeTab === 'guests' && contextMode === 'personal' && (
         <Card className="p-6">
           <h2 className="font-semibold text-gray-900 mb-4">Guests</h2>
@@ -456,15 +461,17 @@ const ManagerDashboard: React.FC<{
         </Card>
       )}
 
-      {activeTab === 'properties' && (loading ? (
-        <div className="text-center py-12 text-slate-500">Loading...</div>
-      ) : properties.length === 0 ? (
-        <Card className="p-8 text-center">
-          <p className="text-slate-600">No properties assigned yet.</p>
-          <p className="text-sm text-slate-500 mt-2">Owners can assign you to manage their properties.</p>
-        </Card>
-      ) : (
+      {activeTab === 'properties' && (
         <div className="space-y-6">
+          {loading ? (
+            <div className="text-center py-12 text-slate-500">Loading...</div>
+          ) : properties.length === 0 ? (
+            <Card className="p-8 text-center">
+              <p className="text-slate-600">No properties assigned yet.</p>
+              <p className="text-sm text-slate-500 mt-2">Owners can assign you to manage their properties.</p>
+            </Card>
+          ) : (
+            <>
           {contextMode === 'business' && (
             <div className="grid md:grid-cols-2 lg:grid-cols-5 gap-6 mb-6">
               <Card className="p-6 border-l-4 border-blue-500">
@@ -693,8 +700,10 @@ const ManagerDashboard: React.FC<{
               );
             })}
           </div>
+            </>
+          )}
         </div>
-      ))}
+      )}
 
       {showSelectPropertyUnitModal && (
         <Modal

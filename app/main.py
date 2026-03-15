@@ -22,7 +22,7 @@ from app.models import (  # noqa: F401
     PropertyUtilityProvider, PropertyAuthorityLetter,
     Unit, PropertyManagerAssignment, TenantAssignment, ResidentMode, ResidentPresence,
     StayPresence, PresenceAwayPeriod,
-    ManagerInvitation,
+    ManagerInvitation, DashboardAlert, NotificationAttempt,
 )
 from app.routers import auth, identity, owners, guests, stays, region_rules, jle, dashboard, notifications, agreements, billing_webhook, public, admin, managers
 

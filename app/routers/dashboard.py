@@ -19,7 +19,7 @@ from app.models.owner import Property, OwnerProfile, USAT_TOKEN_STAGED, USAT_TOK
 from app.models.guest_pending_invite import GuestPendingInvite
 from app.models.agreement_signature import AgreementSignature
 from app.models.region_rule import StayClassification, RiskLevel
-from app.schemas.dashboard import OwnerStayView, OwnerInvitationView, GuestStayView, GuestPendingInviteView, JurisdictionStatuteInDashboard, OwnerAuditLogEntry, BillingResponse, BillingInvoiceView, BillingPaymentView, BillingPortalSessionResponse, PortfolioLinkResponse
+from app.schemas.dashboard import OwnerStayView, OwnerInvitationView, GuestStayView, GuestPendingInviteView, JurisdictionStatuteInDashboard, OwnerAuditLogEntry, BillingResponse, BillingInvoiceView, BillingPaymentView, BillingPortalSessionResponse, PortfolioLinkResponse, DashboardAlertView
 from app.services.jle import resolve_jurisdiction
 from app.services.jurisdiction_sot import get_jurisdiction_for_property
 from app.services.audit_log import create_log, CATEGORY_STATUS_CHANGE, CATEGORY_PRESENCE, CATEGORY_DEAD_MANS_SWITCH, CATEGORY_FAILED_ATTEMPT, CATEGORY_BILLING, CATEGORY_SHIELD_MODE
@@ -57,10 +57,12 @@ from app.services.event_ledger import (
 from app.services.invitation_cleanup import get_invitation_expire_cutoff
 from app.services.billing import sync_subscription_quantities
 from app.services.notifications import send_vacate_12h_notice, send_owner_guest_checkout_email, send_guest_checkout_confirmation_email, send_owner_guest_cancelled_stay_email, send_removal_notice_to_guest, send_removal_confirmation_to_owner, send_dead_mans_switch_enabled_notification, send_shield_mode_turned_on_notification, send_shield_mode_turned_off_notification, send_dms_turned_off_notification
+from app.services.dashboard_alerts import create_alert_for_owner_and_managers, create_alert_for_user
 from app.schemas.jle import JLEInput
 from app.dependencies import get_current_user, require_owner, require_owner_onboarding_complete, require_guest, require_tenant, require_guest_or_tenant, require_owner_or_manager, require_property_manager, require_property_manager_identity_verified, get_context_mode
 from app.models.audit_log import AuditLog
 from app.models.event_ledger import EventLedger
+from app.models.dashboard_alert import DashboardAlert
 from app.services.agreements import fill_guest_signature_in_content, agreement_content_to_pdf
 from app.services.dropbox_sign import get_signed_pdf
 from app.models.unit import Unit
@@ -69,10 +71,12 @@ from app.models.property_manager_assignment import PropertyManagerAssignment
 from app.models.resident_presence import ResidentPresence, PresenceStatus
 from app.models.owner_poa_signature import OwnerPOASignature
 from app.models.stay_presence import StayPresence, PresenceAwayPeriod
-from app.services.permissions import can_access_unit, can_access_property, can_confirm_occupancy, can_perform_action, Action, get_owner_personal_mode_units, get_manager_personal_mode_units
+from app.services.permissions import can_access_unit, can_access_property, can_confirm_occupancy, can_perform_action, Action, get_owner_personal_mode_units, get_manager_personal_mode_units, get_owner_personal_mode_property_ids, get_manager_personal_mode_property_ids
 from app.services.privacy_lanes import (
     is_tenant_lane_invitation,
     is_tenant_lane_stay,
+    get_tenant_lane_invitation_ids,
+    get_tenant_lane_stay_ids,
     filter_property_lane_invitations_for_owner,
     filter_property_lane_stays_for_owner,
     filter_property_lane_invitations_for_manager,
@@ -94,6 +98,142 @@ class TenantGuestInvitationCreate(BaseModel):
 class BulkShieldModeRequest(BaseModel):
     property_ids: list[int] = Field(..., description="Property IDs to update")
     shield_mode_enabled: bool = Field(..., description="True to turn Shield ON, False to turn OFF")
+
+
+# Alert types each role is allowed to see (only role-relevant alerts are returned).
+_ALERT_TYPES_BY_ROLE = {
+    UserRole.owner: {
+        "overstay", "nearing_expiration", "dms_48h", "dms_urgent", "dms_executed",
+        "shield_on", "revoked", "renewed", "vacated", "holdover", "expired",
+        "invitation_expired", "invitation_accepted", "tenant_accepted",
+        "vacant_monitoring", "removal_initiated",
+    },
+    UserRole.property_manager: {
+        "overstay", "nearing_expiration", "dms_48h", "dms_urgent", "dms_executed",
+        "shield_on", "revoked", "renewed", "vacated", "holdover", "expired",
+        "invitation_expired", "invitation_accepted", "tenant_accepted",
+        "vacant_monitoring", "removal_initiated",
+    },
+    UserRole.guest: {"overstay", "nearing_expiration", "revoked", "expired", "removal_initiated"},
+    UserRole.tenant: {"invitation_expired", "invitation_accepted"},  # invite expired; guest accepted invite you created
+    UserRole.admin: None,  # None = no filter, show all
+}
+
+
+@router.get("/alerts", response_model=list[DashboardAlertView])
+def list_alerts(
+    unread_only: bool = False,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    context_mode: str = Depends(get_context_mode),
+):
+    """List in-platform dashboard alerts for the current user. Only alerts relevant to the user's role are returned.
+    For owner and property_manager: business mode shows alerts for business properties only; personal mode shows
+    only alerts for properties in personal mode (ResidentMode). Tenant-lane notifications never show to owners/managers."""
+    q = db.query(DashboardAlert).filter(DashboardAlert.user_id == current_user.id)
+    if unread_only:
+        q = q.filter(DashboardAlert.read_at.is_(None))
+    allowed_types = _ALERT_TYPES_BY_ROLE.get(current_user.role)
+    if allowed_types is not None:
+        q = q.filter(DashboardAlert.alert_type.in_(allowed_types))
+    q = q.order_by(DashboardAlert.created_at.desc()).limit(limit)
+    alerts = q.all()
+
+    # Scope by context mode for owner and property_manager: business vs personal property set; exclude tenant-lane in both modes
+    if current_user.role in (UserRole.owner, UserRole.property_manager):
+        if context_mode == "business":
+            if current_user.role == UserRole.owner:
+                profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+                allowed_property_ids = (
+                    [p.id for p in db.query(Property).filter(Property.owner_profile_id == profile.id, Property.deleted_at.is_(None)).all()]
+                    if profile is not None else []
+                )
+            else:
+                allowed_property_ids = [
+                    r[0] for r in db.query(PropertyManagerAssignment.property_id).filter(
+                        PropertyManagerAssignment.user_id == current_user.id,
+                    ).all()
+                ]
+            # Business: include alerts with no property_id (e.g. billing) or property_id in business set
+            allowed_property_ids_set = set(allowed_property_ids)
+            alerts = [a for a in alerts if a.property_id is None or a.property_id in allowed_property_ids_set]
+        else:
+            # Personal mode: only alerts for properties in personal mode; do not show business-only or tenant-lane
+            if current_user.role == UserRole.owner:
+                allowed_property_ids = get_owner_personal_mode_property_ids(db, current_user.id)
+            else:
+                allowed_property_ids = get_manager_personal_mode_property_ids(db, current_user.id)
+            # If owner/manager has no personal-mode properties, fall back to business set so they still see e.g. tenant_accepted
+            business_property_ids_set: set[int] = set()
+            if not allowed_property_ids:
+                if current_user.role == UserRole.owner:
+                    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+                    allowed_property_ids = (
+                        [p.id for p in db.query(Property).filter(Property.owner_profile_id == profile.id, Property.deleted_at.is_(None)).all()]
+                        if profile is not None else []
+                    )
+                else:
+                    allowed_property_ids = [
+                        r[0] for r in db.query(PropertyManagerAssignment.property_id).filter(
+                            PropertyManagerAssignment.user_id == current_user.id,
+                        ).all()
+                    ]
+            else:
+                # In personal mode we have personal set; still include business set for tenant_accepted/invitation_accepted so owner/manager always see those
+                if current_user.role == UserRole.owner:
+                    profile = db.query(OwnerProfile).filter(OwnerProfile.user_id == current_user.id).first()
+                    business_property_ids_set = (
+                        set(p.id for p in db.query(Property).filter(Property.owner_profile_id == profile.id, Property.deleted_at.is_(None)).all())
+                        if profile is not None else set()
+                    )
+                else:
+                    business_property_ids_set = {
+                        r[0] for r in db.query(PropertyManagerAssignment.property_id).filter(
+                            PropertyManagerAssignment.user_id == current_user.id,
+                        ).all()
+                    }
+            allowed_property_ids_set = set(allowed_property_ids)
+            # In personal mode: show if in personal set, or if tenant_accepted/invitation_accepted and property in business set
+            _property_alert_types = ("tenant_accepted", "invitation_accepted")
+            alerts = [
+                a for a in alerts
+                if a.property_id is not None
+                and (
+                    a.property_id in allowed_property_ids_set
+                    or (a.alert_type in _property_alert_types and a.property_id in business_property_ids_set)
+                )
+            ]
+
+        # Exclude tenant-lane: owners/managers never see notifications about tenant-invited guests
+        inv_ids = [a.invitation_id for a in alerts if getattr(a, "invitation_id", None) is not None]
+        stay_ids = [a.stay_id for a in alerts if getattr(a, "stay_id", None) is not None]
+        tenant_inv_ids = get_tenant_lane_invitation_ids(db, inv_ids) if inv_ids else set()
+        tenant_stay_ids = get_tenant_lane_stay_ids(db, stay_ids) if stay_ids else set()
+        alerts = [
+            a for a in alerts
+            if getattr(a, "invitation_id", None) not in tenant_inv_ids and getattr(a, "stay_id", None) not in tenant_stay_ids
+        ]
+
+    return [DashboardAlertView.model_validate(a) for a in alerts]
+
+
+@router.patch("/alerts/{alert_id}/read", response_model=DashboardAlertView)
+def mark_alert_read(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Mark a dashboard alert as read."""
+    alert = db.query(DashboardAlert).filter(DashboardAlert.id == alert_id, DashboardAlert.user_id == current_user.id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if alert.read_at is None:
+        alert.read_at = datetime.now(timezone.utc)
+        db.add(alert)
+        db.commit()
+        db.refresh(alert)
+    return DashboardAlertView.model_validate(alert)
 
 
 @router.get("/guest/pending-invites", response_model=list[GuestPendingInviteView])
@@ -1148,6 +1288,20 @@ def revoke_stay(
             revoked_at=now.strftime("%Y-%m-%d %H:%M UTC"),
             invite_code=invite_code or "",
         )
+    create_alert_for_user(
+        db, stay.guest_id, "revoked",
+        "Stay authorization revoked",
+        f"Your stay at {property_name} has been revoked by the property owner. You must vacate by {vacate_by_iso}. Your utility access (USAT token) has been revoked.",
+        severity="urgent", property_id=stay.property_id, stay_id=stay.id,
+        meta={"vacate_by": vacate_by_iso, "revoked_at": now.strftime("%Y-%m-%d %H:%M UTC")},
+    )
+    create_alert_for_owner_and_managers(
+        db, stay.property_id, "revoked",
+        "Stay revoked",
+        f"You revoked stay authorization for {guest_name} at {property_name}. Guest must vacate by {vacate_by_iso}.",
+        severity="info", stay_id=stay.id, meta={"vacate_by": vacate_by_iso, "guest_name": guest_name},
+    )
+    db.commit()
     return {"status": "success", "message": "Stay revoked. Guest must vacate within 12 hours. Email sent."}
 
 
@@ -1286,6 +1440,19 @@ def initiate_removal(
         ip_address=ip,
         user_agent=ua,
     )
+    create_alert_for_user(
+        db, stay.guest_id, "removal_initiated",
+        "Formal removal initiated",
+        f"The property owner has initiated formal removal for your stay at {property_name}. Your utility access (USAT token) has been revoked. Please vacate as required.",
+        severity="urgent", property_id=stay.property_id, stay_id=stay.id,
+        meta={"revoked_at": now.strftime("%Y-%m-%d %H:%M UTC")},
+    )
+    create_alert_for_owner_and_managers(
+        db, stay.property_id, "removal_initiated",
+        "Removal initiated",
+        f"You initiated formal removal for {guest_name} at {property_name}. USAT token revoked. Guest and owner notified.",
+        severity="info", stay_id=stay.id, meta={"guest_name": guest_name},
+    )
     db.commit()
 
     return {
@@ -1413,6 +1580,13 @@ def confirm_occupancy_status(
                 send_dms_turned_off_notification(owner_email, manager_emails, property_name, guest_name, stay.stay_end_date.isoformat(), reason="unit vacated")
             except Exception:
                 pass
+        create_alert_for_owner_and_managers(
+            db, stay.property_id, "vacated",
+            "Unit vacated",
+            f"Stay for {guest_name} at {property_name} was confirmed as vacated. Occupancy status set to Vacant.",
+            severity="info", stay_id=stay.id, meta={"guest_name": guest_name},
+        )
+        db.commit()
         return {"status": "success", "message": "Unit marked as vacated.", "occupancy_status": "vacant"}
 
     if action == "renewed":
@@ -1498,6 +1672,13 @@ def confirm_occupancy_status(
             meta=renewed_meta,
         )
         db.commit()
+        create_alert_for_owner_and_managers(
+            db, stay.property_id, "renewed",
+            "Lease renewed",
+            f"Stay for {guest_name} at {property_name} was renewed to {new_end.isoformat()}. Occupancy status remains Occupied.",
+            severity="info", stay_id=stay.id, meta={"guest_name": guest_name, "new_lease_end_date": new_end.isoformat()},
+        )
+        db.commit()
         return {"status": "success", "message": "Lease renewed.", "occupancy_status": "occupied", "new_lease_end_date": new_end.isoformat()}
 
     # holdover
@@ -1520,6 +1701,12 @@ def confirm_occupancy_status(
         user_agent=ua,
         meta={"occupancy_status_previous": prev_status, "occupancy_status_new": OccupancyStatus.occupied.value, "action": "holdover"},
     )
+    create_alert_for_owner_and_managers(
+        db, stay.property_id, "holdover",
+        "Holdover confirmed",
+        f"Stay for {guest_name} at {property_name} was confirmed as holdover (guest still in unit). Occupancy status set to Occupied.",
+        severity="info", stay_id=stay.id, meta={"guest_name": guest_name},
+    )
     db.commit()
     return {"status": "success", "message": "Holdover confirmed.", "occupancy_status": "occupied"}
 
@@ -1529,8 +1716,8 @@ def guest_stays(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_guest_or_tenant),
 ):
-    """Guest/tenant view: property, approved stay dates, region classification, legal notice and laws. All jurisdiction content from Jurisdiction SOT (same as live property page)."""
-    stays = db.query(Stay).filter(Stay.guest_id == current_user.id).all()
+    """Guest/tenant view: property, approved stay dates, region classification, legal notice and laws. All jurisdiction content from Jurisdiction SOT (same as live property page). All stays for this guest/tenant are returned (up to _GUEST_STAYS_LIMIT)."""
+    stays = db.query(Stay).filter(Stay.guest_id == current_user.id).order_by(Stay.stay_start_date.desc()).limit(_GUEST_STAYS_LIMIT).all()
     out = []
     for s in stays:
         prop = db.query(Property).filter(Property.id == s.property_id).first()
@@ -2257,17 +2444,23 @@ def _tenant_unit_item_from_invitation(db: Session, inv: Invitation, current_user
     }
 
 
+# Max units/stays to return for tenant dashboard (show all; no artificial cap of 2).
+_TENANT_UNIT_LIMIT = 500
+_GUEST_STAYS_LIMIT = 500
+
+
 @router.get("/tenant/unit")
 def tenant_unit(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_tenant),
 ):
-    """Return all of the tenant's assigned units plus pending tenant invitations addressed to them. Only filter: user_id (tenant id)."""
+    """Return all of the tenant's assigned units plus pending tenant invitations addressed to them. Only filter: user_id (tenant id). No limit—all assignments are returned (up to _TENANT_UNIT_LIMIT)."""
     assignments = (
         db.query(TenantAssignment)
         .join(Unit)
         .filter(TenantAssignment.user_id == current_user.id)
         .order_by(TenantAssignment.start_date.desc())
+        .limit(_TENANT_UNIT_LIMIT)
         .all()
     )
     units = [_tenant_unit_item(db, ta, current_user) for ta in assignments]

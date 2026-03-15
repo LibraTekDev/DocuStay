@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Button, Input, Modal } from '../../components/UI';
 import { InviteGuestModal } from '../../components/InviteGuestModal';
 import HelpCenter from '../Support/HelpCenter';
+import { DashboardAlertsPanel } from '../../components/DashboardAlertsPanel';
 import { UserSession } from '../../types';
 import { dashboardApi, authApi, invitationsApi, APP_ORIGIN } from '../../services/api';
 import type { OwnerInvitationView, OwnerAuditLogEntry, GuestPendingInviteView, GuestStayView, TenantSignedDocument } from '../../services/api';
@@ -655,6 +656,8 @@ const TenantDashboard: React.FC<{
           </select>
         </div>
 
+        {activeTab !== 'help' && <DashboardAlertsPanel role="tenant" className="mb-6" limit={50} />}
+
         {/* Property info tab */}
         {activeTab === 'property' && (
           <div className="space-y-6 w-full">
@@ -1173,7 +1176,7 @@ const TenantDashboard: React.FC<{
                     const addressDisplay = card.property_address || `${card.property_name}${card.unit_label ? ` — Unit ${card.unit_label}` : ''}`;
                     return (
                       <div
-                        key={card.unit_id}
+                        key={`unit-${card.unit_id}-${card.stay_start_date ?? ''}-${card.stay_end_date ?? ''}`}
                         className={`rounded-xl border bg-white text-left transition-all ${
                           isSelected
                             ? 'border-slate-300 border-l-4 border-l-[#6B90F2] bg-[#6B90F2]/10 shadow-sm'

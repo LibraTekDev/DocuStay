@@ -14,6 +14,7 @@ from app.services.event_ledger import (
     ACTION_INVITATION_EXPIRED,
     ACTION_MANAGER_INVITATION_EXPIRED,
 )
+from app.services.dashboard_alerts import create_alert_for_owner_and_managers, create_alert_for_user
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -66,6 +67,14 @@ def run_invitation_cleanup_job() -> None:
                     invitation_id=inv.id,
                     meta={"invitation_id": inv.id, "invitation_code": getattr(inv, "invitation_code", None), "job": "invitation_cleanup"},
                 )
+                pid = getattr(inv, "property_id", None)
+                if pid:
+                    create_alert_for_owner_and_managers(
+                        db, pid, "invitation_expired",
+                        "Invitation expired",
+                        f"Guest invitation (code {getattr(inv, 'invitation_code', '') or inv.id}) was not accepted in time and has been marked expired.",
+                        severity="info", invitation_id=inv.id, meta={"invitation_code": getattr(inv, "invitation_code", None)},
+                    )
             db.commit()
             logger.info("Invitation cleanup job: marked %d pending guest invitation(s) as expired (status=expired, token_state=EXPIRED).", len(invs))
         else:
@@ -106,6 +115,12 @@ def run_manager_invitation_cleanup_job() -> None:
                     target_object_id=inv.id,
                     property_id=inv.property_id,
                     meta={"manager_invitation_id": inv.id, "email": inv.email, "job": "manager_invitation_cleanup"},
+                )
+                create_alert_for_owner_and_managers(
+                    db, inv.property_id, "invitation_expired",
+                    "Manager invitation expired",
+                    f"Manager invitation to {inv.email} was not used in time and has been marked expired.",
+                    severity="info", meta={"email": inv.email},
                 )
             db.commit()
             logger.info("Manager invitation cleanup job: marked %d pending invitation(s) as expired.", len(invs))

@@ -291,3 +291,29 @@ def get_manager_personal_mode_units(db: Session, user_id: int) -> list[int]:
         ResidentMode.mode == ResidentModeType.manager_personal,
     ).all()
     return [r[0] for r in rows]
+
+
+def get_owner_personal_mode_property_ids(db: Session, user_id: int) -> list[int]:
+    """Return property IDs where this owner has Personal Mode (ResidentMode.owner_personal on at least one unit).
+    Used to scope dashboard alerts in personal mode: only alerts for these properties are shown."""
+    rows = (
+        db.query(Unit.property_id)
+        .join(ResidentMode, ResidentMode.unit_id == Unit.id)
+        .filter(
+            ResidentMode.user_id == user_id,
+            ResidentMode.mode == ResidentModeType.owner_personal,
+        )
+        .distinct()
+        .all()
+    )
+    return [r[0] for r in rows]
+
+
+def get_manager_personal_mode_property_ids(db: Session, user_id: int) -> list[int]:
+    """Return property IDs where this manager has Personal Mode (lives on-site).
+    Used to scope dashboard alerts in personal mode: only alerts for these properties are shown."""
+    unit_ids = get_manager_personal_mode_units(db, user_id)
+    if not unit_ids:
+        return []
+    rows = db.query(Unit.property_id).filter(Unit.id.in_(unit_ids)).distinct().all()
+    return [r[0] for r in rows]

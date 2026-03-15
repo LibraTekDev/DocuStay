@@ -13,6 +13,7 @@ import Settings from '../Settings/Settings';
 import HelpCenter from '../Support/HelpCenter';
 import { ModeSwitcher } from '../../components/ModeSwitcher';
 import { InvitationsTabContent } from '../../components/InvitationsTabContent';
+import { DashboardAlertsPanel, DASHBOARD_ALERTS_REFRESH_EVENT } from '../../components/DashboardAlertsPanel';
 
 function daysLeft(endDateStr: string): number {
   const end = new Date(endDateStr);
@@ -201,6 +202,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
       setRevokeConfirmStay(null);
       setRevokeSuccessGuest(revokeConfirmStay.guest_name);
       loadData();
+      window.dispatchEvent(new CustomEvent(DASHBOARD_ALERTS_REFRESH_EVENT));
     } catch (e) {
       notify('error', (e as Error)?.message ?? 'Failed to revoke stay.');
     } finally {
@@ -221,6 +223,7 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
       notify('success', 'Removal initiated. Guest and owner notified via email.');
       setPacketModalStay(null);
       loadData();
+      window.dispatchEvent(new CustomEvent(DASHBOARD_ALERTS_REFRESH_EVENT));
     } catch (e) {
       notify('error', (e as Error)?.message ?? 'Failed to initiate removal.');
     } finally {
@@ -420,6 +423,10 @@ const OwnerDashboard: React.FC<{ user: UserSession; navigate: (v: string) => voi
               )}
             </div>
           </header>
+        )}
+
+        {activeTab !== 'settings' && activeTab !== 'help' && (
+          <DashboardAlertsPanel role="owner" className="mb-6" limit={50} />
         )}
 
         {error && (

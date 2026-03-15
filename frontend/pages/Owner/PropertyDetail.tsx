@@ -7,6 +7,7 @@ import { UserSession } from '../../types';
 import { JURISDICTION_RULES } from '../../services/jleService';
 import { propertiesApi, dashboardApi, APP_ORIGIN, emitPropertiesChanged, getContextMode, setContextMode, type Property, type OwnerStayView, type OwnerAuditLogEntry, type BillingResponse } from '../../services/api';
 import { ModeSwitcher } from '../../components/ModeSwitcher';
+import { DASHBOARD_ALERTS_REFRESH_EVENT } from '../../components/DashboardAlertsPanel';
 import { copyToClipboard } from '../../utils/clipboard';
 import { getTodayLocal, formatStayDuration } from '../../utils/dateUtils';
 import { toUserFriendlyInvitationError } from '../../utils/invitationErrors';
@@ -881,6 +882,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                             await dashboardApi.confirmOccupancyStatus(stayForOccupancyActions.stay_id, 'vacated');
                             notify('success', 'Unit marked as vacated.');
                             loadData();
+                            window.dispatchEvent(new CustomEvent(DASHBOARD_ALERTS_REFRESH_EVENT));
                           } catch (e) {
                             notify('error', (e as Error)?.message ?? 'Failed to confirm.');
                           } finally {
@@ -911,6 +913,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                             await dashboardApi.confirmOccupancyStatus(stayForOccupancyActions.stay_id, 'holdover');
                             notify('success', 'Holdover confirmed.');
                             loadData();
+                            window.dispatchEvent(new CustomEvent(DASHBOARD_ALERTS_REFRESH_EVENT));
                           } catch (e) {
                             notify('error', (e as Error)?.message ?? 'Failed to confirm.');
                           } finally {
@@ -942,6 +945,7 @@ export const PropertyDetail: React.FC<{ propertyId: string; user: UserSession; n
                               notify('success', 'Lease renewed.');
                               setRenewEndDate('');
                               setConfirmOccupancyAction(null);
+                              window.dispatchEvent(new CustomEvent(DASHBOARD_ALERTS_REFRESH_EVENT));
                               loadData();
                             } catch (e) {
                               notify('error', (e as Error)?.message ?? 'Failed to confirm.');

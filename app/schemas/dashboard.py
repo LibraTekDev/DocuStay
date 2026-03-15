@@ -160,3 +160,21 @@ class PortfolioLinkResponse(BaseModel):
     """Owner portfolio public page: slug and hash path for building full URL."""
     portfolio_slug: str
     portfolio_url: str  # e.g. "portfolio/abc123" (hash part without #); frontend builds full URL
+
+
+class DashboardAlertView(BaseModel):
+    """In-platform dashboard alert (required for status changes; email/SMS are optional)."""
+    id: int
+    alert_type: str
+    title: str
+    message: str
+    severity: str  # info | warning | urgent
+    property_id: int | None = None
+    stay_id: int | None = None
+    invitation_id: int | None = None
+    read_at: datetime | None = None
+    created_at: datetime
+    meta: dict | None = None
+
+    class Config:
+        from_attributes = True

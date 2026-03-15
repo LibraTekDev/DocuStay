@@ -793,7 +793,32 @@ export interface BillingResponse {
   current_shield_count?: number | null;
 }
 
+/** In-platform dashboard alert (status changes: nearing expiration, renewed, revoked, expired). */
+export interface DashboardAlertView {
+  id: number;
+  alert_type: string;
+  title: string;
+  message: string;
+  severity: string;
+  property_id?: number | null;
+  stay_id?: number | null;
+  invitation_id?: number | null;
+  read_at?: string | null;
+  created_at: string;
+  meta?: Record<string, unknown> | null;
+}
+
 export const dashboardApi = {
+  /** List dashboard alerts for the current user. */
+  getAlerts: (params?: { unread_only?: boolean; limit?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.unread_only) sp.set("unread_only", "true");
+    if (params?.limit != null) sp.set("limit", String(params.limit));
+    const q = sp.toString();
+    return request<DashboardAlertView[]>(`/dashboard/alerts${q ? `?${q}` : ""}`);
+  },
+  markAlertRead: (alertId: number) =>
+    request<DashboardAlertView>(`/dashboard/alerts/${alertId}/read`, { method: "PATCH" }),
   ownerPersonalModeUnits: () => request<{ unit_ids: number[] }>("/dashboard/owner/personal-mode-units"),
   ownerPropertyPersonalModeUnit: (propertyId: number) =>
     request<{ unit_id: number | null }>(`/dashboard/owner/properties/${propertyId}/personal-mode-unit`),
