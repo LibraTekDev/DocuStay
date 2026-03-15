@@ -52,8 +52,15 @@ class UserCreate(BaseModel):
     @field_validator("phone")
     @classmethod
     def phone_valid(cls, v: str) -> str:
-        _validate_phone_digits(v or "")
-        return (v or "").strip()
+        s = (v or "").strip()
+        if not s:
+            return s
+        digits = _normalize_phone(s)
+        if len(digits) < PHONE_MIN_DIGITS:
+            raise ValueError(f"Phone number must have at least {PHONE_MIN_DIGITS} digits (e.g. 5551234567 or +1 555 123 4567).")
+        if len(digits) > PHONE_MAX_DIGITS:
+            raise ValueError(f"Phone number cannot exceed {PHONE_MAX_DIGITS} digits.")
+        return s
 
     @model_validator(mode="after")
     def passwords_match_and_agreed(self):
@@ -65,13 +72,23 @@ class UserCreate(BaseModel):
 
     @model_validator(mode="after")
     def account_type_fields(self):
-        """Validate individual owner fields."""
+        """Validate individual owner fields (only for owner signup)."""
+        if self.role != UserRole.owner:
+            return self
         at = self.account_type or AccountType.individual
         if at == AccountType.individual:
             if not (self.first_name or "").strip():
                 raise ValueError("First name is required.")
             if not (self.last_name or "").strip():
                 raise ValueError("Last name is required.")
+        return self
+
+    @model_validator(mode="after")
+    def owner_phone_required(self):
+        """Require phone with 10+ digits for owner signup."""
+        if self.role != UserRole.owner:
+            return self
+        _validate_phone_digits(self.phone or "")
         return self
 
 

@@ -161,8 +161,12 @@ def _owner_onboarding_complete(db: Session, user: User) -> bool:
 
 @router.post("/register")
 def register(data: UserCreate, db: Session = Depends(get_db)):
+    # Normalize email so "already registered" and storage are case-insensitive.
+    email = (data.email or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required.")
     # Same email can have both owner and guest accounts (unique on email+role).
-    existing_same_role = db.query(User).filter(User.email == data.email, User.role == data.role).first()
+    existing_same_role = db.query(User).filter(User.email == email, User.role == data.role).first()
     if existing_same_role:
         # Owner who hasn't finished onboarding can "continue" by submitting the form with correct password
         if existing_same_role.role == UserRole.owner and not _owner_onboarding_complete(db, existing_same_role):
@@ -171,7 +175,7 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
                     status_code=400,
                     detail="An account with this email exists but onboarding wasn't completed. Please log in with your password on the Owner Login page to continue.",
                 )
-            print(f"[Auth] Existing owner (incomplete onboarding): returning token for {data.email} — no verification email sent.", flush=True)
+            print(f"[Auth] Existing owner (incomplete onboarding): returning token for {email} — no verification email sent.", flush=True)
             token = create_access_token(existing_same_role.id, existing_same_role.email, existing_same_role.role)
             return Token(access_token=token, user=_user_to_response(existing_same_role, db))
         raise HTTPException(
@@ -182,7 +186,7 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
     # Owner: POA is linked after identity verification (separate step); do not require or claim here
     if data.role == UserRole.owner and data.poa_signature_id:
         _validate_and_claim_owner_poa(
-            db, data.poa_signature_id, data.email,
+            db, data.poa_signature_id, email,
             dropbox_incomplete_message="Please complete signing in Dropbox before completing signup.",
         )
 
@@ -190,14 +194,14 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
     if data.role == UserRole.owner:
         # Remove any existing pending owner for this email so they can start fresh (e.g. abandoned email verify or Stripe failed).
         existing_pending = db.query(PendingRegistration).filter(
-            PendingRegistration.email == data.email,
+            PendingRegistration.email == email,
             PendingRegistration.role == UserRole.owner,
         ).all()
         for p in existing_pending:
             db.delete(p)
         if existing_pending:
             db.commit()
-            print(f"[Auth] Removed {len(existing_pending)} existing pending owner(s) for {data.email} so signup can start fresh", flush=True)
+            print(f"[Auth] Removed {len(existing_pending)} existing pending owner(s) for {email} so signup can start fresh", flush=True)
 
         # Reload config so UI flow uses same .env as script (avoid stale cache)
         from app.services.notifications import _get_fresh_settings
@@ -217,7 +221,7 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
             "last_name": data.last_name or None,
         }
         pending = PendingRegistration(
-            email=data.email,
+            email=email,
             hashed_password=get_password_hash(data.password),
             role=UserRole.owner,
             full_name=data.full_name or None,
@@ -234,10 +238,10 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
         db.refresh(pending)
         _log_mailgun_status = _mailgun_configured()
         print(f"[Auth] Owner signup: Mailgun configured={_log_mailgun_status} domain={get_settings().mailgun_domain or '(none)'}", flush=True)
-        print(f"[Auth] Sending verification email to {data.email} (owner signup pending_id={pending.id})", flush=True)
+        print(f"[Auth] Sending verification email to {email} (owner signup pending_id={pending.id})", flush=True)
         try:
             # send_verification_email clears config cache and calls send_email -> _send_email_mailgun
-            sent = send_verification_email(data.email, code)
+            sent = send_verification_email(email, code)
         except Exception as e:
             print(f"[Auth] Verification email exception: {type(e).__name__}: {e}", flush=True)
             db.delete(pending)
@@ -246,7 +250,7 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
                 status_code=503,
                 detail="We could not send the verification email. Please check MAILGUN_API_KEY, MAILGUN_DOMAIN, and MAILGUN_FROM_EMAIL in .env, then restart the server and try again.",
             ) from e
-        print(f"[Auth] Verification email sent={sent} for {data.email}", flush=True)
+        print(f"[Auth] Verification email sent={sent} for {email}", flush=True)
         if not sent:
             db.delete(pending)
             db.commit()
@@ -261,7 +265,7 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
     if bypass_verification and data.role != UserRole.owner:
         # Guest with no mailgun: create user immediately
         user = User(
-            email=data.email,
+            email=email,
             hashed_password=get_password_hash(data.password),
             role=data.role,
             full_name=data.full_name or None,
@@ -292,7 +296,7 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
         code = _generate_verification_code()
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=VERIFICATION_CODE_EXPIRE_MINUTES)
         pending = PendingRegistration(
-            email=data.email,
+            email=email,
             hashed_password=get_password_hash(data.password),
             role=data.role,
             full_name=data.full_name or None,
@@ -310,11 +314,11 @@ def register(data: UserCreate, db: Session = Depends(get_db)):
         db.add(pending)
         db.commit()
         db.refresh(pending)
-        sent = send_verification_email(data.email, code)
+        sent = send_verification_email(email, code)
         if not sent:
             db.delete(pending)
             db.commit()
-            print(f"Verification email not sent to {data.email}. Check MAILGUN_* settings (domain, from_email).", flush=True)
+            print(f"Verification email not sent to {email}. Check MAILGUN_* settings (domain, from_email).", flush=True)
             raise HTTPException(
                 status_code=503,
                 detail="We could not send the verification email. Please check your email address and try again, or try again later. If the problem continues, check that Mailgun is configured with MAILGUN_DOMAIN and MAILGUN_FROM_EMAIL for your sending domain.",
